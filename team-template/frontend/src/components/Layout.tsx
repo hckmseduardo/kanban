@@ -2,6 +2,19 @@ import { Outlet, Link, useLocation } from 'react-router-dom'
 
 const TEAM_SLUG = import.meta.env.VITE_TEAM_SLUG || 'Team'
 
+// Derive portal URL from current hostname (team is at subdomain, portal is at base domain)
+// e.g., gtfs-tools.kanban.amazing-ai.tools -> kanban.amazing-ai.tools
+function getPortalUrl(): string {
+  const hostname = window.location.hostname
+  const parts = hostname.split('.')
+  // Remove the team subdomain (first part) to get the portal domain
+  if (parts.length > 2) {
+    return `https://${parts.slice(1).join('.')}`
+  }
+  // Fallback for localhost or simple domains
+  return `https://${hostname}`
+}
+
 export default function Layout() {
   const location = useLocation()
 
@@ -31,6 +44,17 @@ export default function Layout() {
                   Settings
                 </Link>
               </div>
+            </div>
+            <div className="flex items-center">
+              <a
+                href={getPortalUrl()}
+                className="flex items-center space-x-1 px-3 py-2 text-sm font-medium text-gray-500 hover:text-gray-700"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 17l-5-5m0 0l5-5m-5 5h12" />
+                </svg>
+                <span>Portal</span>
+              </a>
             </div>
           </div>
         </div>
