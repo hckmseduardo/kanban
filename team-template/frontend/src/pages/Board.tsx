@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { DndContext, DragEndEvent, DragOverlay, DragStartEvent, closestCorners } from '@dnd-kit/core'
+import { DndContext, DragEndEvent, DragOverlay, DragStartEvent, closestCorners, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
 import { SortableContext, horizontalListSortingStrategy } from '@dnd-kit/sortable'
 import { boardsApi, columnsApi, cardsApi } from '../services/api'
 import Column from '../components/Column'
@@ -13,6 +13,15 @@ export default function Board() {
   const [activeCard, setActiveCard] = useState<any>(null)
   const [showAddColumn, setShowAddColumn] = useState(false)
   const [newColumnName, setNewColumnName] = useState('')
+
+  // Configure sensors to require distance before drag starts, allowing clicks to work
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 8, // Require 8px movement before drag starts
+      },
+    })
+  )
 
   const { data: board, isLoading } = useQuery({
     queryKey: ['board', boardId],
@@ -121,6 +130,7 @@ export default function Board() {
       </div>
 
       <DndContext
+        sensors={sensors}
         collisionDetection={closestCorners}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
