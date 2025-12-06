@@ -100,7 +100,32 @@ start_team_containers() {
     success "All team containers started"
 }
 
-# Rebuild all team containers (no-cache)
+# Build shared team images
+build_shared_images() {
+    info "Building shared team images..."
+    echo ""
+
+    # Remove old shared images
+    docker rmi "kanban-team-api:latest" "kanban-team-web:latest" 2>/dev/null || true
+
+    # Prune builder cache
+    info "Pruning Docker builder cache..."
+    docker builder prune -f 2>/dev/null || true
+
+    # Build API image
+    echo -e "  ${BLUE}Building kanban-team-api:latest...${NC}"
+    docker build -t kanban-team-api:latest --no-cache team-template/backend 2>&1 | tail -5
+    echo ""
+
+    # Build web image
+    echo -e "  ${BLUE}Building kanban-team-web:latest...${NC}"
+    docker build -t kanban-team-web:latest --no-cache team-template/frontend 2>&1 | tail -5
+    echo ""
+
+    success "Shared images built!"
+}
+
+# Rebuild all team containers (minimal downtime with rolling update)
 rebuild_team_containers() {
     local teams=$(get_team_slugs)
     if [ -z "$teams" ]; then
@@ -108,47 +133,45 @@ rebuild_team_containers() {
         return 0
     fi
 
-    info "Rebuilding all team containers (this may take a while)..."
+    info "Rebuilding team containers with minimal downtime..."
     echo ""
 
-    # First stop all teams
-    for team in $teams; do
-        if docker ps -a --filter "name=kanban-team-$team" --format "{{.Names}}" | grep -q .; then
-            echo "  Stopping $team..."
-            TEAM_SLUG=$team DOMAIN=${DOMAIN:-localhost} DATA_PATH="$(pwd)/data/teams/$team" \
-                docker compose -f team-template/docker-compose.yml -p "kanban-team-$team" down 2>/dev/null || true
-        fi
-    done
+    # Build shared images first (no downtime during build)
+    build_shared_images
 
-    # Remove old images
-    info "Removing old team images..."
-    for team in $teams; do
-        docker rmi "kanban-team-$team-api:latest" "kanban-team-$team-web:latest" 2>/dev/null || true
-    done
-
-    # Prune builder cache
-    info "Pruning Docker builder cache..."
-    docker builder prune -f 2>/dev/null || true
-
-    # Rebuild and start each team
-    info "Building and starting team containers..."
+    # Rolling update: stop and start each team one at a time
+    info "Performing rolling update (one team at a time)..."
     for team in $teams; do
         echo ""
-        echo -e "  ${BLUE}=== Building $team ===${NC}"
-        cd team-template
-        TEAM_SLUG=$team DOMAIN=${DOMAIN:-localhost} DATA_PATH="$(pwd)/../data/teams/$team" \
-            docker compose -p "kanban-team-$team" build --no-cache 2>&1 | tail -5
-        cd ..
+        echo -e "  ${BLUE}=== Updating $team ===${NC}"
 
+        # Stop this team's containers
+        echo "  Stopping $team..."
+        TEAM_SLUG=$team DOMAIN=${DOMAIN:-localhost} DATA_PATH="$(pwd)/data/teams/$team" \
+            docker compose -f team-template/docker-compose.yml -p "kanban-team-$team" down 2>/dev/null || true
+
+        # Start with new images
         echo "  Starting $team..."
         TEAM_SLUG=$team DOMAIN=${DOMAIN:-localhost} DATA_PATH="$(pwd)/data/teams/$team" \
             docker compose -f team-template/docker-compose.yml -p "kanban-team-$team" up -d 2>/dev/null
+
+        # Brief pause to let container start
+        sleep 2
+
+        # Verify it's running
+        local api_status=$(docker inspect --format='{{.State.Status}}' "kanban-team-$team-api-1" 2>/dev/null || echo "not found")
+        local web_status=$(docker inspect --format='{{.State.Status}}' "kanban-team-$team-web-1" 2>/dev/null || echo "not found")
+        if [ "$api_status" == "running" ] && [ "$web_status" == "running" ]; then
+            echo -e "  ${GREEN}✓${NC} $team is running"
+        else
+            echo -e "  ${RED}✗${NC} $team may have issues (api: $api_status, web: $web_status)"
+        fi
     done
 
     echo ""
-    success "All team containers rebuilt and started!"
+    success "All team containers updated!"
 
-    # Show status
+    # Show final status
     echo ""
     info "Team container status:"
     for team in $teams; do
@@ -211,8 +234,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --build, -b        Force rebuild of containers"
             echo "  --help, -h         Show this help message"
             echo ""
-            echo "Team Management:"
-            echo "  --rebuild-teams    Stop, rebuild (no-cache), and start all team containers"
+            echo "Team Management (uses shared images for faster rebuilds):"
+            echo "  --rebuild-teams    Build shared images once, then rolling update all teams"
+            echo "                     (minimal downtime - one team updated at a time)"
             echo "  --stop-teams       Stop all team containers"
             echo "  --start-teams      Start all team containers"
             echo ""

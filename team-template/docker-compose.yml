@@ -1,9 +1,10 @@
 # Team Instance Docker Compose
 # This file is used by the orchestrator to deploy individual team environments
+# Uses shared images (kanban-team-api:latest, kanban-team-web:latest) built once for all teams
 
 services:
   api:
-    build: ./backend
+    image: kanban-team-api:latest
     environment:
       - TEAM_SLUG=${TEAM_SLUG}
       - DOMAIN=${DOMAIN}
@@ -23,10 +24,7 @@ services:
     restart: unless-stopped
 
   web:
-    build: ./frontend
-    environment:
-      - VITE_API_URL=https://${TEAM_SLUG}.${DOMAIN}/api
-      - VITE_TEAM_SLUG=${TEAM_SLUG}
+    image: kanban-team-web:latest
     networks:
       - kanban-global
     labels:

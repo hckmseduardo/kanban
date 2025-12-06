@@ -1,6 +1,18 @@
 import { Outlet, Link, useLocation } from 'react-router-dom'
 
-const TEAM_SLUG = import.meta.env.VITE_TEAM_SLUG || 'Team'
+// Derive team slug from hostname (first subdomain)
+// e.g., gtfs-tools.kanban.amazing-ai.tools -> gtfs-tools
+function getTeamSlug(): string {
+  const hostname = window.location.hostname
+  const parts = hostname.split('.')
+  if (parts.length > 1 && parts[0] !== 'localhost') {
+    return parts[0]
+  }
+  // Fallback for localhost development
+  return import.meta.env.VITE_TEAM_SLUG || 'Team'
+}
+
+const TEAM_SLUG = getTeamSlug()
 
 // Derive portal URL from current hostname (team is at subdomain, portal is at base domain)
 // e.g., gtfs-tools.kanban.amazing-ai.tools -> kanban.amazing-ai.tools
