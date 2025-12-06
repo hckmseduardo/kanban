@@ -46,7 +46,9 @@ app = FastAPI(
 # CORS Configuration
 # Allow portal frontends and any team subdomain
 base_origins = [
-    f"https://app.{settings.domain}",
+    f"https://{settings.domain}",  # Main domain (production)
+    f"https://{settings.domain}:{settings.port}",
+    f"https://app.{settings.domain}",  # Legacy app subdomain
     f"https://app.{settings.domain}:{settings.port}",
     f"https://api.{settings.domain}",
     f"https://api.{settings.domain}:{settings.port}",

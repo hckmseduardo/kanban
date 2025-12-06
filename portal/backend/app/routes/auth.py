@@ -25,7 +25,12 @@ async def login(
     Redirects user to Microsoft login page.
     """
     # Store redirect URL in state parameter
-    state = redirect_url or f"https://app.{settings.domain}:{settings.port}"
+    # Use main domain (not app. subdomain), omit port for standard HTTPS
+    if settings.port == 443 or settings.port == "443":
+        default_redirect = f"https://{settings.domain}"
+    else:
+        default_redirect = f"https://{settings.domain}:{settings.port}"
+    state = redirect_url or default_redirect
 
     try:
         auth_url = entra_auth.get_authorization_url(state=state)
@@ -40,7 +45,7 @@ async def login(
 
 @router.get("/callback")
 async def auth_callback(
-    code: str = Query(..., description="Authorization code from Entra ID"),
+    code: str = Query(None, description="Authorization code from Entra ID"),
     state: str = Query(None, description="Original redirect URL"),
     error: str = Query(None),
     error_description: str = Query(None)
@@ -49,9 +54,15 @@ async def auth_callback(
     OAuth callback from Entra ID.
     Exchanges code for token and creates user session.
     """
+    # Handle OAuth errors first (Microsoft returns error instead of code)
     if error:
         logger.error(f"Auth error: {error} - {error_description}")
         raise HTTPException(status_code=400, detail=error_description or error)
+
+    # Validate code is present
+    if not code:
+        logger.error("No authorization code received from Entra ID")
+        raise HTTPException(status_code=400, detail="No authorization code received")
 
     try:
         # Authenticate with Entra ID
@@ -67,7 +78,12 @@ async def auth_callback(
         )
 
         # Redirect to frontend with token
-        redirect_url = state or f"https://app.{settings.domain}:{settings.port}"
+        # Use main domain (not app. subdomain), omit port for standard HTTPS
+        if settings.port == 443 or settings.port == "443":
+            default_redirect = f"https://{settings.domain}"
+        else:
+            default_redirect = f"https://{settings.domain}:{settings.port}"
+        redirect_url = state or default_redirect
         separator = "&" if "?" in redirect_url else "?"
         final_url = f"{redirect_url}{separator}{urlencode({'token': access_token})}"
 

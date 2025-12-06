@@ -4,6 +4,12 @@
 
 http:
   middlewares:
+    # Redirect HTTP to HTTPS
+    redirect-to-https:
+      redirectScheme:
+        scheme: https
+        permanent: true
+
     # Security Headers
     secure-headers:
       headers:

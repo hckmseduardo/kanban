@@ -15,9 +15,8 @@ services:
     image: traefik:v3.0
     container_name: kanban-traefik
     restart: unless-stopped
-    ports:
-      - "80:80"
     expose:
+      - "80"
       - "443"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -82,6 +81,7 @@ services:
       - kanban-global
     labels:
       - "traefik.enable=true"
+      # HTTPS router
       - "traefik.http.routers.portal-api.rule=Host(`${DOMAIN:-localhost}`) && PathPrefix(`/api`)"
       - "traefik.http.routers.portal-api.entrypoints=websecure"
       - "traefik.http.routers.portal-api.tls=true"
@@ -89,6 +89,10 @@ services:
       - "traefik.http.routers.portal-api.middlewares=portal-api-strip"
       - "traefik.http.middlewares.portal-api-strip.stripprefix.prefixes=/api"
       - "traefik.http.services.portal-api.loadbalancer.server.port=8000"
+      # HTTP router (redirect to HTTPS)
+      - "traefik.http.routers.portal-api-http.rule=Host(`${DOMAIN:-localhost}`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.portal-api-http.entrypoints=web"
+      - "traefik.http.routers.portal-api-http.middlewares=redirect-to-https@file"
     depends_on:
       redis:
         condition: service_healthy
@@ -100,21 +104,26 @@ services:
     build:
       context: ./portal/frontend
       dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=https://${DOMAIN:-localhost}/api
+        - VITE_DOMAIN=${DOMAIN:-localhost}
+        - VITE_PORT=${PORT:-443}
     container_name: kanban-portal-web
     restart: unless-stopped
-    environment:
-      - VITE_API_URL=https://${DOMAIN:-localhost}/api
-      - VITE_DOMAIN=${DOMAIN:-localhost}
-      - VITE_PORT=${PORT:-443}
     networks:
       - kanban-global
     labels:
       - "traefik.enable=true"
+      # HTTPS router
       - "traefik.http.routers.portal-web.rule=Host(`${DOMAIN:-localhost}`) && !PathPrefix(`/api`)"
       - "traefik.http.routers.portal-web.entrypoints=websecure"
       - "traefik.http.routers.portal-web.tls=true"
       - "traefik.http.routers.portal-web.tls.certresolver=letsencrypt"
       - "traefik.http.services.portal-web.loadbalancer.server.port=80"
+      # HTTP router (redirect to HTTPS)
+      - "traefik.http.routers.portal-web-http.rule=Host(`${DOMAIN:-localhost}`) && !PathPrefix(`/api`)"
+      - "traefik.http.routers.portal-web-http.entrypoints=web"
+      - "traefik.http.routers.portal-web-http.middlewares=redirect-to-https@file"
 
   # ===========================================================================
   # Background Worker (Task Processing)
@@ -196,114 +205,10 @@ services:
       - kanban-global
 
   # ===========================================================================
-  # Team Instance - Teste (Development)
+  # Team Instances (dynamically provisioned by orchestrator)
   # ===========================================================================
-  team-teste-api:
-    build:
-      context: ./team-template/backend
-      dockerfile: Dockerfile
-    container_name: kanban-team-teste-api
-    restart: unless-stopped
-    environment:
-      - REDIS_URL=redis://redis:6379
-      - DOMAIN=${DOMAIN:-localhost}
-      - PORTAL_API_URL=https://${DOMAIN:-localhost}/api
-      - TEAM_SLUG=teste
-    volumes:
-      - ./team-template/backend/app:/app/app
-      - ./data/teams/teste:/app/data
-    networks:
-      - kanban-global
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.team-teste-api.rule=Host(`teste.${DOMAIN:-localhost}`) && PathPrefix(`/api`)"
-      - "traefik.http.routers.team-teste-api.entrypoints=websecure"
-      - "traefik.http.routers.team-teste-api.tls=true"
-      - "traefik.http.routers.team-teste-api.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.team-teste-api.middlewares=team-teste-api-strip"
-      - "traefik.http.middlewares.team-teste-api-strip.stripprefix.prefixes=/api"
-      - "traefik.http.services.team-teste-api.loadbalancer.server.port=8000"
-    depends_on:
-      redis:
-        condition: service_healthy
-
-  team-teste-web:
-    build:
-      context: ./team-template/frontend
-      dockerfile: Dockerfile
-    container_name: kanban-team-teste-web
-    restart: unless-stopped
-    environment:
-      - BACKEND_HOST=kanban-team-teste-api:8000
-      - VITE_API_URL=https://teste.${DOMAIN:-localhost}/api
-      - VITE_PORTAL_API_URL=https://${DOMAIN:-localhost}/api
-      - VITE_DOMAIN=${DOMAIN:-localhost}
-      - VITE_PORT=${PORT:-443}
-      - VITE_TEAM_SLUG=teste
-    networks:
-      - kanban-global
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.team-teste-web.rule=Host(`teste.${DOMAIN:-localhost}`) && !PathPrefix(`/api`)"
-      - "traefik.http.routers.team-teste-web.entrypoints=websecure"
-      - "traefik.http.routers.team-teste-web.tls=true"
-      - "traefik.http.routers.team-teste-web.tls.certresolver=letsencrypt"
-      - "traefik.http.services.team-teste-web.loadbalancer.server.port=80"
-
-  # ===========================================================================
-  # Team Instance - Teste2
-  # ===========================================================================
-  team-teste2-api:
-    build:
-      context: ./team-template/backend
-      dockerfile: Dockerfile
-    container_name: kanban-team-teste2-api
-    restart: unless-stopped
-    environment:
-      - REDIS_URL=redis://redis:6379
-      - DOMAIN=${DOMAIN:-localhost}
-      - PORTAL_API_URL=https://${DOMAIN:-localhost}/api
-      - TEAM_SLUG=teste2
-    volumes:
-      - ./team-template/backend/app:/app/app
-      - ./data/teams/teste2:/app/data
-    networks:
-      - kanban-global
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.team-teste2-api.rule=Host(`teste2.${DOMAIN:-localhost}`) && PathPrefix(`/api`)"
-      - "traefik.http.routers.team-teste2-api.entrypoints=websecure"
-      - "traefik.http.routers.team-teste2-api.tls=true"
-      - "traefik.http.routers.team-teste2-api.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.team-teste2-api.middlewares=team-teste2-api-strip"
-      - "traefik.http.middlewares.team-teste2-api-strip.stripprefix.prefixes=/api"
-      - "traefik.http.services.team-teste2-api.loadbalancer.server.port=8000"
-    depends_on:
-      redis:
-        condition: service_healthy
-
-  team-teste2-web:
-    build:
-      context: ./team-template/frontend
-      dockerfile: Dockerfile
-    container_name: kanban-team-teste2-web
-    restart: unless-stopped
-    environment:
-      - BACKEND_HOST=kanban-team-teste2-api:8000
-      - VITE_API_URL=https://teste2.${DOMAIN:-localhost}/api
-      - VITE_PORTAL_API_URL=https://${DOMAIN:-localhost}/api
-      - VITE_DOMAIN=${DOMAIN:-localhost}
-      - VITE_PORT=${PORT:-443}
-      - VITE_TEAM_SLUG=teste2
-    networks:
-      - kanban-global
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.team-teste2-web.rule=Host(`teste2.${DOMAIN:-localhost}`) && !PathPrefix(`/api`)"
-      - "traefik.http.routers.team-teste2-web.entrypoints=websecure"
-      - "traefik.http.routers.team-teste2-web.tls=true"
-      - "traefik.http.routers.team-teste2-web.tls.certresolver=letsencrypt"
-      - "traefik.http.services.team-teste2-web.loadbalancer.server.port=80"
+  # Teams are created via the portal and provisioned automatically.
+  # Each team gets: team-{slug}-api and team-{slug}-web services
 
   # ===========================================================================
   # DNS Server (Local Development)

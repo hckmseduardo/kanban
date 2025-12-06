@@ -95,7 +95,7 @@ export default function CreateTeamPage() {
               placeholder="marketing"
             />
             <span className="inline-flex items-center px-3 rounded-r-md border border-l-0 border-gray-300 bg-gray-50 text-gray-500 sm:text-sm">
-              .kanban.io
+              .kanban.amazing-ai.tools
             </span>
           </div>
           <p className="mt-1 text-sm text-gray-500">

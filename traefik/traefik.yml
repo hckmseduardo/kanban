@@ -11,21 +11,11 @@ api:
 entryPoints:
   web:
     address: ":80"
-    http:
-      redirections:
-        entryPoint:
-          to: websecure
-          scheme: https
+    # Note: HTTP->HTTPS redirect handled per-router, not globally
+    # This allows ACME HTTP challenges to work on port 80
 
   websecure:
     address: ":443"
-    http:
-      tls:
-        certResolver: letsencrypt
-        domains:
-          - main: "kanban.amazing-ai.tools"
-            sans:
-              - "*.kanban.amazing-ai.tools"
 
 # Certificate Resolvers (Let's Encrypt)
 certificatesResolvers:

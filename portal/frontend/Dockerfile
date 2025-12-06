@@ -3,6 +3,16 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
+# Build arguments for Vite environment variables
+ARG VITE_API_URL=https://localhost/api
+ARG VITE_DOMAIN=localhost
+ARG VITE_PORT=443
+
+# Set environment variables for build
+ENV VITE_API_URL=$VITE_API_URL
+ENV VITE_DOMAIN=$VITE_DOMAIN
+ENV VITE_PORT=$VITE_PORT
+
 # Install dependencies
 COPY package*.json ./
 RUN npm install

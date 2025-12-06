@@ -6,6 +6,7 @@
 #
 # Prerequisites:
 #   - Azure CLI installed and logged in (az login)
+#     OR Docker installed (will run Azure CLI in container)
 #   - Appropriate Azure subscription permissions
 #
 # Usage:
@@ -26,6 +27,34 @@ info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+
+# =============================================================================
+# Docker Fallback: Run in container if Azure CLI not installed
+# =============================================================================
+if ! command -v az &> /dev/null; then
+    if command -v docker &> /dev/null; then
+        echo -e "${YELLOW}[INFO]${NC} Azure CLI not found locally. Running in Docker container..."
+
+        # Get the script directory
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+        # Run this script inside a Docker container with Azure CLI
+        exec docker run -it --rm \
+            -v "$SCRIPT_DIR:/scripts:ro" \
+            -v "$PROJECT_DIR:/project" \
+            -w /scripts \
+            -e RUNNING_IN_DOCKER=1 \
+            mcr.microsoft.com/azure-cli:latest \
+            bash -c "az login --use-device-code && ./setup-azure-keyvault.sh $*"
+    else
+        error "Azure CLI not found and Docker not available.\nPlease install Azure CLI: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli\nOr install Docker to run Azure CLI in a container."
+    fi
+fi
+
+# =============================================================================
+# Configuration
+# =============================================================================
 
 # Default values
 RESOURCE_GROUP="kanban-rg"
@@ -61,6 +90,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --vault-name, -v       Key Vault name (default: kanban-kv-<random>)"
             echo "  --app-name, -a         App registration name (default: kanban-app)"
             echo "  --help, -h             Show this help"
+            echo ""
+            echo "If Azure CLI is not installed, this script will automatically"
+            echo "run inside a Docker container with Azure CLI."
             exit 0
             ;;
         *)
@@ -75,9 +107,9 @@ echo "║           AZURE KEY VAULT SETUP FOR KANBAN                    ║"
 echo "╚═══════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
-# Check Azure CLI
-if ! command -v az &> /dev/null; then
-    error "Azure CLI not found. Please install it: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli"
+# Show if running in Docker
+if [ "$RUNNING_IN_DOCKER" = "1" ]; then
+    info "Running inside Docker container"
 fi
 
 # Check login status
@@ -145,10 +177,33 @@ PORTAL_SECRET=$(openssl rand -base64 32)
 CROSS_DOMAIN_SECRET=$(openssl rand -base64 32)
 
 # Store secrets in Key Vault
+info "Storing portal-secret-key..."
 az keyvault secret set --vault-name "$VAULT_NAME" --name "portal-secret-key" --value "$PORTAL_SECRET" --output none
+
+info "Storing cross-domain-secret..."
 az keyvault secret set --vault-name "$VAULT_NAME" --name "cross-domain-secret" --value "$CROSS_DOMAIN_SECRET" --output none
 
+# Placeholder secrets (to be configured later)
+info "Creating placeholder secrets (configure these manually)..."
+
+# These need to be set manually after Entra ID app registration
+az keyvault secret set --vault-name "$VAULT_NAME" --name "entra-client-id" --value "CONFIGURE_ME" --output none
+az keyvault secret set --vault-name "$VAULT_NAME" --name "entra-client-secret" --value "CONFIGURE_ME" --output none
+az keyvault secret set --vault-name "$VAULT_NAME" --name "entra-tenant-id" --value "$TENANT_ID" --output none
+
+# Redis URL (defaults to internal Docker service)
+az keyvault secret set --vault-name "$VAULT_NAME" --name "redis-url" --value "redis://redis:6379" --output none
+
+# Certbot email for Let's Encrypt
+az keyvault secret set --vault-name "$VAULT_NAME" --name "certbot-email" --value "CONFIGURE_ME" --output none
+
 success "Initial secrets created"
+
+# List all secrets
+info "Secrets in Key Vault:"
+az keyvault secret list --vault-name "$VAULT_NAME" --query "[].name" -o tsv | while read -r secret; do
+    echo "  - $secret"
+done
 
 # Create Entra ID App for authentication (External Identities)
 info "Setting up Entra ID authentication..."

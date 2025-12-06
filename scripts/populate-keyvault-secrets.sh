@@ -139,6 +139,10 @@ set_secret "entra-client-id" "$ENTRA_CLIENT_ID" "Entra ID application client ID"
 set_secret "entra-client-secret" "$ENTRA_CLIENT_SECRET" "Entra ID application client secret"
 set_secret "entra-tenant-id" "$ENTRA_TENANT_ID" "Entra ID tenant ID"
 
+# Entra External ID (CIAM) settings
+set_secret "entra-authority" "$ENTRA_AUTHORITY" "Entra External ID authority URL"
+set_secret "entra-scopes" "${ENTRA_SCOPES:-User.Read email}" "Entra ID OAuth scopes"
+
 # =============================================================================
 # Optional: Social Provider API Keys
 # =============================================================================

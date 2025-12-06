@@ -13,21 +13,35 @@ logger = logging.getLogger(__name__)
 
 
 class EntraAuthService:
-    """Microsoft Entra ID authentication service"""
+    """Microsoft Entra ID authentication service (supports Entra External ID / CIAM)"""
 
-    # Microsoft Identity Platform endpoints
-    AUTHORITY = "https://login.microsoftonline.com"
-
-    # Scopes for authentication
-    SCOPES = ["openid", "profile", "email"]
+    # Default Microsoft Identity Platform endpoint (for regular Entra ID)
+    DEFAULT_AUTHORITY = "https://login.microsoftonline.com"
 
     def __init__(self):
         self.client_id = settings.entra_client_id
         self.client_secret = settings.entra_client_secret
         self.tenant_id = settings.entra_tenant_id or "common"
-        self.redirect_uri = f"https://api.{settings.domain}:{settings.port}/auth/callback"
+
+        # Use custom authority for Entra External ID (CIAM), or build default
+        if settings.entra_authority:
+            self.authority = settings.entra_authority
+        else:
+            self.authority = f"{self.DEFAULT_AUTHORITY}/{self.tenant_id}"
+
+        # Parse scopes from settings (space or comma separated)
+        scope_str = settings.entra_scopes or "User.Read email"
+        self.scopes = [s.strip() for s in scope_str.replace(",", " ").split() if s.strip()]
+
+        # Build redirect URI - use /api path, not api. subdomain
+        # Omit port for standard HTTPS (443)
+        if settings.port == 443 or settings.port == "443":
+            self.redirect_uri = f"https://{settings.domain}/api/auth/callback"
+        else:
+            self.redirect_uri = f"https://{settings.domain}:{settings.port}/api/auth/callback"
 
         self._msal_app: Optional[ConfidentialClientApplication] = None
+        logger.info(f"Entra auth initialized: authority={self.authority}, scopes={self.scopes}")
 
     @property
     def msal_app(self) -> ConfidentialClientApplication:
@@ -36,7 +50,7 @@ class EntraAuthService:
             self._msal_app = ConfidentialClientApplication(
                 client_id=self.client_id,
                 client_credential=self.client_secret,
-                authority=f"{self.AUTHORITY}/{self.tenant_id}"
+                authority=self.authority
             )
         return self._msal_app
 
@@ -49,7 +63,7 @@ class EntraAuthService:
             "client_id": self.client_id,
             "response_type": "code",
             "redirect_uri": self.redirect_uri,
-            "scope": " ".join(self.SCOPES),
+            "scope": " ".join(self.scopes),
             "response_mode": "query",
             "prompt": "select_account"  # Always show account picker
         }
@@ -57,7 +71,8 @@ class EntraAuthService:
         if state:
             params["state"] = state
 
-        auth_url = f"{self.AUTHORITY}/{self.tenant_id}/oauth2/v2.0/authorize"
+        # Use the configured authority (supports both regular Entra ID and External ID)
+        auth_url = f"{self.authority}/oauth2/v2.0/authorize"
         return f"{auth_url}?{urlencode(params)}"
 
     async def exchange_code_for_token(self, code: str) -> dict:
@@ -65,7 +80,8 @@ class EntraAuthService:
         if not self.client_id or not self.client_secret:
             raise ValueError("Entra ID credentials not configured")
 
-        token_url = f"{self.AUTHORITY}/{self.tenant_id}/oauth2/v2.0/token"
+        # Use the configured authority (supports both regular Entra ID and External ID)
+        token_url = f"{self.authority}/oauth2/v2.0/token"
 
         data = {
             "client_id": self.client_id,
@@ -73,7 +89,7 @@ class EntraAuthService:
             "code": code,
             "redirect_uri": self.redirect_uri,
             "grant_type": "authorization_code",
-            "scope": " ".join(self.SCOPES)
+            "scope": " ".join(self.scopes)
         }
 
         async with httpx.AsyncClient() as client:
