@@ -10,6 +10,7 @@ import redis.asyncio as redis
 
 from app.config import settings
 from app.services.redis_service import redis_service
+from app.services.database_service import db_service
 
 logging.basicConfig(
     level=logging.INFO,
@@ -58,6 +59,9 @@ class TaskWorker:
                 sig, lambda: asyncio.create_task(self.stop())
             )
 
+        # Start pubsub listener for team status updates
+        asyncio.create_task(self.listen_team_status())
+
         logger.info(f"Worker listening on queues: {self.QUEUES}")
 
         while self.running:
@@ -80,6 +84,45 @@ class TaskWorker:
         """Stop the worker gracefully"""
         logger.info("Stopping worker...")
         self.running = False
+
+    async def listen_team_status(self):
+        """Listen for team status updates from orchestrator"""
+        logger.info("Starting team status listener on channel: team:status")
+
+        pubsub_client = redis.from_url(
+            settings.redis_url,
+            encoding="utf-8",
+            decode_responses=True
+        )
+        pubsub = pubsub_client.pubsub()
+        await pubsub.subscribe("team:status")
+
+        try:
+            while self.running:
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if message and message["type"] == "message":
+                    try:
+                        data = json.loads(message["data"])
+                        team_id = data.get("team_id")
+                        team_slug = data.get("team_slug")
+                        status = data.get("status")
+
+                        if team_id and status:
+                            logger.info(f"Updating team {team_slug} status to: {status}")
+                            db_service.update_team(team_id, {"status": status})
+                            logger.info(f"Team {team_slug} status updated to {status}")
+
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Invalid JSON in team:status message: {e}")
+                    except Exception as e:
+                        logger.error(f"Error updating team status: {e}")
+
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await pubsub.unsubscribe("team:status")
+            await pubsub_client.close()
+            logger.info("Team status listener stopped")
 
     async def process_task(self, task_id: str):
         """Process a single task"""
