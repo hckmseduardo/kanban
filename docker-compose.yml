@@ -145,7 +145,7 @@ services:
       - AZURE_TENANT_ID=${AZURE_TENANT_ID}
     volumes:
       - ./portal/backend/app:/app/app
-      - ./data:/app/data
+      - ./data/portal:/app/data  # Same database as portal-api
       - ./traefik/certs:/app/certs
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
