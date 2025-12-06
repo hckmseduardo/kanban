@@ -43,13 +43,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routes
-app.include_router(boards.router, prefix="/api/boards", tags=["boards"])
-app.include_router(columns.router, prefix="/api/columns", tags=["columns"])
-app.include_router(cards.router, prefix="/api/cards", tags=["cards"])
-app.include_router(members.router, prefix="/api/members", tags=["members"])
-app.include_router(webhooks.router, prefix="/api/webhooks", tags=["webhooks"])
-app.include_router(utils.router, prefix="/api/utils", tags=["utils"])
+# Include routes (no /api prefix - Traefik strips it before forwarding)
+app.include_router(boards.router, prefix="/boards", tags=["boards"])
+app.include_router(columns.router, prefix="/columns", tags=["columns"])
+app.include_router(cards.router, prefix="/cards", tags=["cards"])
+app.include_router(members.router, prefix="/members", tags=["members"])
+app.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
+app.include_router(utils.router, prefix="/utils", tags=["utils"])
 
 
 @app.get("/health")
@@ -57,6 +57,6 @@ async def health():
     return {"status": "healthy", "team": TEAM_SLUG}
 
 
-@app.get("/api/team")
+@app.get("/team")
 async def get_team_info():
     return {"slug": TEAM_SLUG, "domain": f"{TEAM_SLUG}.{DOMAIN}"}
