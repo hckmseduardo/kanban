@@ -242,14 +242,15 @@ class Orchestrator:
         run_docker_cmd(["rm", "-f", api_container_name], check=False)
         run_docker_cmd(["rm", "-f", web_container_name], check=False)
 
-        # Images to use (reuse existing template images)
-        api_image = "kanban-team-teste-api:latest"
-        web_image = "kanban-team-teste-web:latest"
+        # Images to use
+        api_image = "kanban-team-backend:latest"
+        web_image = "kanban-team-frontend:latest"
 
         # Host path for team data
         team_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{team_slug}"
 
         # Create API container
+        # Routes: {slug}.{domain}/api/* -> backend (Traefik strips /api prefix)
         logger.info(f"[{team_slug}] Creating API container...")
         api_cmd = [
             "run", "-d",
@@ -258,13 +259,16 @@ class Orchestrator:
             "--network", NETWORK_NAME,
             "-e", f"REDIS_URL=redis://kanban-redis:6379",
             "-e", f"DOMAIN={DOMAIN}",
-            "-e", f"PORTAL_API_URL=https://api.{DOMAIN}:{PORT}",
+            "-e", f"PORTAL_URL=https://{DOMAIN}",
             "-e", f"TEAM_SLUG={team_slug}",
             "-v", f"{team_data_host_path}:/app/data",
             "-l", "traefik.enable=true",
-            "-l", f"traefik.http.routers.team-{team_slug}-api.rule=Host(`api.{team_slug}.{DOMAIN}`)",
+            "-l", f"traefik.http.routers.team-{team_slug}-api.rule=Host(`{team_slug}.{DOMAIN}`) && PathPrefix(`/api`)",
             "-l", f"traefik.http.routers.team-{team_slug}-api.entrypoints=websecure",
             "-l", f"traefik.http.routers.team-{team_slug}-api.tls=true",
+            "-l", f"traefik.http.routers.team-{team_slug}-api.tls.certresolver=letsencrypt",
+            "-l", f"traefik.http.routers.team-{team_slug}-api.middlewares=team-{team_slug}-api-strip",
+            "-l", f"traefik.http.middlewares.team-{team_slug}-api-strip.stripprefix.prefixes=/api",
             "-l", f"traefik.http.services.team-{team_slug}-api.loadbalancer.server.port=8000",
             api_image
         ]
@@ -273,22 +277,18 @@ class Orchestrator:
         logger.info(f"[{team_slug}] API container started: {container_id}")
 
         # Create Web container
+        # Routes: {slug}.{domain}/* (except /api) -> frontend
         logger.info(f"[{team_slug}] Creating Web container...")
         web_cmd = [
             "run", "-d",
             "--name", web_container_name,
             "--restart", "unless-stopped",
             "--network", NETWORK_NAME,
-            "-e", f"BACKEND_HOST={api_container_name}:8000",
-            "-e", f"VITE_API_URL=https://api.{team_slug}.{DOMAIN}:{PORT}",
-            "-e", f"VITE_PORTAL_API_URL=https://api.{DOMAIN}:{PORT}",
-            "-e", f"VITE_DOMAIN={DOMAIN}",
-            "-e", f"VITE_PORT={PORT}",
-            "-e", f"VITE_TEAM_SLUG={team_slug}",
             "-l", "traefik.enable=true",
-            "-l", f"traefik.http.routers.team-{team_slug}-web.rule=Host(`{team_slug}.{DOMAIN}`)",
+            "-l", f"traefik.http.routers.team-{team_slug}-web.rule=Host(`{team_slug}.{DOMAIN}`) && !PathPrefix(`/api`)",
             "-l", f"traefik.http.routers.team-{team_slug}-web.entrypoints=websecure",
             "-l", f"traefik.http.routers.team-{team_slug}-web.tls=true",
+            "-l", f"traefik.http.routers.team-{team_slug}-web.tls.certresolver=letsencrypt",
             "-l", f"traefik.http.services.team-{team_slug}-web.loadbalancer.server.port=80",
             web_image
         ]
