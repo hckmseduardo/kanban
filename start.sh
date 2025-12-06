@@ -8,6 +8,9 @@
 #   ./start.sh --port 9000  # Start with port 9000
 #   ./start.sh --dev        # Development mode (default)
 #   ./start.sh --prod       # Production mode
+#   ./start.sh --rebuild-teams  # Rebuild all team containers (no-cache)
+#   ./start.sh --stop-teams     # Stop all team containers
+#   ./start.sh --start-teams    # Start all team containers
 # =============================================================================
 
 set -e
@@ -23,6 +26,10 @@ NC='\033[0m' # No Color
 PORT=3001
 CERT_MODE="development"
 BUILD=false
+REBUILD_TEAMS=false
+STOP_TEAMS=false
+START_TEAMS=false
+TEAMS_ONLY=false
 
 # Print banner
 print_banner() {
@@ -50,6 +57,111 @@ error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# Get list of team slugs from data directory
+get_team_slugs() {
+    if [ -d "data/teams" ]; then
+        ls -1 data/teams 2>/dev/null | grep -v '^\.' || true
+    fi
+}
+
+# Stop all team containers
+stop_team_containers() {
+    local teams=$(get_team_slugs)
+    if [ -z "$teams" ]; then
+        warn "No team instances found in data/teams/"
+        return 0
+    fi
+
+    info "Stopping team containers..."
+    for team in $teams; do
+        if docker ps -a --filter "name=kanban-team-$team" --format "{{.Names}}" | grep -q .; then
+            echo "  Stopping $team..."
+            TEAM_SLUG=$team DOMAIN=${DOMAIN:-localhost} DATA_PATH="$(pwd)/data/teams/$team" \
+                docker compose -f team-template/docker-compose.yml -p "kanban-team-$team" down 2>/dev/null || true
+        fi
+    done
+    success "All team containers stopped"
+}
+
+# Start all team containers
+start_team_containers() {
+    local teams=$(get_team_slugs)
+    if [ -z "$teams" ]; then
+        warn "No team instances found in data/teams/"
+        return 0
+    fi
+
+    info "Starting team containers..."
+    for team in $teams; do
+        echo "  Starting $team..."
+        TEAM_SLUG=$team DOMAIN=${DOMAIN:-localhost} DATA_PATH="$(pwd)/data/teams/$team" \
+            docker compose -f team-template/docker-compose.yml -p "kanban-team-$team" up -d 2>/dev/null || true
+    done
+    success "All team containers started"
+}
+
+# Rebuild all team containers (no-cache)
+rebuild_team_containers() {
+    local teams=$(get_team_slugs)
+    if [ -z "$teams" ]; then
+        warn "No team instances found in data/teams/"
+        return 0
+    fi
+
+    info "Rebuilding all team containers (this may take a while)..."
+    echo ""
+
+    # First stop all teams
+    for team in $teams; do
+        if docker ps -a --filter "name=kanban-team-$team" --format "{{.Names}}" | grep -q .; then
+            echo "  Stopping $team..."
+            TEAM_SLUG=$team DOMAIN=${DOMAIN:-localhost} DATA_PATH="$(pwd)/data/teams/$team" \
+                docker compose -f team-template/docker-compose.yml -p "kanban-team-$team" down 2>/dev/null || true
+        fi
+    done
+
+    # Remove old images
+    info "Removing old team images..."
+    for team in $teams; do
+        docker rmi "kanban-team-$team-api:latest" "kanban-team-$team-web:latest" 2>/dev/null || true
+    done
+
+    # Prune builder cache
+    info "Pruning Docker builder cache..."
+    docker builder prune -f 2>/dev/null || true
+
+    # Rebuild and start each team
+    info "Building and starting team containers..."
+    for team in $teams; do
+        echo ""
+        echo -e "  ${BLUE}=== Building $team ===${NC}"
+        cd team-template
+        TEAM_SLUG=$team DOMAIN=${DOMAIN:-localhost} DATA_PATH="$(pwd)/../data/teams/$team" \
+            docker compose -p "kanban-team-$team" build --no-cache 2>&1 | tail -5
+        cd ..
+
+        echo "  Starting $team..."
+        TEAM_SLUG=$team DOMAIN=${DOMAIN:-localhost} DATA_PATH="$(pwd)/data/teams/$team" \
+            docker compose -f team-template/docker-compose.yml -p "kanban-team-$team" up -d 2>/dev/null
+    done
+
+    echo ""
+    success "All team containers rebuilt and started!"
+
+    # Show status
+    echo ""
+    info "Team container status:"
+    for team in $teams; do
+        local api_status=$(docker inspect --format='{{.State.Status}}' "kanban-team-$team-api-1" 2>/dev/null || echo "not found")
+        local web_status=$(docker inspect --format='{{.State.Status}}' "kanban-team-$team-web-1" 2>/dev/null || echo "not found")
+        if [ "$api_status" == "running" ] && [ "$web_status" == "running" ]; then
+            echo -e "  ${GREEN}✓${NC} $team (api: $api_status, web: $web_status)"
+        else
+            echo -e "  ${RED}✗${NC} $team (api: $api_status, web: $web_status)"
+        fi
+    done
+}
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -73,6 +185,21 @@ while [[ $# -gt 0 ]]; do
             BUILD=true
             shift
             ;;
+        --rebuild-teams)
+            REBUILD_TEAMS=true
+            TEAMS_ONLY=true
+            shift
+            ;;
+        --stop-teams)
+            STOP_TEAMS=true
+            TEAMS_ONLY=true
+            shift
+            ;;
+        --start-teams)
+            START_TEAMS=true
+            TEAMS_ONLY=true
+            shift
+            ;;
         --help|-h)
             echo "Usage: ./start.sh [OPTIONS] [PORT]"
             echo ""
@@ -84,11 +211,17 @@ while [[ $# -gt 0 ]]; do
             echo "  --build, -b        Force rebuild of containers"
             echo "  --help, -h         Show this help message"
             echo ""
+            echo "Team Management:"
+            echo "  --rebuild-teams    Stop, rebuild (no-cache), and start all team containers"
+            echo "  --stop-teams       Stop all team containers"
+            echo "  --start-teams      Start all team containers"
+            echo ""
             echo "Examples:"
             echo "  ./start.sh                 # Start on port 3001 (dev mode)"
             echo "  ./start.sh 8080            # Start on port 8080"
             echo "  ./start.sh --port 9000     # Start on port 9000"
             echo "  ./start.sh --prod --build  # Production with rebuild"
+            echo "  ./start.sh --rebuild-teams # Rebuild all team instances"
             exit 0
             ;;
         [0-9]*)
@@ -125,6 +258,26 @@ set +a
 # Override with command line values
 export PORT=$PORT
 export CERT_MODE=$CERT_MODE
+
+# Handle team-only operations
+if [ "$TEAMS_ONLY" = true ]; then
+    print_banner
+
+    if [ "$STOP_TEAMS" = true ]; then
+        stop_team_containers
+        exit 0
+    fi
+
+    if [ "$START_TEAMS" = true ]; then
+        start_team_containers
+        exit 0
+    fi
+
+    if [ "$REBUILD_TEAMS" = true ]; then
+        rebuild_team_containers
+        exit 0
+    fi
+fi
 
 info "Configuration:"
 echo "  Port:      $PORT"
