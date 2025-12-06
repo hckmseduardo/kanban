@@ -1,0 +1,330 @@
+# =============================================================================
+# Kanban Platform - Docker Compose Configuration
+# =============================================================================
+# Usage:
+#   ./start.sh              # Start with default port 3001
+#   ./start.sh 8080         # Start with custom port
+#   docker compose down     # Stop all services
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # Reverse Proxy & Load Balancer
+  # ===========================================================================
+  traefik:
+    image: traefik:v3.0
+    container_name: kanban-traefik
+    restart: unless-stopped
+    expose:
+      - "80"
+      - "443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+      - ./traefik/certs:/etc/traefik/certs:ro
+    environment:
+      - DOMAIN=${DOMAIN:-localhost}
+    networks:
+      - kanban-global
+      - proxy-network
+    labels:
+      - "traefik.enable=true"
+    depends_on:
+      - redis
+
+  # ===========================================================================
+  # Message Queue
+  # ===========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: kanban-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - kanban-global
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===========================================================================
+  # Portal Backend API
+  # ===========================================================================
+  portal-api:
+    build:
+      context: ./portal/backend
+      dockerfile: Dockerfile
+    container_name: kanban-portal-api
+    restart: unless-stopped
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DOMAIN=${DOMAIN:-localhost}
+      - PORT=${PORT:-4443}
+      - CERT_MODE=${CERT_MODE:-development}
+      - AZURE_KEY_VAULT_URL=${AZURE_KEY_VAULT_URL}
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET}
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID}
+      - ENTRA_CLIENT_ID=${ENTRA_CLIENT_ID}
+      - ENTRA_CLIENT_SECRET=${ENTRA_CLIENT_SECRET}
+      - ENTRA_TENANT_ID=${ENTRA_TENANT_ID}
+      - PORTAL_SECRET_KEY=${PORTAL_SECRET_KEY:-dev-secret-change-me}
+      - CROSS_DOMAIN_SECRET=${CROSS_DOMAIN_SECRET:-dev-cross-domain-secret}
+    volumes:
+      - ./portal/backend/app:/app/app
+      - ./data/portal:/app/data
+    networks:
+      - kanban-global
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.portal-api.rule=Host(`api.${DOMAIN:-localhost}`)"
+      - "traefik.http.routers.portal-api.entrypoints=websecure"
+      - "traefik.http.routers.portal-api.tls=true"
+      - "traefik.http.services.portal-api.loadbalancer.server.port=8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ===========================================================================
+  # Portal Frontend
+  # ===========================================================================
+  portal-web:
+    build:
+      context: ./portal/frontend
+      dockerfile: Dockerfile
+    container_name: kanban-portal-web
+    restart: unless-stopped
+    environment:
+      - VITE_API_URL=https://api.${DOMAIN:-localhost}:${PORT:-4443}
+      - VITE_DOMAIN=${DOMAIN:-localhost}
+      - VITE_PORT=${PORT:-4443}
+    networks:
+      - kanban-global
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.portal-web.rule=Host(`app.${DOMAIN:-localhost}`)"
+      - "traefik.http.routers.portal-web.entrypoints=websecure"
+      - "traefik.http.routers.portal-web.tls=true"
+      - "traefik.http.services.portal-web.loadbalancer.server.port=80"
+
+  # ===========================================================================
+  # Background Worker (Task Processing)
+  # ===========================================================================
+  worker:
+    build:
+      context: ./portal/backend
+      dockerfile: Dockerfile
+    container_name: kanban-worker
+    restart: unless-stopped
+    command: python -m app.worker
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DOMAIN=${DOMAIN:-localhost}
+      - CERT_MODE=${CERT_MODE:-development}
+      - AZURE_KEY_VAULT_URL=${AZURE_KEY_VAULT_URL}
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET}
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID}
+    volumes:
+      - ./portal/backend/app:/app/app
+      - ./data:/app/data
+      - ./traefik/certs:/app/certs
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - kanban-global
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ===========================================================================
+  # Orchestrator (Team Provisioning)
+  # ===========================================================================
+  orchestrator:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+    container_name: kanban-orchestrator
+    restart: unless-stopped
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DOMAIN=${DOMAIN:-localhost}
+      - PORT=${PORT:-4443}
+      - CERT_MODE=${CERT_MODE:-development}
+      - HOST_IP=${HOST_IP:-127.0.0.1}
+      - HOST_PROJECT_PATH=${HOST_PROJECT_PATH:-/Volumes/dados/projects/kanban}
+    volumes:
+      - ./orchestrator/app:/app/app
+      - ./data/teams:/app/data/teams
+      - ./team-template:/app/team-template:ro
+      - ./traefik/certs:/app/certs
+      - ./traefik/dynamic:/app/traefik-dynamic
+      - ./coredns/zones:/app/dns-zones
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - kanban-global
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ===========================================================================
+  # Certificate Manager
+  # ===========================================================================
+  certbot:
+    build:
+      context: ./certbot
+      dockerfile: Dockerfile
+    container_name: kanban-certbot
+    restart: unless-stopped
+    environment:
+      - CERT_MODE=${CERT_MODE:-development}
+      - DOMAIN=${DOMAIN:-localhost}
+      - CERTBOT_EMAIL=${CERTBOT_EMAIL:-admin@localhost}
+    volumes:
+      - ./traefik/certs:/etc/letsencrypt
+      - ./certbot/webroot:/var/www/certbot
+      - ./certbot/scripts:/scripts:ro
+    networks:
+      - kanban-global
+
+  # ===========================================================================
+  # Team Instance - Teste (Development)
+  # ===========================================================================
+  team-teste-api:
+    build:
+      context: ./team-template/backend
+      dockerfile: Dockerfile
+    container_name: kanban-team-teste-api
+    restart: unless-stopped
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DOMAIN=${DOMAIN:-localhost}
+      - PORTAL_API_URL=https://api.${DOMAIN:-localhost}:${PORT:-4443}
+      - TEAM_SLUG=teste
+    volumes:
+      - ./team-template/backend/app:/app/app
+      - ./data/teams/teste:/app/data
+    networks:
+      - kanban-global
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.team-teste-api.rule=Host(`api.teste.${DOMAIN:-localhost}`)"
+      - "traefik.http.routers.team-teste-api.entrypoints=websecure"
+      - "traefik.http.routers.team-teste-api.tls=true"
+      - "traefik.http.services.team-teste-api.loadbalancer.server.port=8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  team-teste-web:
+    build:
+      context: ./team-template/frontend
+      dockerfile: Dockerfile
+    container_name: kanban-team-teste-web
+    restart: unless-stopped
+    environment:
+      - BACKEND_HOST=kanban-team-teste-api:8000
+      - VITE_API_URL=https://api.teste.${DOMAIN:-localhost}:${PORT:-4443}
+      - VITE_PORTAL_API_URL=https://api.${DOMAIN:-localhost}:${PORT:-4443}
+      - VITE_DOMAIN=${DOMAIN:-localhost}
+      - VITE_PORT=${PORT:-4443}
+      - VITE_TEAM_SLUG=teste
+    networks:
+      - kanban-global
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.team-teste-web.rule=Host(`teste.${DOMAIN:-localhost}`)"
+      - "traefik.http.routers.team-teste-web.entrypoints=websecure"
+      - "traefik.http.routers.team-teste-web.tls=true"
+      - "traefik.http.services.team-teste-web.loadbalancer.server.port=80"
+
+  # ===========================================================================
+  # Team Instance - Teste2
+  # ===========================================================================
+  team-teste2-api:
+    build:
+      context: ./team-template/backend
+      dockerfile: Dockerfile
+    container_name: kanban-team-teste2-api
+    restart: unless-stopped
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DOMAIN=${DOMAIN:-localhost}
+      - PORTAL_API_URL=https://api.${DOMAIN:-localhost}:${PORT:-4443}
+      - TEAM_SLUG=teste2
+    volumes:
+      - ./team-template/backend/app:/app/app
+      - ./data/teams/teste2:/app/data
+    networks:
+      - kanban-global
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.team-teste2-api.rule=Host(`api.teste2.${DOMAIN:-localhost}`)"
+      - "traefik.http.routers.team-teste2-api.entrypoints=websecure"
+      - "traefik.http.routers.team-teste2-api.tls=true"
+      - "traefik.http.services.team-teste2-api.loadbalancer.server.port=8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  team-teste2-web:
+    build:
+      context: ./team-template/frontend
+      dockerfile: Dockerfile
+    container_name: kanban-team-teste2-web
+    restart: unless-stopped
+    environment:
+      - BACKEND_HOST=kanban-team-teste2-api:8000
+      - VITE_API_URL=https://api.teste2.${DOMAIN:-localhost}:${PORT:-4443}
+      - VITE_PORTAL_API_URL=https://api.${DOMAIN:-localhost}:${PORT:-4443}
+      - VITE_DOMAIN=${DOMAIN:-localhost}
+      - VITE_PORT=${PORT:-4443}
+      - VITE_TEAM_SLUG=teste2
+    networks:
+      - kanban-global
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.team-teste2-web.rule=Host(`teste2.${DOMAIN:-localhost}`)"
+      - "traefik.http.routers.team-teste2-web.entrypoints=websecure"
+      - "traefik.http.routers.team-teste2-web.tls=true"
+      - "traefik.http.services.team-teste2-web.loadbalancer.server.port=80"
+
+  # ===========================================================================
+  # DNS Server (Local Development)
+  # ===========================================================================
+  coredns:
+    build:
+      context: ./coredns
+      dockerfile: Dockerfile
+    container_name: kanban-coredns
+    restart: unless-stopped
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+    volumes:
+      - ./coredns/Corefile:/etc/coredns/Corefile:ro
+      - ./coredns/zones:/etc/coredns/zones:ro
+    networks:
+      - kanban-global
+    profiles:
+      - dns  # Only start with: docker compose --profile dns up
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  kanban-global:
+    name: kanban-global
+    driver: bridge
+  proxy-network:
+    external: true
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  redis_data:
+    name: kanban-redis-data

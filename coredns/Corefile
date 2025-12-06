@@ -1,0 +1,36 @@
+# CoreDNS configuration for local Kanban development
+# Resolves *.localhost to 127.0.0.1 for wildcard subdomain support
+
+.:53 {
+    # Log all queries for debugging
+    log
+
+    # Handle errors
+    errors
+
+    # Forward all other queries to upstream DNS
+    forward . 8.8.8.8 8.8.4.4 {
+        policy sequential
+    }
+
+    # Cache responses
+    cache 30
+}
+
+# Local development zone - resolves all *.localhost to 127.0.0.1
+localhost:53 {
+    log
+    errors
+
+    # Resolve localhost and all subdomains to 127.0.0.1
+    template IN A {
+        match .*\.localhost\.$
+        answer "{{ .Name }} 60 IN A 127.0.0.1"
+        fallthrough
+    }
+
+    template IN A {
+        match ^localhost\.$
+        answer "{{ .Name }} 60 IN A 127.0.0.1"
+    }
+}

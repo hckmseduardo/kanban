@@ -1,0 +1,17 @@
+# =============================================================================
+# Traefik TLS Configuration
+# =============================================================================
+
+tls:
+  certificates:
+    # Default certificate for localhost (development)
+    - certFile: /etc/traefik/certs/localhost.crt
+      keyFile: /etc/traefik/certs/localhost.key
+      stores:
+        - default
+
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /etc/traefik/certs/localhost.crt
+        keyFile: /etc/traefik/certs/localhost.key

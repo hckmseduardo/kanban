@@ -1,0 +1,53 @@
+# =============================================================================
+# Traefik Configuration
+# =============================================================================
+
+# API and Dashboard
+api:
+  dashboard: true
+  insecure: true
+
+# Entry Points
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+
+  websecure:
+    address: ":443"
+    http:
+      tls: {}
+
+# Providers
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+    network: kanban-global
+    watch: true
+
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+# Logging
+log:
+  level: INFO
+  format: common
+
+accessLog:
+  format: common
+  filters:
+    statusCodes:
+      - "400-599"
+
+# TLS Configuration
+tls:
+  options:
+    default:
+      minVersion: VersionTLS12
+      sniStrict: true

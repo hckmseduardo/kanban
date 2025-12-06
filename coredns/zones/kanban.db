@@ -1,0 +1,21 @@
+; Zone file for Kanban platform
+; This file is dynamically updated by the orchestrator when teams are provisioned
+
+$ORIGIN kanban.local.
+$TTL 60
+
+@       IN  SOA ns1.kanban.local. admin.kanban.local. (
+            2024010101  ; Serial
+            3600        ; Refresh
+            600         ; Retry
+            604800      ; Expire
+            60          ; Minimum TTL
+        )
+
+        IN  NS  ns1.kanban.local.
+
+ns1     IN  A   127.0.0.1
+@       IN  A   127.0.0.1
+*       IN  A   127.0.0.1
+app     IN  A   127.0.0.1
+api     IN  A   127.0.0.1

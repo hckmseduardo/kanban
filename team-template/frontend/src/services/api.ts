@@ -1,0 +1,66 @@
+import axios from 'axios'
+
+const API_URL = import.meta.env.VITE_API_URL || '/api'
+
+const api = axios.create({
+  baseURL: API_URL,
+  headers: {
+    'Content-Type': 'application/json'
+  }
+})
+
+// Add auth token to requests
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('token')
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
+export const boardsApi = {
+  list: () => api.get('/boards'),
+  get: (id: string) => api.get(`/boards/${id}`),
+  create: (data: { name: string; description?: string }) => api.post('/boards', data),
+  update: (id: string, data: any) => api.patch(`/boards/${id}`, data),
+  delete: (id: string) => api.delete(`/boards/${id}`)
+}
+
+export const columnsApi = {
+  create: (data: { board_id: string; name: string; position: number }) => api.post('/columns', data),
+  update: (id: string, data: any) => api.patch(`/columns/${id}`, data),
+  delete: (id: string) => api.delete(`/columns/${id}`)
+}
+
+export const cardsApi = {
+  create: (data: any) => api.post('/cards', data),
+  get: (id: string) => api.get(`/cards/${id}`),
+  update: (id: string, data: any) => api.patch(`/cards/${id}`, data),
+  delete: (id: string) => api.delete(`/cards/${id}`),
+  move: (id: string, columnId: string, position: number) =>
+    api.post(`/cards/${id}/move`, null, { params: { column_id: columnId, position } }),
+  // Checklist operations
+  addChecklistItem: (cardId: string, text: string) =>
+    api.post(`/cards/${cardId}/checklist`, { text }),
+  updateChecklistItem: (cardId: string, itemId: string, data: { text?: string; completed?: boolean }) =>
+    api.patch(`/cards/${cardId}/checklist/${itemId}`, data),
+  deleteChecklistItem: (cardId: string, itemId: string) =>
+    api.delete(`/cards/${cardId}/checklist/${itemId}`),
+  toggleChecklistItem: (cardId: string, itemId: string) =>
+    api.post(`/cards/${cardId}/checklist/${itemId}/toggle`)
+}
+
+export const webhooksApi = {
+  list: () => api.get('/webhooks'),
+  create: (data: any) => api.post('/webhooks', data),
+  update: (id: string, data: any) => api.patch(`/webhooks/${id}`, data),
+  delete: (id: string) => api.delete(`/webhooks/${id}`),
+  test: (id: string) => api.post(`/webhooks/${id}/test`)
+}
+
+export const utilsApi = {
+  getLinkPreview: (url: string) => api.get('/utils/link-preview', { params: { url } }),
+  extractUrls: (text: string) => api.post('/utils/extract-urls', null, { params: { text } })
+}
+
+export default api

@@ -1,0 +1,40 @@
+# Team Instance Docker Compose
+# This file is used by the orchestrator to deploy individual team environments
+
+services:
+  api:
+    build: ./backend
+    environment:
+      - TEAM_SLUG=${TEAM_SLUG}
+      - DOMAIN=${DOMAIN}
+      - DATA_DIR=/app/data
+    volumes:
+      - ${DATA_PATH}:/app/data
+    networks:
+      - kanban-global
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.${TEAM_SLUG}-api.rule=Host(`${TEAM_SLUG}.${DOMAIN}`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.${TEAM_SLUG}-api.entrypoints=websecure"
+      - "traefik.http.routers.${TEAM_SLUG}-api.tls=true"
+      - "traefik.http.services.${TEAM_SLUG}-api.loadbalancer.server.port=8000"
+    restart: unless-stopped
+
+  web:
+    build: ./frontend
+    environment:
+      - VITE_API_URL=https://${TEAM_SLUG}.${DOMAIN}/api
+      - VITE_TEAM_SLUG=${TEAM_SLUG}
+    networks:
+      - kanban-global
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.${TEAM_SLUG}-web.rule=Host(`${TEAM_SLUG}.${DOMAIN}`)"
+      - "traefik.http.routers.${TEAM_SLUG}-web.entrypoints=websecure"
+      - "traefik.http.routers.${TEAM_SLUG}-web.tls=true"
+      - "traefik.http.services.${TEAM_SLUG}-web.loadbalancer.server.port=80"
+    restart: unless-stopped
+
+networks:
+  kanban-global:
+    external: true

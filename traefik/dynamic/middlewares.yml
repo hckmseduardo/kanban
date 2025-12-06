@@ -1,0 +1,54 @@
+# =============================================================================
+# Traefik Middlewares
+# =============================================================================
+
+http:
+  middlewares:
+    # Security Headers
+    secure-headers:
+      headers:
+        browserXssFilter: true
+        contentTypeNosniff: true
+        forceSTSHeader: true
+        stsIncludeSubdomains: true
+        stsPreload: true
+        stsSeconds: 31536000
+        customFrameOptionsValue: "SAMEORIGIN"
+        referrerPolicy: "strict-origin-when-cross-origin"
+
+    # CORS for API
+    cors-headers:
+      headers:
+        accessControlAllowMethods:
+          - GET
+          - POST
+          - PUT
+          - PATCH
+          - DELETE
+          - OPTIONS
+        accessControlAllowHeaders:
+          - Authorization
+          - Content-Type
+          - X-Requested-With
+        accessControlAllowOriginList:
+          - "https://app.localhost"
+          - "https://app.localhost:3001"
+        accessControlMaxAge: 86400
+        addVaryHeader: true
+
+    # Rate Limiting
+    rate-limit:
+      rateLimit:
+        average: 100
+        burst: 50
+        period: 1m
+
+    # Compression
+    compress:
+      compress: {}
+
+    # Strip prefix for API versioning
+    api-strip-prefix:
+      stripPrefix:
+        prefixes:
+          - "/v1"

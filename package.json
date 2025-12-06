@@ -1,0 +1,25 @@
+{
+  "name": "kanban",
+  "version": "1.0.0",
+  "description": "A multi-tenant Kanban board platform for teams of any kind. Features a centralized user management portal with Microsoft Entra ID authentication, isolated team environments with dedicated containers and databases, built-in DNS server for dynamic subdomain generation, per-subdomain Let's Encrypt certificates via Certbot, and rich Markdown support with link previews.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hckmseduardo/kanban.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/hckmseduardo/kanban/issues"
+  },
+  "homepage": "https://github.com/hckmseduardo/kanban#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.57.0",
+    "playwright": "^1.57.0"
+  }
+}
