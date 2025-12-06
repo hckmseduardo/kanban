@@ -73,4 +73,19 @@ export const reportsApi = {
   getSummary: (boardId: string) => api.get(`/boards/${boardId}/reports/summary`)
 }
 
+export const attachmentsApi = {
+  list: (cardId: string) => api.get(`/cards/${cardId}/attachments`),
+  upload: (cardId: string, file: File) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return api.post(`/cards/${cardId}/attachments`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  },
+  download: (cardId: string, attachmentId: string) =>
+    api.get(`/cards/${cardId}/attachments/${attachmentId}`, { responseType: 'blob' }),
+  delete: (cardId: string, attachmentId: string) =>
+    api.delete(`/cards/${cardId}/attachments/${attachmentId}`)
+}
+
 export default api

@@ -42,6 +42,10 @@ class Database:
     def activity(self):
         return self.db.table("activity")
 
+    @property
+    def attachments(self):
+        return self.db.table("attachments")
+
     def generate_id(self) -> str:
         return str(uuid.uuid4())[:8]
 

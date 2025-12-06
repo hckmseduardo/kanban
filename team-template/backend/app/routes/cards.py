@@ -144,6 +144,20 @@ async def delete_card(card_id: str):
     # Get board_id for activity logging
     column = db.columns.get(Q.id == card["column_id"])
 
+    # Delete attachments (files and database records)
+    attachments = db.attachments.search(Q.card_id == card_id)
+    uploads_dir = DATA_DIR / "uploads" / "cards" / card_id
+    for attachment in attachments:
+        file_path = uploads_dir / attachment["filename"]
+        if file_path.exists():
+            file_path.unlink()
+    if uploads_dir.exists():
+        try:
+            uploads_dir.rmdir()
+        except OSError:
+            pass  # Directory not empty or other error
+    db.attachments.remove(Q.card_id == card_id)
+
     db.cards.remove(Q.id == card_id)
 
     # Log activity for analytics

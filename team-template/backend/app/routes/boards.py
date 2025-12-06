@@ -62,6 +62,9 @@ async def get_board(board_id: str):
 
     for col in columns:
         cards = db.cards.search(Q.column_id == col["id"])
+        # Add attachment count to each card
+        for card in cards:
+            card["attachment_count"] = len(db.attachments.search(Q.card_id == card["id"]))
         col["cards"] = sorted(cards, key=lambda x: x.get("position", 0))
 
     board["columns"] = columns
