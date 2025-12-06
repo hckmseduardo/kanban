@@ -20,7 +20,21 @@ entryPoints:
   websecure:
     address: ":443"
     http:
-      tls: {}
+      tls:
+        certResolver: letsencrypt
+        domains:
+          - main: "kanban.amazing-ai.tools"
+            sans:
+              - "*.kanban.amazing-ai.tools"
+
+# Certificate Resolvers (Let's Encrypt)
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: "eduardo.m.silva@gmail.com"
+      storage: /etc/traefik/certs/acme.json
+      httpChallenge:
+        entryPoint: web
 
 # Providers
 providers:
@@ -44,10 +58,3 @@ accessLog:
   filters:
     statusCodes:
       - "400-599"
-
-# TLS Configuration
-tls:
-  options:
-    default:
-      minVersion: VersionTLS12
-      sniStrict: true
