@@ -16,7 +16,8 @@ export default function Markdown({ content, className = '', compact = false }: M
       remarkPlugins={[remarkGfm]}
       components={{
         // Code blocks with syntax highlighting
-        code({ className, children, ...props }) {
+        code(props) {
+          const { className, children, ...rest } = props
           const match = /language-(\w+)/.exec(className || '')
           const language = match ? match[1] : ''
           const isInline = !language && !String(children).includes('\n')
@@ -24,7 +25,7 @@ export default function Markdown({ content, className = '', compact = false }: M
           if (!isInline && language) {
             return (
               <SyntaxHighlighter
-                style={oneDark as Record<string, React.CSSProperties>}
+                style={oneDark}
                 language={language}
                 PreTag="div"
                 className="rounded-md text-sm"
@@ -38,7 +39,7 @@ export default function Markdown({ content, className = '', compact = false }: M
           return (
             <code
               className="bg-gray-100 text-gray-800 px-1.5 py-0.5 rounded text-sm font-mono"
-              {...props}
+              {...rest}
             >
               {children}
             </code>
