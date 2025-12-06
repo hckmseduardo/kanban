@@ -2,6 +2,7 @@ import { Routes, Route } from 'react-router-dom'
 import BoardList from './pages/BoardList'
 import Board from './pages/Board'
 import Settings from './pages/Settings'
+import Reports from './pages/Reports'
 import Layout from './components/Layout'
 import { useSSO } from './hooks/useSSO'
 
@@ -25,6 +26,7 @@ export default function App() {
       <Route path="/" element={<Layout />}>
         <Route index element={<BoardList />} />
         <Route path="board/:boardId" element={<Board />} />
+        <Route path="board/:boardId/reports" element={<Reports />} />
         <Route path="settings" element={<Settings />} />
       </Route>
     </Routes>

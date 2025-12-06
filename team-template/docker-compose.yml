@@ -17,6 +17,8 @@ services:
       - "traefik.http.routers.${TEAM_SLUG}-api.rule=Host(`${TEAM_SLUG}.${DOMAIN}`) && PathPrefix(`/api`)"
       - "traefik.http.routers.${TEAM_SLUG}-api.entrypoints=websecure"
       - "traefik.http.routers.${TEAM_SLUG}-api.tls=true"
+      - "traefik.http.routers.${TEAM_SLUG}-api.middlewares=${TEAM_SLUG}-api-strip"
+      - "traefik.http.middlewares.${TEAM_SLUG}-api-strip.stripprefix.prefixes=/api"
       - "traefik.http.services.${TEAM_SLUG}-api.loadbalancer.server.port=8000"
     restart: unless-stopped
 

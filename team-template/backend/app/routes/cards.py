@@ -61,6 +61,14 @@ async def create_card(data: CardCreate):
     }
     db.cards.insert(card)
 
+    # Log activity for analytics
+    db.log_activity(
+        card_id=card["id"],
+        board_id=column["board_id"],
+        action="created",
+        to_column_id=data.column_id
+    )
+
     # Trigger webhooks
     await trigger_webhooks(db, "card.created", card)
 
@@ -102,8 +110,17 @@ async def update_card(card_id: str, data: CardUpdate):
 
     updated_card = {**card, **updates}
 
-    # Trigger webhooks
+    # Log activity and trigger webhooks
     if "column_id" in updates and updates["column_id"] != old_column_id:
+        # Get board_id from new column
+        new_column = db.columns.get(Q.id == updates["column_id"])
+        db.log_activity(
+            card_id=card_id,
+            board_id=new_column["board_id"],
+            action="moved",
+            from_column_id=old_column_id,
+            to_column_id=updates["column_id"]
+        )
         await trigger_webhooks(db, "card.moved", {
             "card": updated_card,
             "from_column": old_column_id,
@@ -124,7 +141,19 @@ async def delete_card(card_id: str):
     if not card:
         raise HTTPException(status_code=404, detail="Card not found")
 
+    # Get board_id for activity logging
+    column = db.columns.get(Q.id == card["column_id"])
+
     db.cards.remove(Q.id == card_id)
+
+    # Log activity for analytics
+    if column:
+        db.log_activity(
+            card_id=card_id,
+            board_id=column["board_id"],
+            action="deleted",
+            from_column_id=card["column_id"]
+        )
 
     await trigger_webhooks(db, "card.deleted", {"id": card_id})
 
@@ -158,6 +187,16 @@ async def move_card(card_id: str, column_id: str, position: int = 0):
     }, Q.id == card_id)
 
     updated_card = db.cards.get(Q.id == card_id)
+
+    # Log activity for analytics (only if actually moving to different column)
+    if old_column_id != column_id:
+        db.log_activity(
+            card_id=card_id,
+            board_id=column["board_id"],
+            action="moved",
+            from_column_id=old_column_id,
+            to_column_id=column_id
+        )
 
     await trigger_webhooks(db, "card.moved", {
         "card": updated_card,

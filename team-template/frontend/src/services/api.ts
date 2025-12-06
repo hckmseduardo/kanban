@@ -63,4 +63,14 @@ export const utilsApi = {
   extractUrls: (text: string) => api.post('/utils/extract-urls', null, { params: { text } })
 }
 
+export const reportsApi = {
+  getCycleTime: (boardId: string, params?: { from_date?: string; to_date?: string; group_by?: string }) =>
+    api.get(`/boards/${boardId}/reports/cycle-time`, { params }),
+  getLeadTime: (boardId: string, params?: { from_date?: string; to_date?: string; group_by?: string }) =>
+    api.get(`/boards/${boardId}/reports/lead-time`, { params }),
+  getThroughput: (boardId: string, params?: { from_date?: string; to_date?: string; group_by?: string }) =>
+    api.get(`/boards/${boardId}/reports/throughput`, { params }),
+  getSummary: (boardId: string) => api.get(`/boards/${boardId}/reports/summary`)
+}
+
 export default api

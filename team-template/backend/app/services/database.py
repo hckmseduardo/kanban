@@ -48,6 +48,25 @@ class Database:
     def timestamp(self) -> str:
         return datetime.utcnow().isoformat()
 
+    def log_activity(
+        self,
+        card_id: str,
+        board_id: str,
+        action: str,
+        from_column_id: str = None,
+        to_column_id: str = None
+    ):
+        """Log card activity for analytics tracking"""
+        self.activity.insert({
+            "id": self.generate_id(),
+            "card_id": card_id,
+            "board_id": board_id,
+            "action": action,
+            "from_column_id": from_column_id,
+            "to_column_id": to_column_id,
+            "timestamp": self.timestamp()
+        })
+
 
 # Query helper
 Q = Query()
