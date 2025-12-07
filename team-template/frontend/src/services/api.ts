@@ -88,4 +88,30 @@ export const attachmentsApi = {
     api.delete(`/cards/${cardId}/attachments/${attachmentId}`)
 }
 
+export const commentsApi = {
+  list: (cardId: string) => api.get(`/cards/${cardId}/comments`),
+  create: (cardId: string, data: { text: string; author_name?: string }) =>
+    api.post(`/cards/${cardId}/comments`, data),
+  update: (cardId: string, commentId: string, data: { text: string }) =>
+    api.patch(`/cards/${cardId}/comments/${commentId}`, data),
+  delete: (cardId: string, commentId: string) =>
+    api.delete(`/cards/${cardId}/comments/${commentId}`)
+}
+
+export const labelsApi = {
+  colors: () => api.get('/labels/colors'),
+  list: (boardId: string) => api.get(`/labels/boards/${boardId}/labels`),
+  create: (boardId: string, data: { name: string; color: string }) =>
+    api.post(`/labels/boards/${boardId}/labels`, data),
+  update: (boardId: string, labelId: string, data: { name?: string; color?: string }) =>
+    api.patch(`/labels/boards/${boardId}/labels/${labelId}`, data),
+  delete: (boardId: string, labelId: string) =>
+    api.delete(`/labels/boards/${boardId}/labels/${labelId}`)
+}
+
+export const membersApi = {
+  list: () => api.get('/members'),
+  get: (id: string) => api.get(`/members/${id}`)
+}
+
 export default api

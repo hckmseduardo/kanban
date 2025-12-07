@@ -2,7 +2,7 @@ import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { useState, useMemo, useRef } from 'react'
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query'
-import { cardsApi, attachmentsApi } from '../services/api'
+import { cardsApi, attachmentsApi, commentsApi, labelsApi, membersApi } from '../services/api'
 import LinkPreview, { extractFirstUrl } from './LinkPreview'
 import Markdown from './Markdown'
 import Checklist from './Checklist'
@@ -15,6 +15,29 @@ interface Attachment {
   size: number
   content_type: string
   uploaded_at: string
+}
+
+interface Comment {
+  id: string
+  card_id: string
+  text: string
+  author_name: string
+  created_at: string
+  updated_at: string
+}
+
+interface Label {
+  id: string
+  name: string
+  color: string
+  bg: string
+  text: string
+}
+
+interface Member {
+  id: string
+  name: string
+  email: string
 }
 
 interface ChecklistItem {
@@ -34,6 +57,7 @@ interface CardProps {
     assignee_id?: string
     checklist?: ChecklistItem[]
     attachment_count?: number
+    comment_count?: number
   }
   boardId?: string
   isDragging?: boolean
@@ -45,15 +69,14 @@ const priorityColors: Record<string, string> = {
   low: 'bg-green-500'
 }
 
-const labelColors = [
-  'bg-red-200 text-red-800',
-  'bg-blue-200 text-blue-800',
-  'bg-green-200 text-green-800',
-  'bg-purple-200 text-purple-800',
-  'bg-yellow-200 text-yellow-800'
+const priorityOptions = [
+  { value: '', label: 'None' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' }
 ]
 
-// Due date status helpers
+// Due date helpers
 function getDueDateStatus(dueDate: string): 'overdue' | 'today' | 'soon' | 'upcoming' | 'future' {
   const due = new Date(dueDate)
   const now = new Date()
@@ -107,15 +130,36 @@ function getFileIcon(contentType: string): string {
   return '📎'
 }
 
+function formatRelativeTime(dateString: string): string {
+  const date = new Date(dateString)
+  const now = new Date()
+  const diffMs = now.getTime() - date.getTime()
+  const diffMins = Math.floor(diffMs / 60000)
+  const diffHours = Math.floor(diffMs / 3600000)
+  const diffDays = Math.floor(diffMs / 86400000)
+
+  if (diffMins < 1) return 'just now'
+  if (diffMins < 60) return `${diffMins}m ago`
+  if (diffHours < 24) return `${diffHours}h ago`
+  if (diffDays < 7) return `${diffDays}d ago`
+  return date.toLocaleDateString()
+}
+
 export default function Card({ card, boardId, isDragging }: CardProps) {
   const queryClient = useQueryClient()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [showEdit, setShowEdit] = useState(false)
   const [isPreviewMode, setIsPreviewMode] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
+  const [newComment, setNewComment] = useState('')
+  const [showLabelPicker, setShowLabelPicker] = useState(false)
   const [editData, setEditData] = useState({
     title: card.title,
-    description: card.description || ''
+    description: card.description || '',
+    labels: card.labels || [],
+    priority: card.priority || '',
+    due_date: card.due_date || '',
+    assignee_id: card.assignee_id || ''
   })
 
   const {
@@ -131,6 +175,32 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
     transition
   }
 
+  // Queries
+  const { data: attachments = [] } = useQuery<Attachment[]>({
+    queryKey: ['attachments', card.id],
+    queryFn: () => attachmentsApi.list(card.id).then((res: { data: Attachment[] }) => res.data),
+    enabled: showEdit
+  })
+
+  const { data: comments = [] } = useQuery<Comment[]>({
+    queryKey: ['comments', card.id],
+    queryFn: () => commentsApi.list(card.id).then((res: { data: Comment[] }) => res.data),
+    enabled: showEdit
+  })
+
+  const { data: boardLabels = [] } = useQuery<Label[]>({
+    queryKey: ['labels', boardId],
+    queryFn: () => labelsApi.list(boardId!).then((res: { data: Label[] }) => res.data),
+    enabled: showEdit && !!boardId
+  })
+
+  const { data: members = [] } = useQuery<Member[]>({
+    queryKey: ['members'],
+    queryFn: () => membersApi.list().then((res: { data: Member[] }) => res.data),
+    enabled: showEdit
+  })
+
+  // Mutations
   const updateCard = useMutation({
     mutationFn: (data: any) => cardsApi.update(card.id, data),
     onSuccess: () => {
@@ -148,13 +218,6 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
         queryClient.invalidateQueries({ queryKey: ['board', boardId] })
       }
     }
-  })
-
-  // Attachments query and mutations
-  const { data: attachments = [] } = useQuery<Attachment[]>({
-    queryKey: ['attachments', card.id],
-    queryFn: () => attachmentsApi.list(card.id).then(res => res.data),
-    enabled: showEdit
   })
 
   const uploadAttachment = useMutation({
@@ -181,6 +244,29 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
     }
   })
 
+  const createComment = useMutation({
+    mutationFn: (text: string) => commentsApi.create(card.id, { text }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['comments', card.id] })
+      setNewComment('')
+    }
+  })
+
+  const deleteComment = useMutation({
+    mutationFn: (commentId: string) => commentsApi.delete(card.id, commentId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['comments', card.id] })
+    }
+  })
+
+  const createLabel = useMutation({
+    mutationFn: (data: { name: string; color: string }) => labelsApi.create(boardId!, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['labels', boardId] })
+    }
+  })
+
+  // Handlers
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (file) {
@@ -208,11 +294,36 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
     }
   }
 
+  const toggleLabel = (labelName: string) => {
+    const newLabels = editData.labels.includes(labelName)
+      ? editData.labels.filter((l: string) => l !== labelName)
+      : [...editData.labels, labelName]
+    setEditData({ ...editData, labels: newLabels })
+  }
+
   // Extract first URL from description for preview
   const previewUrl = useMemo(() => {
     if (!card.description) return null
     return extractFirstUrl(card.description)
   }, [card.description])
+
+  // Get label styles for card preview
+  const getLabelStyle = (labelName: string) => {
+    const label = boardLabels.find((l: Label) => l.name === labelName)
+    if (label) {
+      return { backgroundColor: label.bg, color: label.text }
+    }
+    // Fallback colors
+    const colors = [
+      { bg: '#FEE2E2', text: '#991B1B' },
+      { bg: '#DBEAFE', text: '#1E40AF' },
+      { bg: '#DCFCE7', text: '#166534' },
+      { bg: '#F3E8FF', text: '#6B21A8' },
+      { bg: '#FEF9C3', text: '#854D0E' }
+    ]
+    const index = labelName.length % colors.length
+    return { backgroundColor: colors[index].bg, color: colors[index].text }
+  }
 
   if (isDragging) {
     return (
@@ -242,15 +353,15 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
           <p className="text-xs text-gray-500 mt-1 line-clamp-2">{card.description}</p>
         )}
 
-        {/* Link Preview */}
         {previewUrl && <LinkPreview url={previewUrl} compact />}
 
         {card.labels && card.labels.length > 0 && (
           <div className="flex flex-wrap gap-1 mt-2">
-            {card.labels.map((label, i) => (
+            {card.labels.map((label) => (
               <span
                 key={label}
-                className={`px-2 py-0.5 text-xs rounded ${labelColors[i % labelColors.length]}`}
+                className="px-2 py-0.5 text-xs rounded font-medium"
+                style={getLabelStyle(label)}
               >
                 {label}
               </span>
@@ -258,29 +369,33 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
           </div>
         )}
 
-        {/* Checklist and Attachment indicators */}
-        {(card.checklist?.length || card.attachment_count) ? (
-          <div className="flex items-center space-x-3 mt-2 text-xs text-gray-500">
-            {card.checklist && card.checklist.length > 0 && (
-              <div className="flex items-center space-x-1">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
-                </svg>
-                <span>
-                  {card.checklist.filter(i => i.completed).length}/{card.checklist.length}
-                </span>
-              </div>
-            )}
-            {card.attachment_count ? (
-              <div className="flex items-center space-x-1">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-                </svg>
-                <span>{card.attachment_count}</span>
-              </div>
-            ) : null}
-          </div>
-        ) : null}
+        {/* Indicators row */}
+        <div className="flex items-center flex-wrap gap-2 mt-2">
+          {card.checklist && card.checklist.length > 0 && (
+            <div className="flex items-center space-x-1 text-xs text-gray-500">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+              </svg>
+              <span>{card.checklist.filter(i => i.completed).length}/{card.checklist.length}</span>
+            </div>
+          )}
+          {card.attachment_count ? (
+            <div className="flex items-center space-x-1 text-xs text-gray-500">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+              </svg>
+              <span>{card.attachment_count}</span>
+            </div>
+          ) : null}
+          {card.comment_count ? (
+            <div className="flex items-center space-x-1 text-xs text-gray-500">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+              </svg>
+              <span>{card.comment_count}</span>
+            </div>
+          ) : null}
+        </div>
 
         {card.due_date && (() => {
           const status = getDueDateStatus(card.due_date)
@@ -298,19 +413,130 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
         })()}
       </div>
 
+      {/* Edit Modal */}
       {showEdit && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-            <h2 className="text-lg font-medium mb-4">Edit Card</h2>
-            <div className="space-y-4">
+          <div className="bg-white rounded-lg w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
+            {/* Header */}
+            <div className="flex items-center justify-between p-4 border-b">
+              <h2 className="text-lg font-medium">Edit Card</h2>
+              <button onClick={() => setShowEdit(false)} className="text-gray-400 hover:text-gray-600">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              {/* Title */}
               <input
                 type="text"
                 value={editData.title}
                 onChange={e => setEditData({ ...editData, title: e.target.value })}
-                className="w-full px-3 py-2 border rounded-lg"
+                className="w-full px-3 py-2 text-lg font-medium border rounded-lg"
+                placeholder="Card title"
               />
 
-              {/* Description with Preview Toggle */}
+              {/* Labels */}
+              <div>
+                <label className="text-sm font-medium text-gray-700 mb-2 block">Labels</label>
+                <div className="flex flex-wrap gap-2">
+                  {editData.labels.map(label => (
+                    <span
+                      key={label}
+                      className="px-2 py-1 text-sm rounded font-medium flex items-center gap-1 cursor-pointer hover:opacity-80"
+                      style={getLabelStyle(label)}
+                      onClick={() => toggleLabel(label)}
+                    >
+                      {label}
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </span>
+                  ))}
+                  <button
+                    onClick={() => setShowLabelPicker(!showLabelPicker)}
+                    className="px-2 py-1 text-sm bg-gray-100 text-gray-600 rounded hover:bg-gray-200"
+                  >
+                    + Add Label
+                  </button>
+                </div>
+                {showLabelPicker && (
+                  <div className="mt-2 p-2 border rounded-lg bg-gray-50">
+                    <div className="flex flex-wrap gap-2">
+                      {boardLabels.filter(l => !editData.labels.includes(l.name)).map(label => (
+                        <button
+                          key={label.id}
+                          onClick={() => toggleLabel(label.name)}
+                          className="px-2 py-1 text-sm rounded font-medium hover:opacity-80"
+                          style={{ backgroundColor: label.bg, color: label.text }}
+                        >
+                          {label.name}
+                        </button>
+                      ))}
+                    </div>
+                    {boardLabels.length === 0 && (
+                      <p className="text-sm text-gray-500">No labels defined. Create one below:</p>
+                    )}
+                    <div className="mt-2 flex gap-2">
+                      <input
+                        type="text"
+                        placeholder="New label name"
+                        className="flex-1 px-2 py-1 text-sm border rounded"
+                        onKeyDown={e => {
+                          if (e.key === 'Enter' && e.currentTarget.value) {
+                            createLabel.mutate({ name: e.currentTarget.value, color: 'blue' })
+                            e.currentTarget.value = ''
+                          }
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Priority & Due Date Row */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-sm font-medium text-gray-700 mb-1 block">Priority</label>
+                  <select
+                    value={editData.priority}
+                    onChange={e => setEditData({ ...editData, priority: e.target.value })}
+                    className="w-full px-3 py-2 border rounded-lg"
+                  >
+                    {priorityOptions.map(opt => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-700 mb-1 block">Due Date</label>
+                  <input
+                    type="date"
+                    value={editData.due_date}
+                    onChange={e => setEditData({ ...editData, due_date: e.target.value })}
+                    className="w-full px-3 py-2 border rounded-lg"
+                  />
+                </div>
+              </div>
+
+              {/* Assignee */}
+              <div>
+                <label className="text-sm font-medium text-gray-700 mb-1 block">Assignee</label>
+                <select
+                  value={editData.assignee_id}
+                  onChange={e => setEditData({ ...editData, assignee_id: e.target.value })}
+                  className="w-full px-3 py-2 border rounded-lg"
+                >
+                  <option value="">Unassigned</option>
+                  {members.map(member => (
+                    <option key={member.id} value={member.id}>{member.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Description */}
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <label className="text-sm font-medium text-gray-700">Description</label>
@@ -354,33 +580,21 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
                     onChange={e => setEditData({ ...editData, description: e.target.value })}
                     placeholder="Description (supports Markdown)"
                     className="w-full px-3 py-2 border rounded-lg font-mono text-sm"
-                    rows={6}
+                    rows={4}
                   />
                 )}
-                <p className="mt-1 text-xs text-gray-500">
-                  Supports Markdown: **bold**, *italic*, `code`, ```code blocks```, - lists, [links](url)
-                </p>
               </div>
 
               {/* Checklist */}
               <div className="border-t pt-4">
-                <Checklist
-                  cardId={card.id}
-                  boardId={boardId}
-                  items={card.checklist || []}
-                />
+                <Checklist cardId={card.id} boardId={boardId} items={card.checklist || []} />
               </div>
 
               {/* Attachments */}
               <div className="border-t pt-4">
                 <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-sm font-medium text-gray-700">Attachments</h3>
-                  <input
-                    type="file"
-                    ref={fileInputRef}
-                    onChange={handleFileSelect}
-                    className="hidden"
-                  />
+                  <h3 className="text-sm font-medium text-gray-700">Attachments ({attachments.length})</h3>
+                  <input type="file" ref={fileInputRef} onChange={handleFileSelect} className="hidden" />
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
@@ -392,38 +606,28 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
                 </div>
 
                 {uploadError && (
-                  <div className="mb-3 p-2 bg-red-50 text-red-600 text-sm rounded">
-                    {uploadError}
-                  </div>
+                  <div className="mb-3 p-2 bg-red-50 text-red-600 text-sm rounded">{uploadError}</div>
                 )}
 
                 {attachments.length > 0 ? (
                   <div className="space-y-2">
                     {attachments.map((attachment) => (
-                      <div
-                        key={attachment.id}
-                        className="flex items-center justify-between p-2 bg-gray-50 rounded hover:bg-gray-100"
-                      >
+                      <div key={attachment.id} className="flex items-center justify-between p-2 bg-gray-50 rounded hover:bg-gray-100">
                         <div className="flex items-center space-x-2 min-w-0 flex-1">
                           <span className="text-lg">{getFileIcon(attachment.content_type)}</span>
                           <div className="min-w-0 flex-1">
                             <button
                               onClick={() => handleDownload(attachment)}
                               className="text-sm text-blue-600 hover:text-blue-800 truncate block max-w-full text-left"
-                              title={attachment.original_filename}
                             >
                               {attachment.original_filename}
                             </button>
-                            <span className="text-xs text-gray-500">
-                              {formatFileSize(attachment.size)}
-                            </span>
+                            <span className="text-xs text-gray-500">{formatFileSize(attachment.size)}</span>
                           </div>
                         </div>
                         <button
                           onClick={() => deleteAttachment.mutate(attachment.id)}
-                          disabled={deleteAttachment.isPending}
                           className="ml-2 p-1 text-gray-400 hover:text-red-500"
-                          title="Delete attachment"
                         >
                           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -433,37 +637,90 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
                     ))}
                   </div>
                 ) : (
-                  <p className="text-sm text-gray-400 italic">No attachments yet</p>
+                  <p className="text-sm text-gray-400 italic">No attachments</p>
                 )}
-                <p className="mt-2 text-xs text-gray-400">
-                  Max 10MB. Allowed: images, PDFs, documents, text files, archives
-                </p>
               </div>
 
-              <div className="flex justify-between pt-2 border-t">
-                <button
-                  onClick={() => deleteCard.mutate()}
-                  className="text-red-600 hover:text-red-700"
-                >
-                  Delete
-                </button>
-                <div className="flex space-x-2">
-                  <button
-                    onClick={() => {
-                      setShowEdit(false)
-                      setIsPreviewMode(false)
+              {/* Comments */}
+              <div className="border-t pt-4">
+                <h3 className="text-sm font-medium text-gray-700 mb-3">Comments ({comments.length})</h3>
+
+                {/* Add comment */}
+                <div className="flex gap-2 mb-4">
+                  <input
+                    type="text"
+                    value={newComment}
+                    onChange={e => setNewComment(e.target.value)}
+                    placeholder="Write a comment..."
+                    className="flex-1 px-3 py-2 border rounded-lg text-sm"
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' && newComment.trim()) {
+                        createComment.mutate(newComment)
+                      }
                     }}
-                    className="px-4 py-2 text-gray-600 hover:text-gray-800"
-                  >
-                    Cancel
-                  </button>
+                  />
                   <button
-                    onClick={() => updateCard.mutate(editData)}
-                    className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700"
+                    onClick={() => newComment.trim() && createComment.mutate(newComment)}
+                    disabled={!newComment.trim() || createComment.isPending}
+                    className="px-4 py-2 bg-primary-600 text-white rounded-lg text-sm hover:bg-primary-700 disabled:opacity-50"
                   >
-                    Save
+                    Post
                   </button>
                 </div>
+
+                {/* Comment list */}
+                {comments.length > 0 ? (
+                  <div className="space-y-3">
+                    {comments.map(comment => (
+                      <div key={comment.id} className="bg-gray-50 rounded-lg p-3">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-medium text-gray-700">{comment.author_name}</span>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-gray-400">{formatRelativeTime(comment.created_at)}</span>
+                            <button
+                              onClick={() => deleteComment.mutate(comment.id)}
+                              className="text-gray-400 hover:text-red-500"
+                            >
+                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                              </svg>
+                            </button>
+                          </div>
+                        </div>
+                        <p className="text-sm text-gray-600">{comment.text}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-400 italic">No comments yet</p>
+                )}
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="flex justify-between p-4 border-t bg-gray-50">
+              <button
+                onClick={() => deleteCard.mutate()}
+                className="text-red-600 hover:text-red-700 text-sm"
+              >
+                Delete Card
+              </button>
+              <div className="flex space-x-2">
+                <button
+                  onClick={() => {
+                    setShowEdit(false)
+                    setIsPreviewMode(false)
+                  }}
+                  className="px-4 py-2 text-gray-600 hover:text-gray-800 text-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => updateCard.mutate(editData)}
+                  className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm"
+                >
+                  Save Changes
+                </button>
               </div>
             </div>
           </div>

@@ -46,6 +46,14 @@ class Database:
     def attachments(self):
         return self.db.table("attachments")
 
+    @property
+    def comments(self):
+        return self.db.table("comments")
+
+    @property
+    def labels(self):
+        return self.db.table("labels")
+
     def generate_id(self) -> str:
         return str(uuid.uuid4())[:8]
 
