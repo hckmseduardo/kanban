@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 import os
 
-from .routes import boards, columns, cards, members, webhooks, utils, reports, attachments, comments, labels, activity, export, templates, reminders, dependencies, timetracking, customfields, covers, search, subtasks, cardlinks, notifications, automations, analytics, cardtemplates, recurring, permissions
+from .routes import boards, columns, cards, members, webhooks, utils, reports, attachments, comments, labels, activity, export, templates, reminders, dependencies, timetracking, customfields, covers, search, subtasks, cardlinks, notifications, automations, analytics, cardtemplates, recurring, permissions, websocket, team_members
 from .services.database import Database
 
 # Configuration
@@ -71,6 +71,8 @@ app.include_router(analytics.router, tags=["analytics"])
 app.include_router(cardtemplates.router, tags=["cardtemplates"])
 app.include_router(recurring.router, tags=["recurring"])
 app.include_router(permissions.router, tags=["permissions"])
+app.include_router(websocket.router, tags=["websocket"])
+app.include_router(team_members.router, tags=["team"])
 
 
 @app.get("/health")

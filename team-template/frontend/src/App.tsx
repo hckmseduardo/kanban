@@ -7,6 +7,7 @@ import Calendar from './pages/Calendar'
 import Swimlanes from './pages/Swimlanes'
 import Analytics from './pages/Analytics'
 import Gantt from './pages/Gantt'
+import TeamMembers from './pages/TeamMembers'
 import Layout from './components/Layout'
 import { useSSO } from './hooks/useSSO'
 
@@ -36,6 +37,7 @@ export default function App() {
         <Route path="board/:boardId/analytics" element={<Analytics />} />
         <Route path="board/:boardId/gantt" element={<Gantt />} />
         <Route path="settings" element={<Settings />} />
+        <Route path="team" element={<TeamMembers />} />
       </Route>
     </Routes>
   )

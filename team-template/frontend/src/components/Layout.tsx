@@ -51,6 +51,12 @@ export default function Layout() {
                   Boards
                 </Link>
                 <Link
+                  to="/team"
+                  className={`px-3 py-2 text-sm font-medium ${location.pathname === '/team' ? 'text-primary-600' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}
+                >
+                  Team
+                </Link>
+                <Link
                   to="/settings"
                   className={`px-3 py-2 text-sm font-medium ${location.pathname === '/settings' ? 'text-primary-600' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}
                 >

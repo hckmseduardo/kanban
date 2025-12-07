@@ -349,4 +349,31 @@ export const permissionsApi = {
   listRoles: () => api.get('/permissions/roles')
 }
 
+export const teamApi = {
+  // Team Members
+  listMembers: (params?: { include_inactive?: boolean; role?: string }) =>
+    api.get('/team/members', { params }),
+  getMember: (memberId: string) => api.get(`/team/members/${memberId}`),
+  addMember: (data: { email: string; name?: string; role?: string }) =>
+    api.post('/team/members', data),
+  updateMember: (memberId: string, data: { name?: string; role?: string; is_active?: boolean }) =>
+    api.patch(`/team/members/${memberId}`, data),
+  removeMember: (memberId: string, softDelete?: boolean) =>
+    api.delete(`/team/members/${memberId}`, { params: { soft_delete: softDelete } }),
+
+  // Invitations
+  listInvitations: (status?: string) => api.get('/team/invitations', { params: { status } }),
+  createInvitation: (data: { email: string; role?: string; message?: string }, invitedBy?: string) =>
+    api.post('/team/invitations', data, { params: { invited_by: invitedBy } }),
+  resendInvitation: (invitationId: string) => api.post(`/team/invitations/${invitationId}/resend`),
+  cancelInvitation: (invitationId: string) => api.delete(`/team/invitations/${invitationId}`),
+  acceptInvitation: (token: string, userId?: string, userName?: string) =>
+    api.post('/team/join', null, { params: { token, user_id: userId, user_name: userName } }),
+
+  // Team Settings
+  getSettings: () => api.get('/team/settings'),
+  updateSettings: (data: { name?: string; allow_member_invites?: boolean; default_board_visibility?: string }) =>
+    api.patch('/team/settings', null, { params: data })
+}
+
 export default api
