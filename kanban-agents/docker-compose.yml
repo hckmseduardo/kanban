@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  # Webhook server mode
+  webhook-server:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - KANBAN_URL=${KANBAN_URL:-http://host.docker.internal:8000}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - AGENT_LABEL=${AGENT_LABEL:-agent}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ${REPO_PATH:-./workspace}:/workspace:rw
+    command: ["python", "main.py", "server", "--port", "8080"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Polling mode (alternative to webhook)
+  poller:
+    build: .
+    environment:
+      - KANBAN_URL=${KANBAN_URL:-http://host.docker.internal:8000}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - BOARD_ID=${BOARD_ID}
+      - AGENT_LABEL=${AGENT_LABEL:-agent}
+      - POLL_INTERVAL=${POLL_INTERVAL:-30}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ${REPO_PATH:-./workspace}:/workspace:rw
+    command: ["python", "main.py", "poll", "--board-id", "${BOARD_ID}"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    profiles:
+      - polling  # Only start with: docker compose --profile polling up
