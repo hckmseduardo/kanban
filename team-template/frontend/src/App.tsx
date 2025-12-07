@@ -8,6 +8,7 @@ import Swimlanes from './pages/Swimlanes'
 import Analytics from './pages/Analytics'
 import Gantt from './pages/Gantt'
 import TeamMembers from './pages/TeamMembers'
+import JoinTeam from './pages/JoinTeam'
 import Layout from './components/Layout'
 import { useSSO } from './hooks/useSSO'
 
@@ -28,6 +29,9 @@ export default function App() {
 
   return (
     <Routes>
+      {/* Public route for invitation acceptance */}
+      <Route path="join" element={<JoinTeam />} />
+
       <Route path="/" element={<Layout />}>
         <Route index element={<BoardList />} />
         <Route path="board/:boardId" element={<Board />} />

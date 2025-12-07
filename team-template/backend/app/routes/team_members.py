@@ -12,11 +12,22 @@ import os
 import uuid
 import secrets
 from ..services.database import Database, Q
+from ..services.email import send_invitation_email
 
 router = APIRouter()
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 db = Database(DATA_DIR / "db" / "team.json")
+TEAM_SLUG = os.getenv("TEAM_SLUG", "team")
+DOMAIN = os.getenv("DOMAIN", "localhost")
+TEAM_BASE_URL = os.getenv("TEAM_BASE_URL")
+TEAM_NAME = os.getenv("TEAM_NAME", TEAM_SLUG)
+
+
+def build_invite_link(token: str) -> str:
+    """Construct a user-facing invite link for the email body."""
+    base = TEAM_BASE_URL or f"https://{TEAM_SLUG}.{DOMAIN}"
+    return f"{base.rstrip('/')}/join?token={token}"
 
 
 class TeamMemberCreate(BaseModel):
@@ -238,9 +249,26 @@ async def create_invitation(invitation: InvitationCreate, invited_by: str = None
 
     invitations_table.insert(new_invitation)
 
+    invite_link = build_invite_link(token)
+
+    email_result = send_invitation_email(
+        to_email=invitation.email,
+        invite_link=invite_link,
+        team_name=TEAM_NAME,
+        invited_by=invited_by,
+        message=invitation.message
+    )
+
+    if email_result.get("sent"):
+        invitations_table.update({"email_sent_at": db.timestamp()}, Q.id == new_invitation["id"])
+    else:
+        invitations_table.update({"email_error": email_result.get("error")}, Q.id == new_invitation["id"])
+
     return {
         **new_invitation,
-        "invite_link": f"/join?token={token}"  # Frontend would construct full URL
+        "invite_link": invite_link,
+        "email_sent": email_result.get("sent", False),
+        "email_error": email_result.get("error")
     }
 
 
@@ -266,9 +294,26 @@ async def resend_invitation(invitation_id: str):
         "resent_at": db.timestamp()
     }, Q.id == invitation_id)
 
+    invite_link = build_invite_link(new_token)
+
+    email_result = send_invitation_email(
+        to_email=invitation["email"],
+        invite_link=invite_link,
+        team_name=TEAM_NAME,
+        invited_by=invitation.get("invited_by"),
+        message=invitation.get("message")
+    )
+
+    if email_result.get("sent"):
+        invitations_table.update({"email_sent_at": db.timestamp()}, Q.id == invitation_id)
+    else:
+        invitations_table.update({"email_error": email_result.get("error")}, Q.id == invitation_id)
+
     return {
         "message": "Invitation resent",
-        "invite_link": f"/join?token={new_token}"
+        "invite_link": invite_link,
+        "email_sent": email_result.get("sent", False),
+        "email_error": email_result.get("error")
     }
 
 
