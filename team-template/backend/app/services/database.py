@@ -54,6 +54,34 @@ class Database:
     def labels(self):
         return self.db.table("labels")
 
+    @property
+    def templates(self):
+        return self.db.table("templates")
+
+    @property
+    def notifications(self):
+        return self.db.table("notifications")
+
+    @property
+    def notification_preferences(self):
+        return self.db.table("notification_preferences")
+
+    @property
+    def automations(self):
+        return self.db.table("automations")
+
+    @property
+    def card_templates(self):
+        return self.db.table("card_templates")
+
+    @property
+    def recurring_cards(self):
+        return self.db.table("recurring_cards")
+
+    @property
+    def board_members(self):
+        return self.db.table("board_members")
+
     def generate_id(self) -> str:
         return str(uuid.uuid4())[:8]
 
@@ -66,9 +94,11 @@ class Database:
         board_id: str,
         action: str,
         from_column_id: str = None,
-        to_column_id: str = None
+        to_column_id: str = None,
+        details: dict = None,
+        user_id: str = None
     ):
-        """Log card activity for analytics tracking"""
+        """Log card activity for analytics and history tracking"""
         self.activity.insert({
             "id": self.generate_id(),
             "card_id": card_id,
@@ -76,6 +106,8 @@ class Database:
             "action": action,
             "from_column_id": from_column_id,
             "to_column_id": to_column_id,
+            "details": details or {},
+            "user_id": user_id,
             "timestamp": self.timestamp()
         })
 

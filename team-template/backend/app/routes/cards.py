@@ -322,3 +322,305 @@ async def toggle_checklist_item(card_id: str, item_id: str):
     }, Q.id == card_id)
 
     return checklist[item_index]
+
+
+# =============================================================================
+# Archive Routes
+# =============================================================================
+
+@router.post("/{card_id}/archive")
+async def archive_card(card_id: str):
+    """Archive a card (soft delete)"""
+    db.initialize()
+
+    card = db.cards.get(Q.id == card_id)
+    if not card:
+        raise HTTPException(status_code=404, detail="Card not found")
+
+    if card.get("archived"):
+        raise HTTPException(status_code=400, detail="Card is already archived")
+
+    column = db.columns.get(Q.id == card["column_id"])
+
+    db.cards.update({
+        "archived": True,
+        "archived_at": db.timestamp(),
+        "updated_at": db.timestamp()
+    }, Q.id == card_id)
+
+    # Log activity
+    if column:
+        db.log_activity(
+            card_id=card_id,
+            board_id=column["board_id"],
+            action="archived",
+            from_column_id=card["column_id"],
+            details={"title": card["title"]}
+        )
+
+    return {"archived": True}
+
+
+@router.post("/{card_id}/restore")
+async def restore_card(card_id: str, column_id: str = None):
+    """Restore an archived card"""
+    db.initialize()
+
+    card = db.cards.get(Q.id == card_id)
+    if not card:
+        raise HTTPException(status_code=404, detail="Card not found")
+
+    if not card.get("archived"):
+        raise HTTPException(status_code=400, detail="Card is not archived")
+
+    # Use provided column_id or original column
+    target_column_id = column_id or card["column_id"]
+    column = db.columns.get(Q.id == target_column_id)
+
+    if not column:
+        raise HTTPException(status_code=404, detail="Target column not found")
+
+    # Check WIP limit
+    if column.get("wip_limit"):
+        current_cards = len(db.cards.search(
+            (Q.column_id == target_column_id) & (~Q.archived.exists() | (Q.archived == False))
+        ))
+        if current_cards >= column["wip_limit"]:
+            raise HTTPException(status_code=400, detail="Target column WIP limit reached")
+
+    db.cards.update({
+        "archived": False,
+        "archived_at": None,
+        "column_id": target_column_id,
+        "updated_at": db.timestamp()
+    }, Q.id == card_id)
+
+    # Log activity
+    db.log_activity(
+        card_id=card_id,
+        board_id=column["board_id"],
+        action="restored",
+        to_column_id=target_column_id,
+        details={"title": card["title"]}
+    )
+
+    return db.cards.get(Q.id == card_id)
+
+
+# =============================================================================
+# Copy Routes
+# =============================================================================
+
+@router.post("/{card_id}/copy")
+async def copy_card(card_id: str, column_id: str = None, include_comments: bool = False):
+    """Copy a card to the same or different column"""
+    db.initialize()
+
+    card = db.cards.get(Q.id == card_id)
+    if not card:
+        raise HTTPException(status_code=404, detail="Card not found")
+
+    # Use provided column_id or same column
+    target_column_id = column_id or card["column_id"]
+    column = db.columns.get(Q.id == target_column_id)
+
+    if not column:
+        raise HTTPException(status_code=404, detail="Target column not found")
+
+    # Check WIP limit
+    if column.get("wip_limit"):
+        current_cards = len(db.cards.search(
+            (Q.column_id == target_column_id) & (~Q.archived.exists() | (Q.archived == False))
+        ))
+        if current_cards >= column["wip_limit"]:
+            raise HTTPException(status_code=400, detail="Target column WIP limit reached")
+
+    # Create new card with copied data
+    new_card_id = db.generate_id()
+
+    # Copy checklist items with new IDs
+    new_checklist = [
+        {"id": db.generate_id(), "text": item["text"], "completed": False}
+        for item in card.get("checklist", [])
+    ]
+
+    new_card = {
+        "id": new_card_id,
+        "column_id": target_column_id,
+        "title": f"{card['title']} (Copy)",
+        "description": card.get("description"),
+        "position": len(db.cards.search(Q.column_id == target_column_id)),
+        "assignee_id": card.get("assignee_id"),
+        "due_date": card.get("due_date"),
+        "labels": card.get("labels", []).copy(),
+        "priority": card.get("priority"),
+        "checklist": new_checklist,
+        "archived": False,
+        "created_at": db.timestamp(),
+        "updated_at": db.timestamp()
+    }
+    db.cards.insert(new_card)
+
+    # Optionally copy comments
+    if include_comments:
+        comments = db.comments.search(Q.card_id == card_id)
+        for comment in comments:
+            db.comments.insert({
+                "id": db.generate_id(),
+                "card_id": new_card_id,
+                "text": comment["text"],
+                "author_name": comment.get("author_name"),
+                "created_at": db.timestamp()
+            })
+
+    # Log activity
+    db.log_activity(
+        card_id=new_card_id,
+        board_id=column["board_id"],
+        action="created",
+        to_column_id=target_column_id,
+        details={"copied_from": card_id, "original_title": card["title"]}
+    )
+
+    await trigger_webhooks(db, "card.created", new_card)
+
+    return new_card
+
+
+# =============================================================================
+# Bulk Operations
+# =============================================================================
+
+from pydantic import BaseModel
+from typing import List
+
+
+class BulkMoveRequest(BaseModel):
+    card_ids: List[str]
+    column_id: str
+
+
+class BulkArchiveRequest(BaseModel):
+    card_ids: List[str]
+
+
+class BulkDeleteRequest(BaseModel):
+    card_ids: List[str]
+
+
+@router.post("/bulk/move")
+async def bulk_move_cards(data: BulkMoveRequest):
+    """Move multiple cards to a column"""
+    db.initialize()
+
+    column = db.columns.get(Q.id == data.column_id)
+    if not column:
+        raise HTTPException(status_code=404, detail="Column not found")
+
+    # Check WIP limit
+    if column.get("wip_limit"):
+        current_cards = len(db.cards.search(
+            (Q.column_id == data.column_id) & (~Q.archived.exists() | (Q.archived == False))
+        ))
+        if current_cards + len(data.card_ids) > column["wip_limit"]:
+            raise HTTPException(status_code=400, detail="Would exceed column WIP limit")
+
+    moved = []
+    position = len(db.cards.search(Q.column_id == data.column_id))
+
+    for card_id in data.card_ids:
+        card = db.cards.get(Q.id == card_id)
+        if card and card["column_id"] != data.column_id:
+            old_column_id = card["column_id"]
+            db.cards.update({
+                "column_id": data.column_id,
+                "position": position,
+                "updated_at": db.timestamp()
+            }, Q.id == card_id)
+
+            db.log_activity(
+                card_id=card_id,
+                board_id=column["board_id"],
+                action="moved",
+                from_column_id=old_column_id,
+                to_column_id=data.column_id,
+                details={"bulk_operation": True}
+            )
+            moved.append(card_id)
+            position += 1
+
+    return {"moved": moved, "count": len(moved)}
+
+
+@router.post("/bulk/archive")
+async def bulk_archive_cards(data: BulkArchiveRequest):
+    """Archive multiple cards"""
+    db.initialize()
+
+    archived = []
+    for card_id in data.card_ids:
+        card = db.cards.get(Q.id == card_id)
+        if card and not card.get("archived"):
+            column = db.columns.get(Q.id == card["column_id"])
+
+            db.cards.update({
+                "archived": True,
+                "archived_at": db.timestamp(),
+                "updated_at": db.timestamp()
+            }, Q.id == card_id)
+
+            if column:
+                db.log_activity(
+                    card_id=card_id,
+                    board_id=column["board_id"],
+                    action="archived",
+                    from_column_id=card["column_id"],
+                    details={"bulk_operation": True}
+                )
+            archived.append(card_id)
+
+    return {"archived": archived, "count": len(archived)}
+
+
+@router.post("/bulk/delete")
+async def bulk_delete_cards(data: BulkDeleteRequest):
+    """Delete multiple cards permanently"""
+    db.initialize()
+
+    deleted = []
+    for card_id in data.card_ids:
+        card = db.cards.get(Q.id == card_id)
+        if card:
+            column = db.columns.get(Q.id == card["column_id"])
+
+            # Delete attachments
+            attachments = db.attachments.search(Q.card_id == card_id)
+            uploads_dir = DATA_DIR / "uploads" / "cards" / card_id
+            for attachment in attachments:
+                file_path = uploads_dir / attachment["filename"]
+                if file_path.exists():
+                    file_path.unlink()
+            if uploads_dir.exists():
+                try:
+                    uploads_dir.rmdir()
+                except OSError:
+                    pass
+            db.attachments.remove(Q.card_id == card_id)
+
+            # Delete comments
+            db.comments.remove(Q.card_id == card_id)
+
+            # Delete the card
+            db.cards.remove(Q.id == card_id)
+
+            if column:
+                db.log_activity(
+                    card_id=card_id,
+                    board_id=column["board_id"],
+                    action="deleted",
+                    from_column_id=card["column_id"],
+                    details={"bulk_operation": True}
+                )
+            deleted.append(card_id)
+
+    return {"deleted": deleted, "count": len(deleted)}

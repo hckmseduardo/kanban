@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 import os
 
-from .routes import boards, columns, cards, members, webhooks, utils, reports, attachments, comments, labels
+from .routes import boards, columns, cards, members, webhooks, utils, reports, attachments, comments, labels, activity, export, templates, reminders, dependencies, timetracking, customfields, covers, search, subtasks, cardlinks, notifications, automations, analytics, cardtemplates, recurring, permissions
 from .services.database import Database
 
 # Configuration
@@ -54,6 +54,23 @@ app.include_router(reports.router, tags=["reports"])
 app.include_router(attachments.router, tags=["attachments"])
 app.include_router(comments.router, tags=["comments"])
 app.include_router(labels.router, prefix="/labels", tags=["labels"])
+app.include_router(activity.router, tags=["activity"])
+app.include_router(export.router, tags=["export"])
+app.include_router(templates.router, prefix="/templates", tags=["templates"])
+app.include_router(reminders.router, tags=["reminders"])
+app.include_router(dependencies.router, tags=["dependencies"])
+app.include_router(timetracking.router, tags=["timetracking"])
+app.include_router(customfields.router, tags=["customfields"])
+app.include_router(covers.router, tags=["covers"])
+app.include_router(search.router, tags=["search"])
+app.include_router(subtasks.router, tags=["subtasks"])
+app.include_router(cardlinks.router, tags=["cardlinks"])
+app.include_router(notifications.router, prefix="/notifications", tags=["notifications"])
+app.include_router(automations.router, tags=["automations"])
+app.include_router(analytics.router, tags=["analytics"])
+app.include_router(cardtemplates.router, tags=["cardtemplates"])
+app.include_router(recurring.router, tags=["recurring"])
+app.include_router(permissions.router, tags=["permissions"])
 
 
 @app.get("/health")

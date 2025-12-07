@@ -3,6 +3,10 @@ import BoardList from './pages/BoardList'
 import Board from './pages/Board'
 import Settings from './pages/Settings'
 import Reports from './pages/Reports'
+import Calendar from './pages/Calendar'
+import Swimlanes from './pages/Swimlanes'
+import Analytics from './pages/Analytics'
+import Gantt from './pages/Gantt'
 import Layout from './components/Layout'
 import { useSSO } from './hooks/useSSO'
 
@@ -27,6 +31,10 @@ export default function App() {
         <Route index element={<BoardList />} />
         <Route path="board/:boardId" element={<Board />} />
         <Route path="board/:boardId/reports" element={<Reports />} />
+        <Route path="board/:boardId/calendar" element={<Calendar />} />
+        <Route path="board/:boardId/swimlanes" element={<Swimlanes />} />
+        <Route path="board/:boardId/analytics" element={<Analytics />} />
+        <Route path="board/:boardId/gantt" element={<Gantt />} />
         <Route path="settings" element={<Settings />} />
       </Route>
     </Routes>
