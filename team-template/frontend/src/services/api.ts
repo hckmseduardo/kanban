@@ -363,12 +363,16 @@ export const teamApi = {
 
   // Invitations
   listInvitations: (status?: string) => api.get('/team/invitations', { params: { status } }),
+  getInvitation: (token: string) => api.get('/team/invitations/by-token', { params: { token } }),
   createInvitation: (data: { email: string; role?: string; message?: string }, invitedBy?: string) =>
     api.post('/team/invitations', data, { params: { invited_by: invitedBy } }),
   resendInvitation: (invitationId: string) => api.post(`/team/invitations/${invitationId}/resend`),
   cancelInvitation: (invitationId: string) => api.delete(`/team/invitations/${invitationId}`),
-  acceptInvitation: (token: string, userId?: string, userName?: string) =>
-    api.post('/team/join', null, { params: { token, user_id: userId, user_name: userName } }),
+  acceptInvitation: (token: string, userId?: string, userName?: string, userEmail?: string) =>
+    api.post('/team/join', null, { params: { token, user_id: userId, user_name: userName, user_email: userEmail } }),
+
+  // SSO Token exchange
+  exchangeSSOToken: (ssoToken: string) => api.post('/auth/exchange', null, { params: { token: ssoToken } }),
 
   // Team Settings
   getSettings: () => api.get('/team/settings'),

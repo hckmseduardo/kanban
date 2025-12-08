@@ -7,7 +7,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
 
 from app.auth.jwt import get_current_user
+from app.config import settings
 from app.services.database_service import db_service
+
+
+def get_team_subdomain(slug: str) -> str:
+    """Generate team subdomain URL with port if not 443"""
+    if settings.port == 443:
+        return f"https://{slug}.{settings.domain}"
+    return f"https://{slug}.{settings.domain}:{settings.port}"
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -34,6 +42,7 @@ class TeamSummary(BaseModel):
     name: str
     role: str
     status: str
+    subdomain: str
 
 
 @router.get("/me", response_model=UserResponse)
@@ -90,7 +99,8 @@ async def get_current_user_teams(
             slug=team["slug"],
             name=team["name"],
             role=team.get("role", "member"),
-            status=team.get("status", "active")
+            status=team.get("status", "active"),
+            subdomain=team.get("subdomain", get_team_subdomain(team["slug"]))
         )
         for team in teams
     ]

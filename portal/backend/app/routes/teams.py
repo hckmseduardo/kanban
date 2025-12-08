@@ -369,3 +369,47 @@ async def remove_team_member(
     db_service.remove_team_member(team["id"], user_id)
 
     return {"message": "Member removed from team"}
+
+
+class RegisterMemberRequest(BaseModel):
+    user_id: str
+    role: str = "member"
+
+
+@router.post("/{slug}/register-member")
+async def register_team_member(
+    slug: str,
+    request: RegisterMemberRequest
+):
+    """Register a member when they accept an invitation.
+
+    This endpoint is called by team instances when a user accepts an invitation.
+    It registers the membership in the portal database so the user can see
+    the team in their dashboard.
+    """
+    team = db_service.get_team_by_slug(slug)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    # Check if user exists in portal
+    user = db_service.get_user_by_id(request.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Check if already a member
+    existing = db_service.get_membership(team["id"], request.user_id)
+    if existing:
+        # Already a member, just return success
+        return {"message": "User is already a member", "already_member": True}
+
+    # Add member
+    db_service.add_team_member(
+        team_id=team["id"],
+        user_id=request.user_id,
+        role=request.role,
+        invited_by=None  # Invited via team invitation
+    )
+
+    logger.info(f"Registered user {request.user_id} as member of team {slug}")
+
+    return {"message": "Member registered successfully", "already_member": False}

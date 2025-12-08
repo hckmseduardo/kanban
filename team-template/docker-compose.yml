@@ -9,6 +9,14 @@ services:
       - TEAM_SLUG=${TEAM_SLUG}
       - DOMAIN=${DOMAIN}
       - DATA_DIR=/app/data
+      # Email configuration
+      - EMAIL_PROVIDER=${EMAIL_PROVIDER:-office365}
+      - SMTP_HOST=${SMTP_HOST:-smtp.office365.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USERNAME=${SMTP_USERNAME}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - EMAIL_FROM_EMAIL=${EMAIL_FROM_EMAIL}
+      - EMAIL_FROM_NAME=${EMAIL_FROM_NAME:-Kanban}
     volumes:
       - ${DATA_PATH}:/app/data
     networks:

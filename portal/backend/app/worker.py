@@ -109,8 +109,13 @@ class TaskWorker:
 
                         if team_id and status:
                             logger.info(f"Updating team {team_slug} status to: {status}")
-                            db_service.update_team(team_id, {"status": status})
-                            logger.info(f"Team {team_slug} status updated to {status}")
+                            if status == "deleted":
+                                # Remove team from database
+                                db_service.delete_team(team_id)
+                                logger.info(f"Team {team_slug} removed from database")
+                            else:
+                                db_service.update_team(team_id, {"status": status})
+                                logger.info(f"Team {team_slug} status updated to {status}")
 
                     except json.JSONDecodeError as e:
                         logger.error(f"Invalid JSON in team:status message: {e}")

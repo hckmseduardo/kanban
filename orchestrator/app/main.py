@@ -4,9 +4,11 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import shlex
+from datetime import datetime
 from pathlib import Path
 
 import redis.asyncio as redis
@@ -228,81 +230,63 @@ class Orchestrator:
         logger.info(f"[{team_slug}] Traefik will auto-discover containers via labels")
 
     async def _start_containers(self, team_slug: str, team_id: str):
-        """Start team containers using Docker CLI"""
+        """Start team containers using Docker Compose as a stack"""
         if not self.docker_available:
             raise RuntimeError("Docker CLI not available")
 
-        logger.info(f"[{team_slug}] Starting containers...")
+        logger.info(f"[{team_slug}] Starting containers as stack...")
 
-        # Container names
-        api_container_name = f"kanban-team-{team_slug}-api"
-        web_container_name = f"kanban-team-{team_slug}-web"
-
-        # Remove existing containers if they exist
-        run_docker_cmd(["rm", "-f", api_container_name], check=False)
-        run_docker_cmd(["rm", "-f", web_container_name], check=False)
-
-        # Images to use
-        api_image = "kanban-team-backend:latest"
-        web_image = "kanban-team-frontend:latest"
+        # Project name for docker compose stack
+        project_name = f"kanban-team-{team_slug}"
 
         # Host path for team data
         team_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{team_slug}"
 
-        # Create API container
-        # Routes: {slug}.{domain}/api/* -> backend (Traefik strips /api prefix)
-        logger.info(f"[{team_slug}] Creating API container...")
-        api_cmd = [
-            "run", "-d",
-            "--name", api_container_name,
-            "--restart", "unless-stopped",
-            "--network", NETWORK_NAME,
-            "-e", f"REDIS_URL=redis://kanban-redis:6379",
-            "-e", f"DOMAIN={DOMAIN}",
-            "-e", f"PORTAL_URL=https://{DOMAIN}",
-            "-e", f"TEAM_SLUG={team_slug}",
-            "-v", f"{team_data_host_path}:/app/data",
-            "-l", "traefik.enable=true",
-            "-l", f"traefik.http.routers.team-{team_slug}-api.rule=Host(`{team_slug}.{DOMAIN}`) && PathPrefix(`/api`)",
-            "-l", f"traefik.http.routers.team-{team_slug}-api.entrypoints=websecure",
-            "-l", f"traefik.http.routers.team-{team_slug}-api.tls=true",
-            "-l", f"traefik.http.routers.team-{team_slug}-api.tls.certresolver=letsencrypt",
-            "-l", f"traefik.http.routers.team-{team_slug}-api.middlewares=team-{team_slug}-api-strip",
-            "-l", f"traefik.http.middlewares.team-{team_slug}-api-strip.stripprefix.prefixes=/api",
-            "-l", f"traefik.http.services.team-{team_slug}-api.loadbalancer.server.port=8000",
-            api_image
-        ]
-        result = run_docker_cmd(api_cmd)
-        container_id = result.stdout.strip()[:12]
-        logger.info(f"[{team_slug}] API container started: {container_id}")
+        # Docker compose file path (mounted in orchestrator container)
+        compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
 
-        # Create Web container
-        # Routes: {slug}.{domain}/* (except /api) -> frontend
-        logger.info(f"[{team_slug}] Creating Web container...")
-        web_cmd = [
-            "run", "-d",
-            "--name", web_container_name,
-            "--restart", "unless-stopped",
-            "--network", NETWORK_NAME,
-            "-l", "traefik.enable=true",
-            "-l", f"traefik.http.routers.team-{team_slug}-web.rule=Host(`{team_slug}.{DOMAIN}`) && !PathPrefix(`/api`)",
-            "-l", f"traefik.http.routers.team-{team_slug}-web.entrypoints=websecure",
-            "-l", f"traefik.http.routers.team-{team_slug}-web.tls=true",
-            "-l", f"traefik.http.routers.team-{team_slug}-web.tls.certresolver=letsencrypt",
-            "-l", f"traefik.http.services.team-{team_slug}-web.loadbalancer.server.port=80",
-            web_image
-        ]
-        result = run_docker_cmd(web_cmd)
-        container_id = result.stdout.strip()[:12]
-        logger.info(f"[{team_slug}] Web container started: {container_id}")
+        # Environment variables for docker compose
+        env = os.environ.copy()
+        env.update({
+            "TEAM_SLUG": team_slug,
+            "DOMAIN": DOMAIN,
+            "DATA_PATH": team_data_host_path,
+        })
+
+        # Stop and remove existing stack if it exists
+        logger.info(f"[{team_slug}] Removing any existing stack...")
+        subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "down", "--remove-orphans"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False
+        )
+
+        # Start the stack
+        logger.info(f"[{team_slug}] Starting docker compose stack...")
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "up", "-d"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True
+        )
+
+        if result.returncode != 0:
+            logger.error(f"[{team_slug}] Docker compose failed: {result.stderr}")
+            raise RuntimeError(f"Failed to start containers: {result.stderr}")
+
+        logger.info(f"[{team_slug}] Stack started successfully")
 
     async def _health_check(self, team_slug: str, team_id: str):
         """Check team environment health"""
         if not self.docker_available:
             return
 
-        api_container_name = f"kanban-team-{team_slug}-api"
-        web_container_name = f"kanban-team-{team_slug}-web"
+        # Docker compose creates containers with -1 suffix
+        api_container_name = f"kanban-team-{team_slug}-api-1"
+        web_container_name = f"kanban-team-{team_slug}-web-1"
 
         # Wait for containers to be running
         max_retries = 10
@@ -338,31 +322,138 @@ class Orchestrator:
         task_id = task["task_id"]
         payload = task["payload"]
         team_slug = payload["team_slug"]
+        team_id = payload.get("team_id")
 
         logger.info(f"Deleting team: {team_slug}")
 
         steps = [
-            "Creating backup",
-            "Stopping containers",
-            "Removing DNS record",
-            "Revoking certificate",
-            "Archiving data",
+            ("Stopping containers", self._delete_stop_containers),
+            ("Removing containers", self._delete_remove_containers),
+            ("Archiving data", self._delete_archive_data),
+            ("Cleaning up", self._delete_cleanup),
         ]
 
         try:
-            for i, step_name in enumerate(steps, 1):
+            for i, (step_name, step_func) in enumerate(steps, 1):
                 await self.update_progress(task_id, i, len(steps), step_name)
-                await asyncio.sleep(0.5)
+                await step_func(team_slug, team_id)
                 logger.info(f"[{team_slug}] {step_name} - completed")
+
+            # Publish status update
+            await self.redis.publish("team:status", json.dumps({
+                "team_id": team_id,
+                "team_slug": team_slug,
+                "status": "deleted"
+            }))
 
             await self.complete_task(task_id, {
                 "team_slug": team_slug,
-                "archived": True
+                "deleted": True
             })
 
+            logger.info(f"Team {team_slug} deleted successfully")
+
         except Exception as e:
+            logger.error(f"Team deletion failed: {e}")
             await self.fail_task(task_id, str(e))
             raise
+
+    async def _delete_stop_containers(self, team_slug: str, team_id: str):
+        """Stop team containers using docker compose"""
+        if not self.docker_available:
+            logger.warning("Docker not available, skipping container stop")
+            return
+
+        project_name = f"kanban-team-{team_slug}"
+        compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
+        team_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{team_slug}"
+
+        env = os.environ.copy()
+        env.update({
+            "TEAM_SLUG": team_slug,
+            "DOMAIN": DOMAIN,
+            "DATA_PATH": team_data_host_path,
+        })
+
+        # Stop the stack
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "stop"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False
+        )
+
+        if result.returncode == 0:
+            logger.info(f"[{team_slug}] Stack stopped")
+        else:
+            # Fallback: try stopping individual containers (legacy naming)
+            for container in [f"kanban-team-{team_slug}-api", f"kanban-team-{team_slug}-web"]:
+                run_docker_cmd(["stop", container], check=False)
+            logger.info(f"[{team_slug}] Containers stopped (fallback)")
+
+    async def _delete_remove_containers(self, team_slug: str, team_id: str):
+        """Remove team containers using docker compose"""
+        if not self.docker_available:
+            logger.warning("Docker not available, skipping container removal")
+            return
+
+        project_name = f"kanban-team-{team_slug}"
+        compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
+        team_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{team_slug}"
+
+        env = os.environ.copy()
+        env.update({
+            "TEAM_SLUG": team_slug,
+            "DOMAIN": DOMAIN,
+            "DATA_PATH": team_data_host_path,
+        })
+
+        # Remove the stack
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "down", "--remove-orphans"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False
+        )
+
+        if result.returncode == 0:
+            logger.info(f"[{team_slug}] Stack removed")
+        else:
+            # Fallback: try removing individual containers (legacy naming)
+            for container in [f"kanban-team-{team_slug}-api", f"kanban-team-{team_slug}-web",
+                              f"kanban-team-{team_slug}-api-1", f"kanban-team-{team_slug}-web-1"]:
+                run_docker_cmd(["rm", "-f", container], check=False)
+            logger.info(f"[{team_slug}] Containers removed (fallback)")
+
+    async def _delete_archive_data(self, team_slug: str, team_id: str):
+        """Archive team data before deletion"""
+        team_dir = TEAMS_DIR / team_slug
+        archive_dir = TEAMS_DIR / ".archived"
+
+        if team_dir.exists():
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            archived_name = f"{team_slug}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            archived_path = archive_dir / archived_name
+
+            shutil.move(str(team_dir), str(archived_path))
+            logger.info(f"[{team_slug}] Data archived to {archived_path}")
+        else:
+            logger.warning(f"[{team_slug}] Team directory not found, nothing to archive")
+
+    async def _delete_cleanup(self, team_slug: str, team_id: str):
+        """Final cleanup tasks"""
+        # Remove DNS record if exists
+        zone_file = DNS_DIR / "devkanban.io.db"
+        if zone_file.exists():
+            content = zone_file.read_text()
+            lines = content.split("\n")
+            lines = [line for line in lines if not line.startswith(f"{team_slug} ")]
+            zone_file.write_text("\n".join(lines))
+            logger.info(f"[{team_slug}] DNS record removed")
+
+        await asyncio.sleep(0.2)
 
     async def update_progress(
         self,

@@ -11,6 +11,7 @@ from pathlib import Path
 import os
 import uuid
 import secrets
+import httpx
 from ..services.database import Database, Q
 from ..services.email import send_invitation_email
 
@@ -22,6 +23,9 @@ TEAM_SLUG = os.getenv("TEAM_SLUG", "team")
 DOMAIN = os.getenv("DOMAIN", "localhost")
 TEAM_BASE_URL = os.getenv("TEAM_BASE_URL")
 TEAM_NAME = os.getenv("TEAM_NAME", TEAM_SLUG)
+
+# Portal API URL for token validation
+PORTAL_API_URL = os.getenv("PORTAL_API_URL", f"https://{DOMAIN}/api")
 
 
 def build_invite_link(token: str) -> str:
@@ -336,9 +340,75 @@ async def cancel_invitation(invitation_id: str):
     return {"message": "Invitation cancelled"}
 
 
+@router.get("/team/invitations/by-token")
+async def get_invitation_by_token(token: str):
+    """Get invitation details by token (public endpoint for JoinTeam page)."""
+    db.initialize()
+
+    invitations_table = db.db.table("invitations")
+    invitation = invitations_table.get(Q.token == token)
+
+    if not invitation:
+        raise HTTPException(status_code=404, detail="Invalid invitation token")
+
+    # Check expiry
+    expires_at = datetime.fromisoformat(invitation["expires_at"])
+    if datetime.utcnow() > expires_at:
+        invitations_table.update({"status": "expired"}, Q.token == token)
+        raise HTTPException(status_code=400, detail="This invitation has expired")
+
+    if invitation.get("status") != "pending":
+        raise HTTPException(status_code=400, detail="This invitation is no longer valid")
+
+    # Return invitation details (without sensitive data)
+    return {
+        "email": invitation["email"],
+        "role": invitation["role"],
+        "message": invitation.get("message"),
+        "invited_by": invitation.get("invited_by"),
+        "team_name": TEAM_NAME,
+        "team_slug": TEAM_SLUG,
+        "expires_at": invitation["expires_at"]
+    }
+
+
+@router.post("/auth/exchange")
+async def exchange_portal_token(token: str):
+    """Exchange portal token for user info by validating with portal API."""
+    try:
+        async with httpx.AsyncClient(verify=False) as client:
+            response = await client.get(
+                f"{PORTAL_API_URL}/users/me",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10.0
+            )
+
+            if response.status_code == 401:
+                raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+            if response.status_code != 200:
+                raise HTTPException(status_code=502, detail="Failed to validate token with portal")
+
+            user_data = response.json()
+            return {
+                "user": {
+                    "id": user_data["id"],
+                    "email": user_data["email"],
+                    "display_name": user_data.get("display_name"),
+                    "avatar_url": user_data.get("avatar_url")
+                }
+            }
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Could not connect to portal: {str(e)}")
+
+
 @router.post("/team/join")
-async def accept_invitation(token: str, user_id: str = None, user_name: str = None):
-    """Accept an invitation and join the team."""
+async def accept_invitation(token: str, user_id: str = None, user_name: str = None, user_email: str = None):
+    """Accept an invitation and join the team.
+
+    If user_id/user_email are provided (authenticated user), link the portal user to this team.
+    Otherwise, create a new member based on the invitation email.
+    """
     db.initialize()
 
     invitations_table = db.db.table("invitations")
@@ -356,26 +426,72 @@ async def accept_invitation(token: str, user_id: str = None, user_name: str = No
         invitations_table.update({"status": "expired"}, Q.token == token)
         raise HTTPException(status_code=400, detail="This invitation has expired")
 
-    # Create member
-    new_member = {
-        "id": user_id or str(uuid.uuid4()),
-        "email": invitation["email"],
-        "name": user_name or invitation["email"].split("@")[0],
-        "role": invitation["role"],
-        "is_active": True,
-        "avatar_url": None,
-        "created_at": db.timestamp(),
-        "invited_by": invitation.get("invited_by")
-    }
+    # Use the authenticated user's email if provided, otherwise use invitation email
+    member_email = user_email or invitation["email"]
+    member_id = user_id or str(uuid.uuid4())
+    member_name = user_name or member_email.split("@")[0]
 
-    db.members.insert(new_member)
+    # Check if member already exists (by ID or email)
+    existing_by_id = db.members.get(Q.id == member_id) if user_id else None
+    existing_by_email = db.members.get(Q.email == member_email)
+
+    if existing_by_id and existing_by_id.get("is_active", True):
+        raise HTTPException(status_code=400, detail="You are already a member of this team")
+
+    if existing_by_email and existing_by_email.get("is_active", True):
+        raise HTTPException(status_code=400, detail="A member with this email already exists")
+
+    if existing_by_id:
+        # Reactivate the existing member
+        db.members.update({
+            "is_active": True,
+            "role": invitation["role"],
+            "reactivated_at": db.timestamp()
+        }, Q.id == member_id)
+        new_member = {**existing_by_id, "is_active": True, "role": invitation["role"]}
+    elif existing_by_email:
+        # Reactivate existing member by email
+        db.members.update({
+            "is_active": True,
+            "role": invitation["role"],
+            "reactivated_at": db.timestamp()
+        }, Q.email == member_email)
+        new_member = {**existing_by_email, "is_active": True, "role": invitation["role"]}
+    else:
+        # Create new member
+        new_member = {
+            "id": member_id,
+            "email": member_email,
+            "name": member_name,
+            "role": invitation["role"],
+            "is_active": True,
+            "avatar_url": None,
+            "created_at": db.timestamp(),
+            "invited_by": invitation.get("invited_by")
+        }
+        db.members.insert(new_member)
 
     # Update invitation status
     invitations_table.update({
         "status": "accepted",
         "accepted_at": db.timestamp(),
-        "member_id": new_member["id"]
+        "member_id": new_member["id"],
+        "accepted_by_email": member_email
     }, Q.token == token)
+
+    # Register membership in portal so user can see the team in their dashboard
+    if user_id:
+        try:
+            async with httpx.AsyncClient(verify=False) as client:
+                await client.post(
+                    f"{PORTAL_API_URL}/teams/{TEAM_SLUG}/register-member",
+                    json={"user_id": user_id, "role": invitation["role"]},
+                    timeout=10.0
+                )
+        except Exception as e:
+            # Log but don't fail - local membership is already created
+            import logging
+            logging.warning(f"Failed to register membership in portal: {e}")
 
     return {
         "message": "Welcome to the team!",
