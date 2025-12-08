@@ -29,6 +29,7 @@ export default function BoardList() {
   const [createMode, setCreateMode] = useState<'blank' | 'template'>('blank')
   const [selectedTemplate, setSelectedTemplate] = useState<string>('')
   const [newBoard, setNewBoard] = useState({ name: '', description: '', visibility: 'team' as Visibility })
+  const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; name: string } | null>(null)
   const { showHelp, openHelp, closeHelp } = useKeyboardShortcutsHelp()
 
   // Keyboard shortcuts
@@ -331,7 +332,7 @@ export default function BoardList() {
                   {visibility.label}
                 </span>
                 <button
-                  onClick={() => deleteBoard.mutate(board.id)}
+                  onClick={() => setDeleteConfirm({ id: board.id, name: board.name })}
                   className="text-sm text-red-600 hover:text-red-700"
                 >
                   Delete
@@ -350,6 +351,50 @@ export default function BoardList() {
 
       {/* Keyboard Shortcuts Help Modal */}
       <KeyboardShortcutsHelp isOpen={showHelp} onClose={closeHelp} />
+
+      {/* Delete Confirmation Modal */}
+      {deleteConfirm && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+                <svg className="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-lg font-bold text-gray-900">Delete Board</h2>
+                <p className="text-sm text-gray-500">This action cannot be undone</p>
+              </div>
+            </div>
+
+            <p className="text-gray-700 mb-6">
+              Are you sure you want to delete <strong>"{deleteConfirm.name}"</strong>? All cards and columns will be permanently removed.
+            </p>
+
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirm(null)}
+                className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  deleteBoard.mutate(deleteConfirm.id)
+                  setDeleteConfirm(null)
+                }}
+                disabled={deleteBoard.isPending}
+                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
+              >
+                {deleteBoard.isPending ? 'Deleting...' : 'Delete Board'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

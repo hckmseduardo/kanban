@@ -13,9 +13,10 @@ interface ColumnProps {
     cards?: any[]
   }
   boardId: string
+  onBroadcastChange?: (type: string, data: unknown) => void
 }
 
-export default function Column({ column, boardId }: ColumnProps) {
+export default function Column({ column, boardId, onBroadcastChange }: ColumnProps) {
   const queryClient = useQueryClient()
   const [showAddCard, setShowAddCard] = useState(false)
   const [newCardTitle, setNewCardTitle] = useState('')
@@ -28,15 +29,19 @@ export default function Column({ column, boardId }: ColumnProps) {
 
   const updateColumn = useMutation({
     mutationFn: (name: string) => columnsApi.update(column.id, { name }),
-    onSuccess: () => {
+    onSuccess: (_, name) => {
       queryClient.invalidateQueries({ queryKey: ['board', boardId] })
+      onBroadcastChange?.('column_updated', { columnId: column.id, name })
       setEditing(false)
     }
   })
 
   const deleteColumn = useMutation({
     mutationFn: () => columnsApi.delete(column.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['board', boardId] })
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['board', boardId] })
+      onBroadcastChange?.('column_deleted', { columnId: column.id })
+    }
   })
 
   const addCard = useMutation({
@@ -45,8 +50,9 @@ export default function Column({ column, boardId }: ColumnProps) {
       title,
       position: column.cards?.length || 0
     }),
-    onSuccess: () => {
+    onSuccess: (response, title) => {
       queryClient.invalidateQueries({ queryKey: ['board', boardId] })
+      onBroadcastChange?.('card_created', { columnId: column.id, title, cardId: response?.data?.id })
       setShowAddCard(false)
       setNewCardTitle('')
     }

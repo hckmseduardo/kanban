@@ -55,12 +55,12 @@ BUILTIN_TEMPLATES = [
         "description": "Development workflow with testing and deployment",
         "builtin": True,
         "columns": [
-            {"name": "Backlog", "position": 0},
-            {"name": "Ready for Dev", "position": 1},
-            {"name": "In Development", "position": 2, "wip_limit": 3},
-            {"name": "Code Review", "position": 3, "wip_limit": 2},
-            {"name": "Testing", "position": 4, "wip_limit": 2},
-            {"name": "Ready for Deploy", "position": 5},
+            {"name": "Feature Request", "position": 0},
+            {"name": "Backlog", "position": 1},
+            {"name": "To Do", "position": 2},
+            {"name": "Development", "position": 3, "wip_limit": 3},
+            {"name": "Code Review", "position": 4, "wip_limit": 2},
+            {"name": "Testing", "position": 5, "wip_limit": 2},
             {"name": "Done", "position": 6}
         ],
         "labels": [
@@ -88,6 +88,32 @@ BUILTIN_TEMPLATES = [
             {"name": "Medium Priority", "color": "yellow"},
             {"name": "Low Priority", "color": "green"},
             {"name": "Milestone", "color": "purple"}
+        ]
+    },
+    {
+        "id": "bug-tracking",
+        "name": "Bug Tracking",
+        "description": "Comprehensive bug tracking workflow from report to resolution",
+        "builtin": True,
+        "columns": [
+            {"name": "Bug Report", "position": 0},
+            {"name": "Triage", "position": 1, "wip_limit": 5},
+            {"name": "Analysis", "position": 2, "wip_limit": 3},
+            {"name": "To Fix", "position": 3},
+            {"name": "In Progress", "position": 4, "wip_limit": 3},
+            {"name": "Code Review", "position": 5, "wip_limit": 3},
+            {"name": "Verification", "position": 6, "wip_limit": 5},
+            {"name": "Done", "position": 7}
+        ],
+        "labels": [
+            {"name": "Critical", "color": "red"},
+            {"name": "High", "color": "orange"},
+            {"name": "Medium", "color": "yellow"},
+            {"name": "Low", "color": "green"},
+            {"name": "Regression", "color": "purple"},
+            {"name": "UI/UX", "color": "pink"},
+            {"name": "Performance", "color": "blue"},
+            {"name": "Security", "color": "gray"}
         ]
     }
 ]

@@ -164,6 +164,7 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
   const [newComment, setNewComment] = useState('')
   const [showLabelPicker, setShowLabelPicker] = useState(false)
   const [activeTab, setActiveTab] = useState<'details' | 'activity'>('details')
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [editData, setEditData] = useState({
     title: card.title,
     description: card.description || '',
@@ -821,12 +822,34 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
             {/* Footer */}
             <div className="flex justify-between p-4 border-t bg-gray-50">
               <div className="flex items-center gap-2">
-                <button
-                  onClick={() => deleteCard.mutate()}
-                  className="text-red-600 hover:text-red-700 text-sm"
-                >
-                  Delete
-                </button>
+                {showDeleteConfirm ? (
+                  <div className="flex items-center gap-2 bg-red-50 px-3 py-1 rounded-lg border border-red-200">
+                    <span className="text-sm text-red-700">Delete this card?</span>
+                    <button
+                      onClick={() => {
+                        deleteCard.mutate()
+                        setShowDeleteConfirm(false)
+                      }}
+                      disabled={deleteCard.isPending}
+                      className="text-red-600 hover:text-red-700 text-sm font-medium"
+                    >
+                      {deleteCard.isPending ? 'Deleting...' : 'Yes'}
+                    </button>
+                    <button
+                      onClick={() => setShowDeleteConfirm(false)}
+                      className="text-gray-600 hover:text-gray-700 text-sm"
+                    >
+                      No
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setShowDeleteConfirm(true)}
+                    className="text-red-600 hover:text-red-700 text-sm"
+                  >
+                    Delete
+                  </button>
+                )}
                 <span className="text-gray-300">|</span>
                 <button
                   onClick={() => archiveCard.mutate()}

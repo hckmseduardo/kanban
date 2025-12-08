@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 from ..models.board import CardCreate, CardUpdate, ChecklistItemCreate, ChecklistItemUpdate
 from ..services.database import Database, Q
 from ..services.webhook_service import trigger_webhooks
+from .websocket import broadcast_board_event
 from pathlib import Path
 import os
 
@@ -72,6 +73,9 @@ async def create_card(data: CardCreate):
     # Trigger webhooks
     await trigger_webhooks(db, "card.created", card)
 
+    # Broadcast to WebSocket clients
+    await broadcast_board_event(column["board_id"], "card_created", {"card": card})
+
     return card
 
 
@@ -97,10 +101,14 @@ async def update_card(card_id: str, data: CardUpdate):
     updates = data.model_dump(exclude_unset=True)
     old_column_id = card["column_id"]
 
-    # Check WIP limit if moving to new column
+    # Check if moving to new column
     if "column_id" in updates and updates["column_id"] != old_column_id:
         new_column = db.columns.get(Q.id == updates["column_id"])
-        if new_column and new_column.get("wip_limit"):
+        # Validate target column exists
+        if not new_column:
+            raise HTTPException(status_code=404, detail="Target column not found")
+        # Check WIP limit
+        if new_column.get("wip_limit"):
             current_cards = len(db.cards.search(Q.column_id == updates["column_id"]))
             if current_cards >= new_column["wip_limit"]:
                 raise HTTPException(status_code=400, detail="Target column WIP limit reached")
@@ -126,8 +134,18 @@ async def update_card(card_id: str, data: CardUpdate):
             "from_column": old_column_id,
             "to_column": updates["column_id"]
         })
+        # Broadcast to WebSocket clients
+        await broadcast_board_event(new_column["board_id"], "card_moved", {
+            "card": updated_card,
+            "from_column": old_column_id,
+            "to_column": updates["column_id"]
+        })
     else:
         await trigger_webhooks(db, "card.updated", updated_card)
+        # Get board_id from current column for broadcast
+        current_column = db.columns.get(Q.id == card["column_id"])
+        if current_column:
+            await broadcast_board_event(current_column["board_id"], "card_updated", {"card": updated_card})
 
     return updated_card
 
@@ -171,6 +189,10 @@ async def delete_card(card_id: str):
 
     await trigger_webhooks(db, "card.deleted", {"id": card_id})
 
+    # Broadcast to WebSocket clients
+    if column:
+        await broadcast_board_event(column["board_id"], "card_deleted", {"card_id": card_id})
+
     return {"deleted": True}
 
 
@@ -213,6 +235,13 @@ async def move_card(card_id: str, column_id: str, position: int = 0):
         )
 
     await trigger_webhooks(db, "card.moved", {
+        "card": updated_card,
+        "from_column": old_column_id,
+        "to_column": column_id
+    })
+
+    # Broadcast to WebSocket clients
+    await broadcast_board_event(column["board_id"], "card_moved", {
         "card": updated_card,
         "from_column": old_column_id,
         "to_column": column_id

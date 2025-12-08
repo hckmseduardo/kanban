@@ -34,60 +34,9 @@ export function useWebSocket({ boardId, userId, userName, onMessage }: UseWebSoc
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const queryClient = useQueryClient()
+  const handleMessageRef = useRef<(message: WebSocketMessage) => void>(() => {})
 
-  const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return
-
-    // Construct WebSocket URL
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = window.location.host
-    const wsUrl = `${protocol}//${host}/api/ws/${boardId}?user_id=${userId}&user_name=${encodeURIComponent(userName)}`
-
-    const ws = new WebSocket(wsUrl)
-    wsRef.current = ws
-
-    ws.onopen = () => {
-      setIsConnected(true)
-      console.log('[WS] Connected to board:', boardId)
-
-      // Start ping interval to keep connection alive
-      pingIntervalRef.current = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'ping' }))
-        }
-      }, 30000)
-    }
-
-    ws.onclose = () => {
-      setIsConnected(false)
-      console.log('[WS] Disconnected')
-
-      // Clear ping interval
-      if (pingIntervalRef.current) {
-        clearInterval(pingIntervalRef.current)
-      }
-
-      // Attempt to reconnect after 3 seconds
-      reconnectTimeoutRef.current = setTimeout(() => {
-        connect()
-      }, 3000)
-    }
-
-    ws.onerror = (error) => {
-      console.error('[WS] Error:', error)
-    }
-
-    ws.onmessage = (event) => {
-      try {
-        const message: WebSocketMessage = JSON.parse(event.data)
-        handleMessage(message)
-        onMessage?.(message)
-      } catch (e) {
-        console.error('[WS] Failed to parse message:', e)
-      }
-    }
-  }, [boardId, userId, userName, onMessage])
-
+  // Message handler - updates ref to avoid stale closure
   const handleMessage = useCallback((message: WebSocketMessage) => {
     switch (message.type) {
       case 'pong':
@@ -170,6 +119,63 @@ export function useWebSocket({ boardId, userId, userName, onMessage }: UseWebSoc
         break
     }
   }, [boardId, queryClient])
+
+  // Keep ref updated with latest handleMessage
+  handleMessageRef.current = handleMessage
+
+  const connect = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) return
+
+    // Construct WebSocket URL
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const host = window.location.host
+    const wsUrl = `${protocol}//${host}/api/ws/${boardId}?user_id=${userId}&user_name=${encodeURIComponent(userName)}`
+
+    const ws = new WebSocket(wsUrl)
+    wsRef.current = ws
+
+    ws.onopen = () => {
+      setIsConnected(true)
+      console.log('[WS] Connected to board:', boardId)
+
+      // Start ping interval to keep connection alive
+      pingIntervalRef.current = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'ping' }))
+        }
+      }, 30000)
+    }
+
+    ws.onclose = () => {
+      setIsConnected(false)
+      console.log('[WS] Disconnected')
+
+      // Clear ping interval
+      if (pingIntervalRef.current) {
+        clearInterval(pingIntervalRef.current)
+      }
+
+      // Attempt to reconnect after 3 seconds
+      reconnectTimeoutRef.current = setTimeout(() => {
+        connect()
+      }, 3000)
+    }
+
+    ws.onerror = (error) => {
+      console.error('[WS] Error:', error)
+    }
+
+    ws.onmessage = (event) => {
+      try {
+        const message: WebSocketMessage = JSON.parse(event.data)
+        // Use ref to get latest handler, avoiding stale closure
+        handleMessageRef.current(message)
+        onMessage?.(message)
+      } catch (e) {
+        console.error('[WS] Failed to parse message:', e)
+      }
+    }
+  }, [boardId, userId, userName, onMessage])
 
   const disconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {

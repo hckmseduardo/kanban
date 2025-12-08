@@ -7,7 +7,23 @@ import { boardsApi, columnsApi, cardsApi, labelsApi, exportApi, activityApi } fr
 import Column from '../components/Column'
 import Card from '../components/Card'
 import KeyboardShortcutsHelp from '../components/KeyboardShortcutsHelp'
+import OnlineUsers from '../components/OnlineUsers'
 import { useKeyboardShortcuts, useKeyboardShortcutsHelp } from '../hooks/useKeyboardShortcuts'
+import { useWebSocket } from '../hooks/useWebSocket'
+
+// Helper to parse JWT token
+function parseJwt(token: string): { sub?: string; email?: string } | null {
+  try {
+    const base64Url = token.split('.')[1]
+    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/')
+    const jsonPayload = decodeURIComponent(atob(base64).split('').map(c =>
+      '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)
+    ).join(''))
+    return JSON.parse(jsonPayload)
+  } catch {
+    return null
+  }
+}
 
 interface CardType {
   id: string
@@ -60,6 +76,19 @@ export default function Board() {
       },
     })
   )
+
+  // Get user info from JWT token for WebSocket
+  const token = localStorage.getItem('token')
+  const tokenData = token ? parseJwt(token) : null
+  const userId = tokenData?.sub || 'anonymous'
+  const userName = tokenData?.email?.split('@')[0] || 'Anonymous'
+
+  // WebSocket for real-time collaboration
+  const { isConnected, onlineUsers, broadcastChange } = useWebSocket({
+    boardId: boardId || '',
+    userId,
+    userName
+  })
 
   const { data: board, isLoading } = useQuery({
     queryKey: ['board', boardId],
@@ -118,9 +147,10 @@ export default function Board() {
   // Restore card mutation
   const restoreCard = useMutation({
     mutationFn: (cardId: string) => cardsApi.restore(cardId),
-    onSuccess: () => {
+    onSuccess: (_, cardId) => {
       queryClient.invalidateQueries({ queryKey: ['board', boardId] })
       queryClient.invalidateQueries({ queryKey: ['archivedCards', boardId] })
+      broadcastChange('card_updated', { cardId, restored: true })
     }
   })
 
@@ -135,8 +165,9 @@ export default function Board() {
         position: 0
       })
     },
-    onSuccess: () => {
+    onSuccess: (response, title) => {
       queryClient.invalidateQueries({ queryKey: ['board', boardId] })
+      broadcastChange('card_created', { title, cardId: response?.data?.id })
       setShowQuickAdd(false)
       setQuickAddTitle('')
     }
@@ -270,8 +301,9 @@ export default function Board() {
       name,
       position: board?.columns?.length || 0
     }),
-    onSuccess: () => {
+    onSuccess: (_, name) => {
       queryClient.invalidateQueries({ queryKey: ['board', boardId] })
+      broadcastChange('column_created', { name })
       setShowAddColumn(false)
       setNewColumnName('')
     }
@@ -280,7 +312,10 @@ export default function Board() {
   const moveCard = useMutation({
     mutationFn: ({ cardId, columnId, position }: { cardId: string; columnId: string; position: number }) =>
       cardsApi.move(cardId, columnId, position),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['board', boardId] })
+    onSuccess: (_, { cardId, columnId, position }) => {
+      queryClient.invalidateQueries({ queryKey: ['board', boardId] })
+      broadcastChange('card_moved', { cardId, columnId, position })
+    }
   })
 
   const handleDragStart = (event: DragStartEvent) => {
@@ -352,6 +387,10 @@ export default function Board() {
             </svg>
           </Link>
           <h1 className="text-2xl font-bold text-gray-900">{board.name}</h1>
+          {/* Connection status indicator */}
+          <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} title={isConnected ? 'Connected' : 'Disconnected'} />
+          {/* Online users */}
+          <OnlineUsers users={onlineUsers} currentUserId={userId} />
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -610,6 +649,7 @@ export default function Board() {
                 key={column.id}
                 column={column}
                 boardId={boardId!}
+                onBroadcastChange={broadcastChange}
               />
             ))}
           </SortableContext>

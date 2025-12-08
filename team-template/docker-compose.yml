@@ -37,7 +37,7 @@ services:
       - kanban-global
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.${TEAM_SLUG}-web.rule=Host(`${TEAM_SLUG}.${DOMAIN}`)"
+      - "traefik.http.routers.${TEAM_SLUG}-web.rule=Host(`${TEAM_SLUG}.${DOMAIN}`) && !PathPrefix(`/api`)"
       - "traefik.http.routers.${TEAM_SLUG}-web.entrypoints=websecure"
       - "traefik.http.routers.${TEAM_SLUG}-web.tls=true"
       - "traefik.http.services.${TEAM_SLUG}-web.loadbalancer.server.port=80"
