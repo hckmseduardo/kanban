@@ -115,6 +115,32 @@ BUILTIN_TEMPLATES = [
             {"name": "Performance", "color": "blue"},
             {"name": "Security", "color": "gray"}
         ]
+    },
+    {
+        "id": "ideas-pipeline",
+        "name": "Ideas Pipeline",
+        "description": "Structured workflow to take ideas from raw concept to ready-for-development",
+        "builtin": True,
+        "columns": [
+            {"name": "Idea Inbox", "position": 0},
+            {"name": "Idea Triage", "position": 1, "wip_limit": 5},
+            {"name": "Problem Framing", "position": 2, "wip_limit": 3},
+            {"name": "User & UX Exploration", "position": 3, "wip_limit": 2},
+            {"name": "Solution Exploration", "position": 4, "wip_limit": 3},
+            {"name": "Discovery Spike", "position": 5, "wip_limit": 2},
+            {"name": "Decision & Scope Lock", "position": 6, "wip_limit": 3},
+            {"name": "Ready for Backlog", "position": 7}
+        ],
+        "labels": [
+            {"name": "High Impact", "color": "green"},
+            {"name": "Low Effort", "color": "blue"},
+            {"name": "High Effort", "color": "orange"},
+            {"name": "Needs Research", "color": "purple"},
+            {"name": "User Request", "color": "pink"},
+            {"name": "Internal Idea", "color": "gray"},
+            {"name": "Quick Win", "color": "yellow"},
+            {"name": "Strategic", "color": "red"}
+        ]
     }
 ]
 

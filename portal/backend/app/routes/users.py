@@ -40,6 +40,9 @@ class TeamSummary(BaseModel):
     id: str
     slug: str
     name: str
+    description: Optional[str] = None
+    badge: Optional[str] = None
+    owner_id: str
     role: str
     status: str
     subdomain: str
@@ -98,6 +101,9 @@ async def get_current_user_teams(
             id=team["id"],
             slug=team["slug"],
             name=team["name"],
+            description=team.get("description"),
+            badge=team.get("badge"),
+            owner_id=team["owner_id"],
             role=team.get("role", "member"),
             status=team.get("status", "active"),
             subdomain=team.get("subdomain", get_team_subdomain(team["slug"]))

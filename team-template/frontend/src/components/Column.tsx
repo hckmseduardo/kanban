@@ -22,6 +22,7 @@ export default function Column({ column, boardId, onBroadcastChange }: ColumnPro
   const [newCardTitle, setNewCardTitle] = useState('')
   const [editing, setEditing] = useState(false)
   const [columnName, setColumnName] = useState(column.name)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
 
   const { setNodeRef, isOver } = useDroppable({
     id: column.id
@@ -63,9 +64,9 @@ export default function Column({ column, boardId, onBroadcastChange }: ColumnPro
   return (
     <div
       ref={setNodeRef}
-      className={`flex-shrink-0 w-72 bg-gray-100 rounded-lg ${isOver ? 'ring-2 ring-primary-400' : ''}`}
+      className={`flex-shrink-0 w-52 bg-gray-100 rounded-lg flex flex-col h-full ${isOver ? 'ring-2 ring-primary-400' : ''}`}
     >
-      <div className="p-3 font-medium flex items-center justify-between">
+      <div className="px-2 py-2 font-medium flex items-center justify-between border-b border-gray-200 flex-shrink-0">
         {editing ? (
           <input
             type="text"
@@ -73,33 +74,55 @@ export default function Column({ column, boardId, onBroadcastChange }: ColumnPro
             onChange={e => setColumnName(e.target.value)}
             onBlur={() => updateColumn.mutate(columnName)}
             onKeyDown={e => e.key === 'Enter' && updateColumn.mutate(columnName)}
-            className="px-2 py-1 border rounded w-full"
+            className="px-1 py-0.5 text-sm border rounded w-full"
             autoFocus
           />
         ) : (
-          <div className="flex items-center space-x-2">
+          <div className="flex items-center gap-1 min-w-0">
             <span
               onClick={() => setEditing(true)}
-              className="cursor-pointer hover:text-primary-600"
+              className="cursor-pointer hover:text-primary-600 text-sm font-semibold truncate"
+              title={column.name}
             >
               {column.name}
             </span>
-            <span className="text-sm text-gray-500">
-              ({column.cards?.length || 0}{column.wip_limit ? `/${column.wip_limit}` : ''})
+            <span className="text-xs text-gray-500 flex-shrink-0">
+              {column.cards?.length || 0}{column.wip_limit ? `/${column.wip_limit}` : ''}
             </span>
           </div>
         )}
-        <button
-          onClick={() => deleteColumn.mutate()}
-          className="text-gray-400 hover:text-red-500"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
+        {showDeleteConfirm ? (
+          <div className="flex items-center gap-1 flex-shrink-0 ml-1">
+            <span className="text-[10px] text-red-600">Delete?</span>
+            <button
+              onClick={() => {
+                deleteColumn.mutate()
+                setShowDeleteConfirm(false)
+              }}
+              className="text-[10px] px-1 py-0.5 bg-red-500 text-white rounded hover:bg-red-600"
+            >
+              Yes
+            </button>
+            <button
+              onClick={() => setShowDeleteConfirm(false)}
+              className="text-[10px] px-1 py-0.5 bg-gray-300 text-gray-700 rounded hover:bg-gray-400"
+            >
+              No
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setShowDeleteConfirm(true)}
+            className="text-gray-400 hover:text-red-500 flex-shrink-0 ml-1"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        )}
       </div>
 
-      <div className="px-3 pb-3 space-y-2 min-h-[100px]">
+      <div className="flex-1 px-1.5 py-1.5 space-y-1.5 overflow-y-auto min-h-0">
         <SortableContext
           items={column.cards?.map(c => c.id) || []}
           strategy={verticalListSortingStrategy}
@@ -110,26 +133,26 @@ export default function Column({ column, boardId, onBroadcastChange }: ColumnPro
         </SortableContext>
 
         {showAddCard ? (
-          <div className="bg-white rounded-lg p-2 shadow-sm">
+          <div className="bg-white rounded p-1.5 shadow-sm">
             <textarea
               placeholder="Card title"
               value={newCardTitle}
               onChange={e => setNewCardTitle(e.target.value)}
-              className="w-full px-2 py-1 border rounded resize-none"
+              className="w-full px-1.5 py-1 text-xs border rounded resize-none"
               rows={2}
               autoFocus
             />
-            <div className="flex space-x-2 mt-2">
+            <div className="flex space-x-1 mt-1">
               <button
                 onClick={() => addCard.mutate(newCardTitle)}
                 disabled={!newCardTitle || addCard.isPending}
-                className="px-3 py-1 bg-primary-600 text-white text-sm rounded hover:bg-primary-700 disabled:opacity-50"
+                className="px-2 py-0.5 bg-primary-600 text-white text-xs rounded hover:bg-primary-700 disabled:opacity-50"
               >
                 Add
               </button>
               <button
                 onClick={() => setShowAddCard(false)}
-                className="px-3 py-1 text-gray-600 text-sm"
+                className="px-2 py-0.5 text-gray-600 text-xs"
               >
                 Cancel
               </button>
@@ -139,7 +162,7 @@ export default function Column({ column, boardId, onBroadcastChange }: ColumnPro
           <button
             onClick={() => setShowAddCard(true)}
             disabled={isWipLimitReached}
-            className="w-full py-2 text-gray-500 hover:text-gray-700 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full py-1 text-gray-500 hover:text-gray-700 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
           >
             + Add card
           </button>

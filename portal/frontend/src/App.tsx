@@ -4,7 +4,6 @@ import { useAuthStore } from './stores/authStore'
 import Layout from './components/Layout'
 import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
-import TeamsPage from './pages/TeamsPage'
 import CreateTeamPage from './pages/CreateTeamPage'
 import TasksPage from './pages/TasksPage'
 
@@ -56,7 +55,6 @@ function App() {
         }
       >
         <Route index element={<DashboardPage />} />
-        <Route path="teams" element={<TeamsPage />} />
         <Route path="teams/new" element={<CreateTeamPage />} />
         <Route path="tasks" element={<TasksPage />} />
       </Route>

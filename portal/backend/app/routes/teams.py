@@ -52,6 +52,7 @@ class TeamUpdateRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     avatar_url: Optional[str] = None
+    badge: Optional[str] = None
 
 
 class TeamResponse(BaseModel):
@@ -60,6 +61,7 @@ class TeamResponse(BaseModel):
     name: str
     description: Optional[str] = None
     avatar_url: Optional[str] = None
+    badge: Optional[str] = None
     owner_id: str
     status: str
     subdomain: str
@@ -132,6 +134,7 @@ async def create_team(
             name=team["name"],
             description=team.get("description"),
             avatar_url=team.get("avatar_url"),
+            badge=team.get("badge"),
             owner_id=team["owner_id"],
             status=team["status"],
             subdomain=team["subdomain"],
@@ -157,6 +160,7 @@ async def list_teams(
             name=team["name"],
             description=team.get("description"),
             avatar_url=team.get("avatar_url"),
+            badge=team.get("badge"),
             owner_id=team["owner_id"],
             status=team.get("status", "active"),
             subdomain=team.get("subdomain", get_team_subdomain(team['slug'])),
@@ -188,6 +192,7 @@ async def get_team(
         name=team["name"],
         description=team.get("description"),
         avatar_url=team.get("avatar_url"),
+        badge=team.get("badge"),
         owner_id=team["owner_id"],
         status=team.get("status", "active"),
         subdomain=team.get("subdomain", get_team_subdomain(team['slug'])),
@@ -224,6 +229,7 @@ async def update_team(
         name=updated_team["name"],
         description=updated_team.get("description"),
         avatar_url=updated_team.get("avatar_url"),
+        badge=updated_team.get("badge"),
         owner_id=updated_team["owner_id"],
         status=updated_team.get("status", "active"),
         subdomain=updated_team.get("subdomain"),

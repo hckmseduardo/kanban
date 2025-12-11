@@ -376,8 +376,8 @@ export const teamApi = {
 
   // Team Settings
   getSettings: () => api.get('/team/settings'),
-  updateSettings: (data: { name?: string; allow_member_invites?: boolean; default_board_visibility?: string }) =>
-    api.patch('/team/settings', null, { params: data })
+  updateSettings: (data: { name?: string; description?: string; badge?: string; allow_member_invites?: boolean; default_board_visibility?: string }) =>
+    api.patch('/team/settings', data)
 }
 
 export default api

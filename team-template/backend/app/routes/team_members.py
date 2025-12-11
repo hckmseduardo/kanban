@@ -514,6 +514,7 @@ async def get_team_settings():
         return {
             "id": "settings",
             "name": os.getenv("TEAM_SLUG", "Team"),
+            "badge": None,
             "allow_member_invites": False,
             "default_board_visibility": "team",
             "require_2fa": False
@@ -522,12 +523,16 @@ async def get_team_settings():
     return settings
 
 
-@router.patch("/team/settings")
-async def update_team_settings(
-    name: Optional[str] = None,
-    allow_member_invites: Optional[bool] = None,
+class TeamSettingsUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    badge: Optional[str] = None
+    allow_member_invites: Optional[bool] = None
     default_board_visibility: Optional[str] = None
-):
+
+
+@router.patch("/team/settings")
+async def update_team_settings(updates: TeamSettingsUpdate):
     """Update team settings (admin/owner only)."""
     db.initialize()
 
@@ -535,24 +540,48 @@ async def update_team_settings(
     existing = settings_table.get(Q.id == "settings")
 
     update_data = {"updated_at": db.timestamp()}
+    portal_update = {}
 
-    if name is not None:
-        update_data["name"] = name
-    if allow_member_invites is not None:
-        update_data["allow_member_invites"] = allow_member_invites
-    if default_board_visibility is not None:
-        update_data["default_board_visibility"] = default_board_visibility
+    if updates.name is not None:
+        update_data["name"] = updates.name
+        portal_update["name"] = updates.name
+    if updates.description is not None:
+        update_data["description"] = updates.description
+        portal_update["description"] = updates.description
+    if updates.badge is not None:
+        update_data["badge"] = updates.badge
+        portal_update["badge"] = updates.badge
+    if updates.allow_member_invites is not None:
+        update_data["allow_member_invites"] = updates.allow_member_invites
+    if updates.default_board_visibility is not None:
+        update_data["default_board_visibility"] = updates.default_board_visibility
 
     if existing:
         settings_table.update(update_data, Q.id == "settings")
-        return {**existing, **update_data}
+        result = {**existing, **update_data}
     else:
-        new_settings = {
+        result = {
             "id": "settings",
-            "name": name or os.getenv("TEAM_SLUG", "Team"),
-            "allow_member_invites": allow_member_invites or False,
-            "default_board_visibility": default_board_visibility or "team",
+            "name": updates.name or os.getenv("TEAM_SLUG", "Team"),
+            "description": updates.description,
+            "badge": updates.badge,
+            "allow_member_invites": updates.allow_member_invites or False,
+            "default_board_visibility": updates.default_board_visibility or "team",
             **update_data
         }
-        settings_table.insert(new_settings)
-        return new_settings
+        settings_table.insert(result)
+
+    # Sync name, description, badge to portal if changed
+    if portal_update:
+        try:
+            async with httpx.AsyncClient(verify=False) as client:
+                await client.put(
+                    f"{PORTAL_API_URL}/teams/{TEAM_SLUG}",
+                    json=portal_update,
+                    timeout=10.0
+                )
+        except Exception as e:
+            import logging
+            logging.warning(f"Failed to sync settings to portal: {e}")
+
+    return result
