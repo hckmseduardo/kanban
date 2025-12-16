@@ -198,7 +198,7 @@ async def delete_card(card_id: str):
 
 @router.post("/{card_id}/move")
 async def move_card(card_id: str, column_id: str, position: int = 0):
-    """Move a card to a different column"""
+    """Move a card to a different column or reorder within same column"""
     db.initialize()
 
     card = db.cards.get(Q.id == card_id)
@@ -216,6 +216,43 @@ async def move_card(card_id: str, column_id: str, position: int = 0):
             raise HTTPException(status_code=400, detail="Column WIP limit reached")
 
     old_column_id = card["column_id"]
+    old_position = card.get("position", 0)
+
+    # Reorder cards in the affected columns
+    if old_column_id == column_id:
+        # Moving within the same column - reorder cards between old and new position
+        column_cards = db.cards.search(Q.column_id == column_id)
+        for c in column_cards:
+            if c["id"] == card_id:
+                continue
+            c_pos = c.get("position", 0)
+            if old_position < position:
+                # Moving down: shift cards between old+1 and new position up
+                if old_position < c_pos <= position:
+                    db.cards.update({"position": c_pos - 1}, Q.id == c["id"])
+            else:
+                # Moving up: shift cards between new position and old-1 down
+                if position <= c_pos < old_position:
+                    db.cards.update({"position": c_pos + 1}, Q.id == c["id"])
+    else:
+        # Moving to different column
+        # Shift cards down in source column (close the gap)
+        source_cards = db.cards.search(Q.column_id == old_column_id)
+        for c in source_cards:
+            if c["id"] == card_id:
+                continue
+            c_pos = c.get("position", 0)
+            if c_pos > old_position:
+                db.cards.update({"position": c_pos - 1}, Q.id == c["id"])
+
+        # Shift cards down in destination column (make room)
+        dest_cards = db.cards.search(Q.column_id == column_id)
+        for c in dest_cards:
+            c_pos = c.get("position", 0)
+            if c_pos >= position:
+                db.cards.update({"position": c_pos + 1}, Q.id == c["id"])
+
+    # Update the moved card
     db.cards.update({
         "column_id": column_id,
         "position": position,
@@ -224,7 +261,7 @@ async def move_card(card_id: str, column_id: str, position: int = 0):
 
     updated_card = db.cards.get(Q.id == card_id)
 
-    # Log activity for analytics (only if actually moving to different column)
+    # Log activity, trigger webhooks and broadcast only if actually moving to different column
     if old_column_id != column_id:
         db.log_activity(
             card_id=card_id,
@@ -234,18 +271,18 @@ async def move_card(card_id: str, column_id: str, position: int = 0):
             to_column_id=column_id
         )
 
-    await trigger_webhooks(db, "card.moved", {
-        "card": updated_card,
-        "from_column": old_column_id,
-        "to_column": column_id
-    })
+        await trigger_webhooks(db, "card.moved", {
+            "card": updated_card,
+            "from_column": old_column_id,
+            "to_column": column_id
+        })
 
-    # Broadcast to WebSocket clients
-    await broadcast_board_event(column["board_id"], "card_moved", {
-        "card": updated_card,
-        "from_column": old_column_id,
-        "to_column": column_id
-    })
+        # Broadcast to WebSocket clients
+        await broadcast_board_event(column["board_id"], "card_moved", {
+            "card": updated_card,
+            "from_column": old_column_id,
+            "to_column": column_id
+        })
 
     return updated_card
 

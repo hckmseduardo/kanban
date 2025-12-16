@@ -2,7 +2,7 @@ import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { useState, useRef, useEffect } from 'react'
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query'
-import { cardsApi, attachmentsApi, commentsApi, labelsApi, membersApi, activityApi } from '../services/api'
+import { cardsApi, attachmentsApi, commentsApi, labelsApi, membersApi, activityApi, boardsApi } from '../services/api'
 import Markdown from './Markdown'
 import Checklist from './Checklist'
 
@@ -49,6 +49,12 @@ interface Activity {
   details?: Record<string, any>
 }
 
+interface Column {
+  id: string
+  name: string
+  position: number
+}
+
 interface ChecklistItem {
   id: string
   text: string
@@ -67,6 +73,7 @@ interface CardProps {
     checklist?: ChecklistItem[]
     attachment_count?: number
     comment_count?: number
+    archived?: boolean
   }
   boardId?: string
   isDragging?: boolean
@@ -155,7 +162,7 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [newComment, setNewComment] = useState('')
   const [showLabelPicker, setShowLabelPicker] = useState(false)
-  const [activeTool, setActiveTool] = useState<'comments' | 'checklist' | 'settings' | 'attachments' | 'activity' | null>(null)
+  const [activeTool, setActiveTool] = useState<'comments' | 'checklist' | 'settings' | 'attachments' | 'activity' | 'move' | null>(null)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [editData, setEditData] = useState({
     title: card.title,
@@ -195,6 +202,13 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
     return () => document.removeEventListener('keydown', handleEscape)
   }, [showEdit, isEditingDescription])
 
+  // Auto-enter edit mode for description when card has no description
+  useEffect(() => {
+    if (showEdit && !card.description) {
+      setIsEditingDescription(true)
+    }
+  }, [showEdit, card.description])
+
   // Queries
   const { data: attachments = [] } = useQuery<Attachment[]>({
     queryKey: ['attachments', card.id],
@@ -224,6 +238,12 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
     queryKey: ['activity', card.id],
     queryFn: () => activityApi.getCardActivity(card.id).then((res: { data: Activity[] }) => res.data),
     enabled: showEdit
+  })
+
+  const { data: boardData } = useQuery<{ columns: Column[] }>({
+    queryKey: ['board', boardId],
+    queryFn: () => boardsApi.get(boardId!).then((res: { data: { columns: Column[] } }) => res.data),
+    enabled: showEdit && !!boardId
   })
 
   // Mutations
@@ -312,6 +332,16 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
     }
   })
 
+  const moveCard = useMutation({
+    mutationFn: (columnId: string) => cardsApi.move(card.id, columnId, 0),
+    onSuccess: () => {
+      if (boardId) {
+        queryClient.invalidateQueries({ queryKey: ['board', boardId] })
+      }
+      setActiveTool(null)
+    }
+  })
+
   // Handlers
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -380,14 +410,22 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
         style={style}
         {...attributes}
         {...listeners}
-        className="bg-white rounded p-2 shadow-sm hover:shadow cursor-grab active:cursor-grabbing"
+        className={`bg-white rounded p-2 shadow-sm hover:shadow cursor-grab active:cursor-grabbing ${card.archived ? 'opacity-60 border-2 border-dashed border-yellow-400' : ''}`}
         onClick={() => setShowEdit(true)}
       >
-        {card.priority && (
+        {card.archived && (
+          <div className="flex items-center gap-1 text-[10px] text-yellow-600 bg-yellow-50 px-1 rounded mb-1">
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
+            </svg>
+            Archived
+          </div>
+        )}
+        {card.priority && !card.archived && (
           <div className={`w-6 h-0.5 ${priorityColors[card.priority]} rounded mb-1`} />
         )}
 
-        <p className="font-medium text-xs leading-tight">{card.title}</p>
+        <p className={`font-medium text-xs leading-tight ${card.archived ? 'text-gray-500' : ''}`}>{card.title}</p>
 
         {card.labels && card.labels.length > 0 && (
           <div className="flex flex-wrap gap-0.5 mt-1">
@@ -529,6 +567,17 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
                   </svg>
                   <span>Activity</span>
                 </button>
+                <button
+                  onClick={() => setActiveTool(activeTool === 'move' ? null : 'move')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm ${
+                    activeTool === 'move' ? 'bg-primary-100 text-primary-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                  </svg>
+                  <span>Move</span>
+                </button>
               </div>
             </div>
 
@@ -562,13 +611,13 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
                   </div>
                 ) : (
                   <div
-                    onClick={() => setIsEditingDescription(true)}
+                    onDoubleClick={() => setIsEditingDescription(true)}
                     className="h-full p-4 border rounded-lg bg-gray-50 cursor-text hover:bg-gray-100 transition-colors overflow-y-auto"
                   >
                     {editData.description ? (
                       <Markdown content={editData.description} />
                     ) : (
-                      <p className="text-gray-400 italic">Click to add a description...</p>
+                      <p className="text-gray-400 italic">Double-click to edit description...</p>
                     )}
                   </div>
                 )}
@@ -758,6 +807,28 @@ export default function Card({ card, boardId, isDragging }: CardProps) {
                             </div>
                           ))}
                           {activities.length === 0 && <p className="text-sm text-gray-400 italic">No activity recorded</p>}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Move Panel */}
+                    {activeTool === 'move' && (
+                      <div>
+                        <h3 className="font-medium text-gray-900 mb-4">Move to Column</h3>
+                        <div className="space-y-2">
+                          {boardData?.columns?.map((column) => (
+                            <button
+                              key={column.id}
+                              onClick={() => moveCard.mutate(column.id)}
+                              disabled={moveCard.isPending}
+                              className="w-full text-left px-3 py-2 bg-white rounded border hover:bg-primary-50 hover:border-primary-300 transition-colors disabled:opacity-50"
+                            >
+                              <span className="text-sm font-medium text-gray-700">{column.name}</span>
+                            </button>
+                          ))}
+                          {(!boardData?.columns || boardData.columns.length === 0) && (
+                            <p className="text-sm text-gray-400 italic">No columns available</p>
+                          )}
                         </div>
                       </div>
                     )}

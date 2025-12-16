@@ -141,6 +141,30 @@ BUILTIN_TEMPLATES = [
             {"name": "Quick Win", "color": "yellow"},
             {"name": "Strategic", "color": "red"}
         ]
+    },
+    {
+        "id": "feature-request",
+        "name": "Feature Request",
+        "description": "Track feature requests from submission through development to completion",
+        "builtin": True,
+        "columns": [
+            {"name": "Feature Request", "position": 0},
+            {"name": "To Do", "position": 1},
+            {"name": "In Progress", "position": 2, "wip_limit": 3},
+            {"name": "Code Review", "position": 3, "wip_limit": 2},
+            {"name": "Testing", "position": 4, "wip_limit": 2},
+            {"name": "To Fix", "position": 5},
+            {"name": "Done", "position": 6}
+        ],
+        "labels": [
+            {"name": "High Priority", "color": "red"},
+            {"name": "Medium Priority", "color": "yellow"},
+            {"name": "Low Priority", "color": "green"},
+            {"name": "Enhancement", "color": "blue"},
+            {"name": "New Feature", "color": "purple"},
+            {"name": "User Request", "color": "pink"},
+            {"name": "Internal", "color": "gray"}
+        ]
     }
 ]
 

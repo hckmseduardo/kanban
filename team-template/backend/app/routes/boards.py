@@ -50,7 +50,7 @@ async def create_board(data: BoardCreate):
 
 
 @router.get("/{board_id}")
-async def get_board(board_id: str):
+async def get_board(board_id: str, include_archived: bool = False):
     """Get board with columns and cards"""
     db.initialize()
     board = db.boards.get(Q.id == board_id)
@@ -62,6 +62,9 @@ async def get_board(board_id: str):
 
     for col in columns:
         cards = db.cards.search(Q.column_id == col["id"])
+        # Filter out archived cards unless requested
+        if not include_archived:
+            cards = [c for c in cards if not c.get("archived", False)]
         # Add attachment count to each card
         for card in cards:
             card["attachment_count"] = len(db.attachments.search(Q.card_id == card["id"]))

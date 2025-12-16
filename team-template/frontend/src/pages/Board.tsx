@@ -91,8 +91,8 @@ export default function Board() {
   })
 
   const { data: board, isLoading } = useQuery({
-    queryKey: ['board', boardId],
-    queryFn: () => boardsApi.get(boardId!).then((res: { data: any }) => res.data),
+    queryKey: ['board', boardId, showArchived],
+    queryFn: () => boardsApi.get(boardId!, showArchived).then((res: { data: any }) => res.data),
     enabled: !!boardId
   })
 
@@ -335,25 +335,40 @@ export default function Board() {
     const cardId = active.id as string
     const overId = over.id as string
 
-    // Find source and destination columns
+    // Find source column
+    let sourceColumnId: string | null = null
+    for (const col of board?.columns || []) {
+      const cardIndex = col.cards?.findIndex((c: any) => c.id === cardId)
+      if (cardIndex !== undefined && cardIndex >= 0) {
+        sourceColumnId = col.id
+        break
+      }
+    }
+
+    // Find destination column and position
     let destColumnId: string | null = null
     let position = 0
 
     for (const col of board?.columns || []) {
       if (col.id === overId) {
+        // Dropped on column itself (empty area)
         destColumnId = col.id
         position = col.cards?.length || 0
         break
       }
       const cardIndex = col.cards?.findIndex((c: any) => c.id === overId)
       if (cardIndex !== undefined && cardIndex >= 0) {
+        // Dropped on a card
         destColumnId = col.id
         position = cardIndex
         break
       }
     }
 
-    if (destColumnId) {
+    if (destColumnId && sourceColumnId) {
+      // Don't move if dropping on self at same position
+      if (cardId === overId) return
+
       moveCard.mutate({ cardId, columnId: destColumnId, position })
     }
   }

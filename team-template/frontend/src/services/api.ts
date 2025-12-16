@@ -20,7 +20,7 @@ api.interceptors.request.use((config) => {
 
 export const boardsApi = {
   list: () => api.get('/boards'),
-  get: (id: string) => api.get(`/boards/${id}`),
+  get: (id: string, includeArchived?: boolean) => api.get(`/boards/${id}`, { params: { include_archived: includeArchived || false } }),
   create: (data: { name: string; description?: string }) => api.post('/boards', data),
   update: (id: string, data: any) => api.patch(`/boards/${id}`, data),
   delete: (id: string) => api.delete(`/boards/${id}`)

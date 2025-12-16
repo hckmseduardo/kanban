@@ -327,20 +327,6 @@ export default function BoardList() {
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {/* Create Board Card */}
-        <button
-          onClick={() => setShowCreate(true)}
-          className="bg-white dark:bg-gray-800 p-4 rounded-lg shadow hover:shadow-md transition-all border-2 border-dashed border-gray-300 dark:border-gray-600 hover:border-primary-400 dark:hover:border-primary-500 hover:bg-primary-50 dark:hover:bg-primary-900/20 min-h-[140px] flex flex-col items-center justify-center gap-2 group"
-        >
-          <div className="w-12 h-12 rounded-full bg-gray-100 dark:bg-gray-700 group-hover:bg-primary-100 dark:group-hover:bg-primary-900/50 flex items-center justify-center transition-colors">
-            <svg className="w-6 h-6 text-gray-400 dark:text-gray-500 group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-          </div>
-          <span className="text-gray-500 dark:text-gray-400 group-hover:text-primary-600 dark:group-hover:text-primary-400 font-medium transition-colors">Create Board</span>
-          <span className="text-xs text-gray-400 dark:text-gray-500 group-hover:text-primary-500 dark:group-hover:text-primary-400 transition-colors">Press 'c' for shortcut</span>
-        </button>
-
         {boards?.map((board: any) => {
           const visibility = visibilityOptions.find(v => v.value === board.visibility) || visibilityOptions[1]
           return (
@@ -368,6 +354,20 @@ export default function BoardList() {
             </div>
           )
         })}
+
+        {/* Create Board Card */}
+        <button
+          onClick={() => setShowCreate(true)}
+          className="bg-white dark:bg-gray-800 p-4 rounded-lg shadow hover:shadow-md transition-all border-2 border-dashed border-gray-300 dark:border-gray-600 hover:border-primary-400 dark:hover:border-primary-500 hover:bg-primary-50 dark:hover:bg-primary-900/20 min-h-[140px] flex flex-col items-center justify-center gap-2 group"
+        >
+          <div className="w-12 h-12 rounded-full bg-gray-100 dark:bg-gray-700 group-hover:bg-primary-100 dark:group-hover:bg-primary-900/50 flex items-center justify-center transition-colors">
+            <svg className="w-6 h-6 text-gray-400 dark:text-gray-500 group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+          </div>
+          <span className="text-gray-500 dark:text-gray-400 group-hover:text-primary-600 dark:group-hover:text-primary-400 font-medium transition-colors">Create Board</span>
+          <span className="text-xs text-gray-400 dark:text-gray-500 group-hover:text-primary-500 dark:group-hover:text-primary-400 transition-colors">Press 'c' for shortcut</span>
+        </button>
       </div>
 
       {/* Keyboard Shortcuts Help Modal */}

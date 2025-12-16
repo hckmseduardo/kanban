@@ -79,11 +79,25 @@ export default function TeamsPage() {
             <div className="p-5">
               <div className="flex items-center">
                 <div className="flex-shrink-0">
-                  <div className="h-12 w-12 bg-primary-100 rounded-full flex items-center justify-center">
-                    <span className="text-primary-600 text-lg font-semibold">
-                      {team.name.charAt(0).toUpperCase()}
-                    </span>
-                  </div>
+                  {team.badge ? (
+                    team.badge.startsWith('http') ? (
+                      <img
+                        src={team.badge}
+                        alt={team.name}
+                        className="h-12 w-12 rounded-full object-cover ring-2 ring-primary-100"
+                      />
+                    ) : (
+                      <div className="h-12 w-12 bg-gradient-to-br from-primary-100 to-primary-200 rounded-full flex items-center justify-center text-2xl ring-2 ring-primary-100">
+                        {team.badge}
+                      </div>
+                    )
+                  ) : (
+                    <div className="h-12 w-12 bg-primary-100 rounded-full flex items-center justify-center">
+                      <span className="text-primary-600 text-lg font-semibold">
+                        {team.name.charAt(0).toUpperCase()}
+                      </span>
+                    </div>
+                  )}
                 </div>
                 <div className="ml-4">
                   <h3 className="text-lg font-medium text-gray-900">{team.name}</h3>
