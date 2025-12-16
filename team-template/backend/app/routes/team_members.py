@@ -575,8 +575,8 @@ async def update_team_settings(updates: TeamSettingsUpdate):
     if portal_update:
         try:
             async with httpx.AsyncClient(verify=False) as client:
-                await client.put(
-                    f"{PORTAL_API_URL}/teams/{TEAM_SLUG}",
+                await client.post(
+                    f"{PORTAL_API_URL}/teams/{TEAM_SLUG}/sync-settings",
                     json=portal_update,
                     timeout=10.0
                 )

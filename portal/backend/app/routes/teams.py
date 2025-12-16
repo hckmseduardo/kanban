@@ -419,3 +419,34 @@ async def register_team_member(
     logger.info(f"Registered user {request.user_id} as member of team {slug}")
 
     return {"message": "Member registered successfully", "already_member": False}
+
+
+class SyncSettingsRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    badge: Optional[str] = None
+
+
+@router.post("/{slug}/sync-settings")
+async def sync_team_settings(
+    slug: str,
+    request: SyncSettingsRequest
+):
+    """Sync team settings from team instance.
+
+    This endpoint is called by team instances when settings are updated.
+    It syncs name, description, and badge to the portal database.
+    """
+    team = db_service.get_team_by_slug(slug)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    update_data = request.model_dump(exclude_unset=True)
+    if not update_data:
+        return {"message": "No updates provided"}
+
+    db_service.update_team(team["id"], update_data)
+
+    logger.info(f"Synced settings for team {slug}: {update_data}")
+
+    return {"message": "Settings synced successfully", "updated": list(update_data.keys())}
