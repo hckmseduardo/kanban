@@ -450,7 +450,7 @@ devkanban/
 │       └── templates/
 │           └── docker-compose.team.yml.j2
 │
-├── team-template/
+├── kanban-team/                      # Git submodule
 │   ├── docker-compose.yml.j2       # Jinja2 template
 │   ├── nginx/
 │   │   └── nginx.conf
@@ -1450,8 +1450,8 @@ npm run dev
 docker compose build
 
 # Build team template images
-docker build -t devkanban/team-api:latest team-template/backend
-docker build -t devkanban/team-frontend:latest team-template/frontend
+docker build -t devkanban/team-api:latest kanban-team/backend
+docker build -t devkanban/team-frontend:latest kanban-team/frontend
 ```
 
 ### Running Tests
@@ -1462,7 +1462,7 @@ cd portal/backend
 pytest
 
 # Team instance tests
-cd team-template/backend
+cd kanban-team/backend
 pytest
 ```
 

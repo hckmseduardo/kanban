@@ -176,10 +176,18 @@ services:
       - CERT_MODE=${CERT_MODE:-development}
       - HOST_IP=${HOST_IP:-127.0.0.1}
       - HOST_PROJECT_PATH=${HOST_PROJECT_PATH:-/Volumes/dados/projects/kanban}
+      # Email configuration (passed through to team containers)
+      - EMAIL_PROVIDER=${EMAIL_PROVIDER:-office365}
+      - SMTP_HOST=${SMTP_HOST:-smtp.office365.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USERNAME=${SMTP_USERNAME:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - EMAIL_FROM_EMAIL=${EMAIL_FROM_EMAIL:-}
+      - EMAIL_FROM_NAME=${EMAIL_FROM_NAME:-Kanban}
     volumes:
       - ./orchestrator/app:/app/app
       - ./data/teams:/app/data/teams
-      - ./team-template:/app/team-template:ro
+      - ./kanban-team:/app/kanban-team:ro
       - ./traefik/certs:/app/certs
       - ./traefik/dynamic:/app/traefik-dynamic
       - ./coredns/zones:/app/dns-zones

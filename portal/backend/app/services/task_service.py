@@ -21,7 +21,9 @@ class TaskService:
         self,
         team_id: str,
         team_slug: str,
-        owner_id: str
+        owner_id: str,
+        owner_email: str = None,
+        owner_name: str = None
     ) -> str:
         """Create task to provision a new team"""
         return await redis_service.enqueue_task(
@@ -30,7 +32,9 @@ class TaskService:
             payload={
                 "team_id": team_id,
                 "team_slug": team_slug,
-                "owner_id": owner_id
+                "owner_id": owner_id,
+                "owner_email": owner_email,
+                "owner_name": owner_name
             },
             user_id=owner_id,
             priority="high"

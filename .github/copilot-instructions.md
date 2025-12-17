@@ -4,7 +4,7 @@ This file gives concise, repository-specific guidance so AI coding agents can be
 
 **Big Picture**
 - **Platform:** multi-tenant Kanban where a central Portal provisions isolated per-team Docker stacks. See `README.MD` Architecture diagrams.
-- **Major components:** `portal/` (central UI + backend), `orchestrator/` (provisions team instances), `team-template/` (Jinja2 templates for per-team Docker stacks), global infra (`coredns/`, `traefik/`, `certbot/`).
+- **Major components:** `portal/` (central UI + backend), `orchestrator/` (provisions team instances), `kanban-team/` (Jinja2 templates for per-team Docker stacks), global infra (`coredns/`, `traefik/`, `certbot/`).
 - **Routing & isolation:** each team is served at `{slug}.devkanban.io` (CoreDNS → Traefik → team gateway). Team state is stored in per-team TinyDB JSON files under `teams/<slug>/data/`.
 
 **Key files to inspect before coding**
@@ -13,10 +13,10 @@ This file gives concise, repository-specific guidance so AI coding agents can be
 - `traefik/` and `certbot/scripts/` — TLS and certificate lifecycle.
 - `portal/backend/app/` — central API: `main.py`, `auth/entra.py`, `services/team_provisioner.py`.
 - `orchestrator/app/provisioner.py` and `orchestrator/templates/docker-compose.team.yml.j2` — how team stacks are generated.
-- `team-template/` — canonical per-team service layout (nginx, frontend, backend, worker) and `docker-compose.yml.j2` template.
+- `kanban-team/` — canonical per-team service layout (nginx, frontend, backend, worker) and `docker-compose.yml.j2` template.
 
 **Project-specific conventions and patterns**
-- Per-team isolation: when adding a new per-team capability, update the `team-template/` and the Jinja templates in `orchestrator/templates/`.
+- Per-team isolation: when adding a new per-team capability, update the `kanban-team/` and the Jinja templates in `orchestrator/templates/`.
 - TinyDB usage: each team uses a small JSON DB file (examples in README). Look for `db/*.json` and update migration code in `portal/backend/app/db/` when schema changes.
 - Naming: services, networks and volumes follow the `devkanban-<team>-*` pattern. Keep names predictable to allow `orchestrator` to manage them.
 - Certificates: certs are issued per-subdomain using Certbot; certificate files live under `traefik/certs/live/` — changes to TLS routing should consider Traefik dynamic config files.
@@ -34,9 +34,9 @@ This file gives concise, repository-specific guidance so AI coding agents can be
 - External APIs: Twitter, GitHub, YouTube used for link previews — tokens stored in Key Vault.
 
 **What to change vs. where to change it**
-- UI/UX changes: update `portal/frontend/` or `team-template/frontend/src/components/`.
+- UI/UX changes: update `portal/frontend/` or `kanban-team/frontend/src/components/`.
 - API/Provisioning logic: change `portal/backend/app/services/team_provisioner.py` and `orchestrator/app/provisioner.py` together to keep templates and provisioner in sync.
-- Template changes: modify `orchestrator/templates/docker-compose.team.yml.j2` and `team-template/docker-compose.yml.j2` — tests of template rendering should be done in a disposable environment.
+- Template changes: modify `orchestrator/templates/docker-compose.team.yml.j2` and `kanban-team/docker-compose.yml.j2` — tests of template rendering should be done in a disposable environment.
 
 **Quick pointers for AI edits**
 - Keep patches minimal and targeted to the component you change; update corresponding Jinja templates when adding services.

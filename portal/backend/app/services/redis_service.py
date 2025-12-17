@@ -238,11 +238,11 @@ class RedisService:
         await self.client.publish(channel, json.dumps(message))
 
     async def subscribe(self, channel: str):
-        """Subscribe to channel"""
-        if not self.pubsub:
-            self.pubsub = self.client.pubsub()
-        await self.pubsub.subscribe(channel)
-        return self.pubsub
+        """Subscribe to channel - creates dedicated pubsub for each caller"""
+        # Create new pubsub for each WebSocket to avoid conflicts
+        pubsub = self.client.pubsub()
+        await pubsub.subscribe(channel)
+        return pubsub
 
     # =========================================================================
     # Cache Operations

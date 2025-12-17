@@ -1,28 +1,91 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { teamsApi, authApi, setNavigatingAway } from '../services/api'
 import { useAuthStore } from '../stores/authStore'
+import { useTaskWebSocket } from '../hooks/useTaskWebSocket'
+
+interface Toast {
+  id: string
+  type: 'success' | 'error' | 'info'
+  message: string
+}
 
 export default function TeamsPage() {
   const { user } = useAuthStore()
   const queryClient = useQueryClient()
   const [deleteConfirm, setDeleteConfirm] = useState<{ slug: string; name: string } | null>(null)
   const [deleteInput, setDeleteInput] = useState('')
+  const [toasts, setToasts] = useState<Toast[]>([])
 
-  const { data: teams, isLoading } = useQuery({
+  // Show toast notification
+  const showToast = (type: Toast['type'], message: string) => {
+    const id = Date.now().toString()
+    setToasts(prev => [...prev, { id, type, message }])
+    // Auto-dismiss after 5 seconds
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id))
+    }, 5000)
+  }
+
+  // WebSocket for real-time task updates
+  useTaskWebSocket({
+    onTaskCompleted: (_taskId, result) => {
+      const action = (result as any)?.action
+      const teamSlug = (result as any)?.team_slug
+
+      if (action === 'create_team') {
+        showToast('success', `Team "${teamSlug}" created successfully!`)
+      } else if (action === 'delete_team') {
+        showToast('success', `Team "${teamSlug}" deleted successfully!`)
+      }
+
+      // Refresh teams list
+      queryClient.invalidateQueries({ queryKey: ['teams'] })
+    },
+    onTaskFailed: (_taskId, error) => {
+      showToast('error', `Task failed: ${error || 'Unknown error'}`)
+      // Refresh to show current state
+      queryClient.invalidateQueries({ queryKey: ['teams'] })
+    }
+  })
+
+  const { data: teams, isLoading, refetch } = useQuery({
     queryKey: ['teams'],
     queryFn: () => teamsApi.list().then(res => res.data),
-    staleTime: 5 * 60 * 1000, // 5 minutes - prevent unnecessary refetches
-    refetchOnWindowFocus: false, // Don't refetch when window regains focus
+    staleTime: 30 * 1000, // 30 seconds - allow quicker updates after changes
+    refetchOnWindowFocus: true, // Refetch when window regains focus
   })
 
   const deleteMutation = useMutation({
     mutationFn: (slug: string) => teamsApi.delete(slug),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['teams'] })
+    onMutate: async (slug: string) => {
+      // Cancel outgoing refetches
+      await queryClient.cancelQueries({ queryKey: ['teams'] })
+
+      // Snapshot previous value
+      const previousTeams = queryClient.getQueryData(['teams'])
+
+      // Optimistically remove the team from the list
+      queryClient.setQueryData(['teams'], (old: any[]) =>
+        old?.filter((team: any) => team.slug !== slug) || []
+      )
+
+      // Close modal immediately
       setDeleteConfirm(null)
       setDeleteInput('')
+
+      return { previousTeams }
+    },
+    onError: (_err, _slug, context) => {
+      // Rollback on error
+      if (context?.previousTeams) {
+        queryClient.setQueryData(['teams'], context.previousTeams)
+      }
+    },
+    onSettled: () => {
+      // Refetch to ensure consistency
+      queryClient.invalidateQueries({ queryKey: ['teams'] })
     }
   })
 
@@ -153,6 +216,40 @@ export default function TeamsPage() {
             </Link>
           </div>
         )}
+      </div>
+
+      {/* Toast Notifications */}
+      <div className="fixed bottom-4 right-4 z-50 space-y-2">
+        {toasts.map(toast => (
+          <div
+            key={toast.id}
+            className={`px-4 py-3 rounded-lg shadow-lg flex items-center gap-3 animate-slide-in ${
+              toast.type === 'success' ? 'bg-green-500 text-white' :
+              toast.type === 'error' ? 'bg-red-500 text-white' :
+              'bg-blue-500 text-white'
+            }`}
+          >
+            {toast.type === 'success' && (
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+            )}
+            {toast.type === 'error' && (
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            )}
+            <span>{toast.message}</span>
+            <button
+              onClick={() => setToasts(prev => prev.filter(t => t.id !== toast.id))}
+              className="ml-2 hover:opacity-75"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        ))}
       </div>
 
       {/* Delete Confirmation Modal */}

@@ -3,15 +3,12 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useAuthStore } from '../stores/authStore'
 
 interface TaskUpdate {
-  type: 'task_progress' | 'task_completed' | 'task_failed' | 'subscribed'
+  type: 'task.progress' | 'task.completed' | 'task.failed' | 'subscribed'
   task_id?: string
-  progress?: {
-    current_step: number
-    total_steps: number
-    step_name: string
-    percentage: number
-    message?: string
-  }
+  step?: number
+  total_steps?: number
+  step_name?: string
+  percentage?: number
   result?: Record<string, unknown>
   error?: string
   channel?: string
@@ -28,11 +25,25 @@ export function useTaskWebSocket(options: UseTaskWebSocketOptions = {}) {
   const queryClient = useQueryClient()
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const optionsRef = useRef(options)
   const [isConnected, setIsConnected] = useState(false)
   const [connectionError, setConnectionError] = useState<string | null>(null)
 
+  // Keep options ref updated without triggering reconnect
+  optionsRef.current = options
+
   const connect = useCallback(() => {
     if (!user?.id) return
+
+    // Prevent multiple connections
+    if (wsRef.current && wsRef.current.readyState === WebSocket.CONNECTING) {
+      console.log('[WebSocket] Already connecting, skipping...')
+      return
+    }
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      console.log('[WebSocket] Already connected, skipping...')
+      return
+    }
 
     // Build WebSocket URL
     const apiUrl = import.meta.env.VITE_API_URL || 'https://api.localhost:4443'
@@ -68,14 +79,14 @@ export function useTaskWebSocket(options: UseTaskWebSocketOptions = {}) {
           queryClient.invalidateQueries({ queryKey: ['tasks'] })
 
           // Call callbacks
-          options.onTaskUpdate?.(data)
+          optionsRef.current.onTaskUpdate?.(data)
 
-          if (data.type === 'task_completed' && data.task_id) {
-            options.onTaskCompleted?.(data.task_id, data.result)
+          if (data.type === 'task.completed' && data.task_id) {
+            optionsRef.current.onTaskCompleted?.(data.task_id, data.result)
           }
 
-          if (data.type === 'task_failed' && data.task_id) {
-            options.onTaskFailed?.(data.task_id, data.error)
+          if (data.type === 'task.failed' && data.task_id) {
+            optionsRef.current.onTaskFailed?.(data.task_id, data.error)
           }
         } catch (err) {
           console.error('[WebSocket] Failed to parse message:', err)
@@ -104,7 +115,7 @@ export function useTaskWebSocket(options: UseTaskWebSocketOptions = {}) {
       console.error('[WebSocket] Failed to create connection:', err)
       setConnectionError('Failed to establish WebSocket connection')
     }
-  }, [user?.id, queryClient, options])
+  }, [user?.id, queryClient])
 
   const disconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {

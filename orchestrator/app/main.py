@@ -29,7 +29,7 @@ HOST_IP = os.getenv("HOST_IP", "127.0.0.1")
 HOST_PROJECT_PATH = os.getenv("HOST_PROJECT_PATH", "/Volumes/dados/projects/kanban")
 
 TEAMS_DIR = Path("/app/data/teams")
-TEMPLATE_DIR = Path("/app/team-template")
+TEMPLATE_DIR = Path("/app/kanban-team")
 TRAEFIK_DIR = Path("/app/traefik-dynamic")
 DNS_DIR = Path("/app/dns-zones")
 NETWORK_NAME = "kanban-global"
@@ -141,6 +141,9 @@ class Orchestrator:
         team_slug = payload["team_slug"]
         team_id = payload["team_id"]
 
+        # Store payload for access by step functions
+        self._current_payload = payload
+
         logger.info(f"Provisioning team: {team_slug}")
 
         steps = [
@@ -164,6 +167,7 @@ class Orchestrator:
                 logger.info(f"[{team_slug}] {step_name} - completed")
 
             await self.complete_task(task_id, {
+                "action": "create_team",
                 "team_slug": team_slug,
                 "url": f"https://{team_slug}.{DOMAIN}"
             })
@@ -191,9 +195,33 @@ class Orchestrator:
         (team_dir / "logs").mkdir(parents=True, exist_ok=True)
 
     async def _init_database(self, team_slug: str, team_id: str):
-        """Initialize team database"""
+        """Initialize team database with creator as owner"""
         db_file = TEAMS_DIR / team_slug / "db" / "team.json"
-        db_file.write_text('{"_default": {}}')
+
+        # Get owner info from payload
+        owner_id = self._current_payload.get("owner_id")
+        owner_email = self._current_payload.get("owner_email")
+        owner_name = self._current_payload.get("owner_name") or (owner_email.split("@")[0] if owner_email else "Owner")
+
+        # Initialize database with creator as owner
+        initial_data = {
+            "_default": {},
+            "members": {
+                "1": {
+                    "id": owner_id,
+                    "email": owner_email,
+                    "name": owner_name,
+                    "role": "owner",
+                    "is_active": True,
+                    "avatar_url": None,
+                    "created_at": datetime.utcnow().isoformat(),
+                    "last_seen": None
+                }
+            }
+        }
+
+        db_file.write_text(json.dumps(initial_data, indent=2))
+        logger.info(f"[{team_slug}] Database initialized with {owner_email} as owner")
 
     async def _generate_config(self, team_slug: str, team_id: str):
         """Generate docker-compose and nginx config for team"""
@@ -246,6 +274,7 @@ class Orchestrator:
         compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
 
         # Environment variables for docker compose
+        # These inherit from orchestrator's environment (which gets them from root .env via docker-compose.yml)
         env = os.environ.copy()
         env.update({
             "TEAM_SLUG": team_slug,
@@ -347,6 +376,7 @@ class Orchestrator:
             }))
 
             await self.complete_task(task_id, {
+                "action": "delete_team",
                 "team_slug": team_slug,
                 "deleted": True
             })

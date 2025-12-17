@@ -162,6 +162,7 @@ async def task_websocket(websocket: WebSocket):
     Client must send user_id after connection to subscribe.
     """
     await websocket.accept()
+    pubsub = None
 
     try:
         # Wait for user ID
@@ -185,17 +186,34 @@ async def task_websocket(websocket: WebSocket):
         })
 
         # Listen for messages
-        async for message in pubsub.listen():
-            if message["type"] == "message":
-                import json
+        import json
+        from starlette.websockets import WebSocketState
+
+        while True:
+            # Check if WebSocket is still connected
+            if websocket.client_state != WebSocketState.CONNECTED:
+                logger.info("WebSocket no longer connected, exiting loop")
+                break
+
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            if message and message["type"] == "message":
                 data = json.loads(message["data"])
-                await websocket.send_json(data)
+                logger.info(f"Forwarding message to WebSocket: {data.get('type')}")
+                try:
+                    await websocket.send_json(data)
+                except Exception as send_error:
+                    logger.warning(f"Failed to send to WebSocket: {send_error}")
+                    break
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-        await websocket.close(code=4000, reason=str(e))
+        logger.error(f"WebSocket error: {type(e).__name__}: {e}")
+    finally:
+        # Cleanup pubsub
+        if pubsub:
+            await pubsub.unsubscribe()
+            await pubsub.close()
 
 
 @router.get("/stats/summary")

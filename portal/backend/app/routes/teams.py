@@ -122,7 +122,9 @@ async def create_team(
     task_id = await task_service.create_team_provision_task(
         team_id=team_id,
         team_slug=request.slug,
-        owner_id=current_user["id"]
+        owner_id=current_user["id"],
+        owner_email=current_user.get("email"),
+        owner_name=current_user.get("display_name")
     )
 
     logger.info(f"Team {request.slug} creation started, task: {task_id}")
@@ -153,6 +155,9 @@ async def list_teams(
     """Get all teams for current user"""
     teams = db_service.get_user_teams(current_user["id"])
 
+    # Filter out teams being deleted (worker will clean them up)
+    active_teams = [t for t in teams if t.get("status") != "pending_deletion"]
+
     return [
         TeamResponse(
             id=team["id"],
@@ -167,7 +172,7 @@ async def list_teams(
             created_at=team["created_at"],
             provisioned_at=team.get("provisioned_at")
         )
-        for team in teams
+        for team in active_teams
     ]
 
 

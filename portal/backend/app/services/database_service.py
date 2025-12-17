@@ -14,19 +14,38 @@ logger = logging.getLogger(__name__)
 
 
 class DatabaseService:
-    """TinyDB database service for portal data"""
+    """TinyDB database service for portal data
+
+    Note: TinyDB keeps data in memory. To ensure we always have fresh data
+    (especially when the worker process modifies the database), we close
+    and reopen the database on write operations.
+    """
 
     def __init__(self):
         self.db: Optional[TinyDB] = None
+        self._db_path: Optional[Path] = None
         self._ensure_db()
 
     def _ensure_db(self):
         """Ensure database exists and is connected"""
         if self.db is None:
-            db_path = Path(settings.database_path)
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-            self.db = TinyDB(str(db_path))
-            logger.info(f"Database connected: {db_path}")
+            self._db_path = Path(settings.database_path)
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+            self.db = TinyDB(str(self._db_path))
+            logger.info(f"Database connected: {self._db_path}")
+
+    def refresh(self):
+        """Force reload database from disk (call after external modifications)"""
+        if self.db:
+            # Clear TinyDB's internal cache by closing storage
+            if hasattr(self.db, '_storage') and self.db._storage:
+                self.db._storage.close()
+            self.db.close()
+            self.db = None
+        # Force fresh read by creating new instance
+        self._db_path = Path(settings.database_path)
+        self.db = TinyDB(str(self._db_path))
+        logger.debug(f"Database refreshed from disk: {self._db_path}")
 
     @property
     def users(self):
@@ -127,7 +146,11 @@ class DatabaseService:
         return result[0] if result else None
 
     def get_team_by_slug(self, slug: str) -> Optional[dict]:
-        """Get team by slug"""
+        """Get team by slug
+
+        Note: We refresh to pick up changes from worker process.
+        """
+        self.refresh()
         Team = Query()
         result = self.teams.search(Team.slug == slug.lower())
         return result[0] if result else None
@@ -150,7 +173,14 @@ class DatabaseService:
         return self.get_team_by_id(team_id)
 
     def get_user_teams(self, user_id: str) -> List[dict]:
-        """Get all teams for a user"""
+        """Get all teams for a user
+
+        Note: We refresh the database here because teams can be modified
+        by the worker process running in a separate container.
+        """
+        # Refresh to pick up changes from worker process
+        self.refresh()
+
         Membership = Query()
         memberships = self.memberships.search(Membership.user_id == user_id)
 

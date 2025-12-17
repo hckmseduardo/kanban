@@ -1,12 +1,54 @@
 import { Outlet, Link } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
 import { useState, useRef, useEffect } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import ThemeToggle from './ThemeToggle'
+import { useTaskWebSocket } from '../hooks/useTaskWebSocket'
+
+interface Toast {
+  id: string
+  type: 'success' | 'error' | 'info'
+  message: string
+}
 
 export default function Layout() {
   const { user, logout } = useAuthStore()
+  const queryClient = useQueryClient()
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false)
+  const [toasts, setToasts] = useState<Toast[]>([])
   const menuRef = useRef<HTMLDivElement>(null)
+
+  // Show toast notification
+  const showToast = (type: Toast['type'], message: string) => {
+    const id = Date.now().toString()
+    setToasts(prev => [...prev, { id, type, message }])
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id))
+    }, 5000)
+  }
+
+  // WebSocket for real-time task updates (app-level)
+  useTaskWebSocket({
+    onTaskCompleted: (_taskId, result) => {
+      const action = (result as any)?.action
+      const teamSlug = (result as any)?.team_slug
+
+      if (action === 'create_team') {
+        showToast('success', `Team "${teamSlug}" created successfully!`)
+      } else if (action === 'delete_team') {
+        showToast('success', `Team "${teamSlug}" deleted successfully!`)
+      }
+
+      // Refresh teams lists
+      queryClient.invalidateQueries({ queryKey: ['user-teams'] })
+      queryClient.invalidateQueries({ queryKey: ['teams'] })
+    },
+    onTaskFailed: (_taskId, error) => {
+      showToast('error', `Task failed: ${error || 'Unknown error'}`)
+      queryClient.invalidateQueries({ queryKey: ['user-teams'] })
+      queryClient.invalidateQueries({ queryKey: ['teams'] })
+    }
+  })
 
   // Close menu when clicking outside
   useEffect(() => {
@@ -90,6 +132,40 @@ export default function Layout() {
       <main className="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
         <Outlet />
       </main>
+
+      {/* Toast Notifications (app-level) */}
+      <div className="fixed bottom-4 right-4 z-50 space-y-2">
+        {toasts.map(toast => (
+          <div
+            key={toast.id}
+            className={`px-4 py-3 rounded-lg shadow-lg flex items-center gap-3 animate-slide-in ${
+              toast.type === 'success' ? 'bg-green-500 text-white' :
+              toast.type === 'error' ? 'bg-red-500 text-white' :
+              'bg-blue-500 text-white'
+            }`}
+          >
+            {toast.type === 'success' && (
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+            )}
+            {toast.type === 'error' && (
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            )}
+            <span>{toast.message}</span>
+            <button
+              onClick={() => setToasts(prev => prev.filter(t => t.id !== toast.id))}
+              className="ml-2 hover:opacity-75"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

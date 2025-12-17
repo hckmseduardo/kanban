@@ -77,7 +77,7 @@ stop_team_containers() {
         if docker ps -a --filter "name=kanban-team-$team" --format "{{.Names}}" | grep -q .; then
             echo "  Stopping $team..."
             TEAM_SLUG=$team DOMAIN=${DOMAIN:-localhost} DATA_PATH="$(pwd)/data/teams/$team" \
-                docker compose -f team-template/docker-compose.yml -p "kanban-team-$team" down 2>/dev/null || true
+                docker compose -f kanban-team/docker-compose.yml -p "kanban-team-$team" down 2>/dev/null || true
         fi
     done
     success "All team containers stopped"
@@ -94,8 +94,17 @@ start_team_containers() {
     info "Starting team containers..."
     for team in $teams; do
         echo "  Starting $team..."
-        TEAM_SLUG=$team DOMAIN=${DOMAIN:-localhost} DATA_PATH="$(pwd)/data/teams/$team" \
-            docker compose -f team-template/docker-compose.yml -p "kanban-team-$team" up -d 2>/dev/null || true
+        TEAM_SLUG=$team \
+        DOMAIN=${DOMAIN:-localhost} \
+        DATA_PATH="$(pwd)/data/teams/$team" \
+        EMAIL_PROVIDER="${EMAIL_PROVIDER:-office365}" \
+        SMTP_HOST="${SMTP_HOST:-smtp.office365.com}" \
+        SMTP_PORT="${SMTP_PORT:-587}" \
+        SMTP_USERNAME="${SMTP_USERNAME}" \
+        SMTP_PASSWORD="${SMTP_PASSWORD}" \
+        EMAIL_FROM_EMAIL="${EMAIL_FROM_EMAIL}" \
+        EMAIL_FROM_NAME="${EMAIL_FROM_NAME:-Kanban}" \
+            docker compose -f kanban-team/docker-compose.yml -p "kanban-team-$team" up -d 2>/dev/null || true
     done
     success "All team containers started"
 }
@@ -114,12 +123,12 @@ build_shared_images() {
 
     # Build API image
     echo -e "  ${BLUE}Building kanban-team-api:latest...${NC}"
-    docker build -t kanban-team-api:latest --no-cache team-template/backend 2>&1 | tail -5
+    docker build -t kanban-team-api:latest --no-cache kanban-team/backend 2>&1 | tail -5
     echo ""
 
     # Build web image
     echo -e "  ${BLUE}Building kanban-team-web:latest...${NC}"
-    docker build -t kanban-team-web:latest --no-cache team-template/frontend 2>&1 | tail -5
+    docker build -t kanban-team-web:latest --no-cache kanban-team/frontend 2>&1 | tail -5
     echo ""
 
     success "Shared images built!"
@@ -148,12 +157,21 @@ rebuild_team_containers() {
         # Stop this team's containers
         echo "  Stopping $team..."
         TEAM_SLUG=$team DOMAIN=${DOMAIN:-localhost} DATA_PATH="$(pwd)/data/teams/$team" \
-            docker compose -f team-template/docker-compose.yml -p "kanban-team-$team" down 2>/dev/null || true
+            docker compose -f kanban-team/docker-compose.yml -p "kanban-team-$team" down 2>/dev/null || true
 
         # Start with new images
         echo "  Starting $team..."
-        TEAM_SLUG=$team DOMAIN=${DOMAIN:-localhost} DATA_PATH="$(pwd)/data/teams/$team" \
-            docker compose -f team-template/docker-compose.yml -p "kanban-team-$team" up -d 2>/dev/null
+        TEAM_SLUG=$team \
+        DOMAIN=${DOMAIN:-localhost} \
+        DATA_PATH="$(pwd)/data/teams/$team" \
+        EMAIL_PROVIDER="${EMAIL_PROVIDER:-office365}" \
+        SMTP_HOST="${SMTP_HOST:-smtp.office365.com}" \
+        SMTP_PORT="${SMTP_PORT:-587}" \
+        SMTP_USERNAME="${SMTP_USERNAME}" \
+        SMTP_PASSWORD="${SMTP_PASSWORD}" \
+        EMAIL_FROM_EMAIL="${EMAIL_FROM_EMAIL}" \
+        EMAIL_FROM_NAME="${EMAIL_FROM_NAME:-Kanban}" \
+            docker compose -f kanban-team/docker-compose.yml -p "kanban-team-$team" up -d 2>/dev/null
 
         # Brief pause to let container start
         sleep 2
