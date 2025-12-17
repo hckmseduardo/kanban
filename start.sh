@@ -60,7 +60,8 @@ error() {
 # Get list of team slugs from data directory
 get_team_slugs() {
     if [ -d "data/teams" ]; then
-        ls -1 data/teams 2>/dev/null | grep -v '^\.' || true
+        # Exclude 'db' directory and hidden files
+        ls -1 data/teams 2>/dev/null | grep -v '^\.' | grep -v '^db$' || true
     fi
 }
 

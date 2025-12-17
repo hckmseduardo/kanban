@@ -455,3 +455,40 @@ async def sync_team_settings(
     logger.info(f"Synced settings for team {slug}: {update_data}")
 
     return {"message": "Settings synced successfully", "updated": list(update_data.keys())}
+
+
+class UnregisterMemberRequest(BaseModel):
+    user_id: str
+
+
+@router.post("/{slug}/unregister-member")
+async def unregister_team_member(
+    slug: str,
+    request: UnregisterMemberRequest
+):
+    """Unregister a member when they are removed from a team.
+
+    This endpoint is called by team instances when a member is removed.
+    It removes the membership from the portal database so the user no longer
+    sees the team in their dashboard.
+    """
+    team = db_service.get_team_by_slug(slug)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    # Check if user is a member
+    existing = db_service.get_membership(team["id"], request.user_id)
+    if not existing:
+        # Not a member, just return success
+        return {"message": "User is not a member", "was_member": False}
+
+    # Can't remove owner via this endpoint
+    if request.user_id == team["owner_id"]:
+        raise HTTPException(status_code=400, detail="Cannot remove team owner")
+
+    # Remove member
+    db_service.remove_team_member(team["id"], request.user_id)
+
+    logger.info(f"Unregistered user {request.user_id} from team {slug}")
+
+    return {"message": "Member unregistered successfully", "was_member": True}
