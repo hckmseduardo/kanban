@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { teamsApi, authApi, setNavigatingAway } from '../services/api'
 import { useAuthStore } from '../stores/authStore'
 import { useTaskWebSocket } from '../hooks/useTaskWebSocket'
@@ -14,6 +14,7 @@ interface Toast {
 export default function TeamsPage() {
   const { user } = useAuthStore()
   const queryClient = useQueryClient()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [deleteConfirm, setDeleteConfirm] = useState<{ slug: string; name: string } | null>(null)
   const [deleteInput, setDeleteInput] = useState('')
   const [toasts, setToasts] = useState<Toast[]>([])
@@ -27,6 +28,20 @@ export default function TeamsPage() {
       setToasts(prev => prev.filter(t => t.id !== id))
     }, 5000)
   }
+
+  // Handle error query parameters (e.g., from team redirect on 403)
+  useEffect(() => {
+    const error = searchParams.get('error')
+    const team = searchParams.get('team')
+
+    if (error === 'not_a_member' && team) {
+      showToast('error', `You don't have access to team "${team}". Please request an invitation.`)
+      // Clean up URL
+      searchParams.delete('error')
+      searchParams.delete('team')
+      setSearchParams(searchParams)
+    }
+  }, [searchParams, setSearchParams])
 
   // WebSocket for real-time task updates
   useTaskWebSocket({

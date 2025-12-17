@@ -1,8 +1,25 @@
+import { useEffect, useState } from 'react'
 import { useAuthStore } from '../stores/authStore'
-import { Navigate } from 'react-router-dom'
+import { Navigate, useSearchParams } from 'react-router-dom'
 
 export default function LoginPage() {
   const { isAuthenticated, login } = useAuthStore()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+
+  // Handle error query parameters (e.g., from team redirect on 403)
+  useEffect(() => {
+    const error = searchParams.get('error')
+    const team = searchParams.get('team')
+
+    if (error === 'not_a_member' && team) {
+      setErrorMessage(`You don't have access to team "${team}". Please request an invitation or sign in with a different account.`)
+      // Clean up URL
+      searchParams.delete('error')
+      searchParams.delete('team')
+      setSearchParams(searchParams)
+    }
+  }, [searchParams, setSearchParams])
 
   if (isAuthenticated) {
     return <Navigate to="/" replace />
@@ -20,6 +37,12 @@ export default function LoginPage() {
             Use your Microsoft, Google, or Facebook account
           </p>
         </div>
+
+        {errorMessage && (
+          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
+            {errorMessage}
+          </div>
+        )}
 
         <div className="mt-8 space-y-4">
           <button
