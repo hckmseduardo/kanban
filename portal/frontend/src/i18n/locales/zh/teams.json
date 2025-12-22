@@ -1,0 +1,47 @@
+{
+  "title": "团队",
+  "createTeam": "创建团队",
+  "createNew": "创建新团队",
+  "noTeams": "暂无团队",
+  "createFirst": "创建您的第一个团队",
+  "openBoard": "打开看板",
+  "deleteTeam": "删除团队",
+  "deleteTitle": "删除团队",
+  "cannotUndo": "此操作无法撤销",
+  "deleteWarning": "您即将删除 {{name}}。这将：",
+  "deleteAction1": "停止并删除所有容器",
+  "deleteAction2": "归档所有看板和数据",
+  "deleteAction3": "移除所有团队成员",
+  "typeToConfirm": "输入 {{slug}} 确认",
+  "teamCreated": "团队「{{slug}}」创建成功！",
+  "teamDeleted": "团队「{{slug}}」删除成功！",
+  "noAccessShort": "您没有访问团队「{{team}}」的权限。请申请邀请。",
+  "form": {
+    "teamName": "团队名称",
+    "teamNamePlaceholder": "营销团队",
+    "teamSlug": "团队 URL 标识",
+    "slugHint": "3-63 个字符，仅限小写字母、数字和连字符",
+    "description": "描述",
+    "descriptionPlaceholder": "简短描述您的团队...",
+    "nameRequired": "团队名称为必填项",
+    "slugMinLength": "团队标识至少需要 3 个字符"
+  },
+  "whatHappens": {
+    "title": "接下来会发生什么？",
+    "step1": "您的团队环境将自动配置",
+    "step2": "将为您的团队创建唯一的子域名",
+    "step3": "将颁发 SSL 证书以确保安全访问",
+    "step4": "配置完成后，您可以邀请团队成员"
+  },
+  "tasks": {
+    "title": "任务管理器",
+    "liveUpdates": "实时更新",
+    "disconnected": "已断开连接",
+    "connecting": "连接中...",
+    "noTasks": "暂无任务",
+    "taskCompleted": "任务完成成功！",
+    "step": "步骤 {{current}} / {{total}}",
+    "ready": "就绪: {{url}}",
+    "createdAgo": "创建于 {{time}} 前"
+  }
+}

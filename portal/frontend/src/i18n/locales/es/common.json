@@ -1,0 +1,35 @@
+{
+  "nav": {
+    "taskManager": "Gestor de Tareas",
+    "logout": "Cerrar sesion"
+  },
+  "buttons": {
+    "save": "Guardar",
+    "cancel": "Cancelar",
+    "delete": "Eliminar",
+    "create": "Crear",
+    "open": "Abrir",
+    "retry": "Reintentar"
+  },
+  "status": {
+    "loading": "Cargando...",
+    "deleting": "Eliminando...",
+    "creating": "Creando...",
+    "settingUp": "Configurando...",
+    "active": "Activo",
+    "provisioning": "aprovisionando",
+    "pending": "pendiente",
+    "completed": "completado",
+    "failed": "fallido",
+    "inProgress": "en progreso"
+  },
+  "theme": {
+    "light": "Claro",
+    "dark": "Oscuro",
+    "system": "Sistema"
+  },
+  "errors": {
+    "taskFailed": "Tarea fallida: {{error}}",
+    "unknownError": "Error desconocido"
+  }
+}

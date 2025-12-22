@@ -1,0 +1,47 @@
+{
+  "title": "الفرق",
+  "createTeam": "إنشاء فريق",
+  "createNew": "إنشاء فريق جديد",
+  "noTeams": "لا توجد فرق بعد",
+  "createFirst": "أنشئ فريقك الأول",
+  "openBoard": "فتح اللوحة",
+  "deleteTeam": "حذف الفريق",
+  "deleteTitle": "حذف الفريق",
+  "cannotUndo": "لا يمكن التراجع عن هذا الإجراء",
+  "deleteWarning": "أنت على وشك حذف {{name}}. سيؤدي هذا إلى:",
+  "deleteAction1": "إيقاف وإزالة جميع الحاويات",
+  "deleteAction2": "أرشفة جميع اللوحات والبيانات",
+  "deleteAction3": "إزالة جميع أعضاء الفريق",
+  "typeToConfirm": "اكتب {{slug}} للتأكيد",
+  "teamCreated": "تم إنشاء الفريق \"{{slug}}\" بنجاح!",
+  "teamDeleted": "تم حذف الفريق \"{{slug}}\" بنجاح!",
+  "noAccessShort": "ليس لديك حق الوصول إلى الفريق \"{{team}}\". يرجى طلب دعوة.",
+  "form": {
+    "teamName": "اسم الفريق",
+    "teamNamePlaceholder": "فريق التسويق",
+    "teamSlug": "معرف URL للفريق",
+    "slugHint": "3-63 حرف، أحرف صغيرة وأرقام وشرطات فقط",
+    "description": "الوصف",
+    "descriptionPlaceholder": "وصف مختصر لفريقك...",
+    "nameRequired": "اسم الفريق مطلوب",
+    "slugMinLength": "يجب أن يكون المعرف 3 أحرف على الأقل"
+  },
+  "whatHappens": {
+    "title": "ماذا يحدث بعد ذلك؟",
+    "step1": "سيتم توفير بيئة فريقك تلقائياً",
+    "step2": "سيتم إنشاء نطاق فرعي فريد لفريقك",
+    "step3": "سيتم إصدار شهادة SSL للوصول الآمن",
+    "step4": "ستتمكن من دعوة أعضاء الفريق بعد اكتمال الإعداد"
+  },
+  "tasks": {
+    "title": "مدير المهام",
+    "liveUpdates": "تحديثات مباشرة",
+    "disconnected": "غير متصل",
+    "connecting": "جاري الاتصال...",
+    "noTasks": "لا توجد مهام بعد",
+    "taskCompleted": "تمت المهمة بنجاح!",
+    "step": "الخطوة {{current}} من {{total}}",
+    "ready": "جاهز: {{url}}",
+    "createdAgo": "تم الإنشاء منذ {{time}}"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "title": "Equipes",
+  "createTeam": "Creer une equipe",
+  "createNew": "Creer une nouvelle equipe",
+  "noTeams": "Aucune equipe",
+  "createFirst": "Creez votre premiere equipe",
+  "openBoard": "Ouvrir le tableau",
+  "deleteTeam": "Supprimer l'equipe",
+  "deleteTitle": "Supprimer l'equipe",
+  "cannotUndo": "Cette action est irreversible",
+  "deleteWarning": "Vous etes sur le point de supprimer {{name}}. Cela va:",
+  "deleteAction1": "Arreter et supprimer tous les conteneurs",
+  "deleteAction2": "Archiver tous les tableaux et donnees",
+  "deleteAction3": "Retirer tous les membres de l'equipe",
+  "typeToConfirm": "Tapez {{slug}} pour confirmer",
+  "teamCreated": "Equipe \"{{slug}}\" creee avec succes!",
+  "teamDeleted": "Equipe \"{{slug}}\" supprimee avec succes!",
+  "noAccessShort": "Vous n'avez pas acces a l'equipe \"{{team}}\". Veuillez demander une invitation.",
+  "form": {
+    "teamName": "Nom de l'equipe",
+    "teamNamePlaceholder": "Equipe Marketing",
+    "teamSlug": "Identifiant URL de l'equipe",
+    "slugHint": "3-63 caracteres, lettres minuscules, chiffres et tirets uniquement",
+    "description": "Description",
+    "descriptionPlaceholder": "Une breve description de votre equipe...",
+    "nameRequired": "Le nom de l'equipe est requis",
+    "slugMinLength": "L'identifiant doit comporter au moins 3 caracteres"
+  },
+  "whatHappens": {
+    "title": "Que se passe-t-il ensuite?",
+    "step1": "Votre environnement d'equipe sera provisionne automatiquement",
+    "step2": "Un sous-domaine unique sera cree pour votre equipe",
+    "step3": "Un certificat SSL sera emis pour un acces securise",
+    "step4": "Vous pourrez inviter des membres une fois la configuration terminee"
+  },
+  "tasks": {
+    "title": "Gestionnaire de taches",
+    "liveUpdates": "Mises a jour en direct",
+    "disconnected": "Deconnecte",
+    "connecting": "Connexion...",
+    "noTasks": "Aucune tache",
+    "taskCompleted": "Tache terminee avec succes!",
+    "step": "Etape {{current}} sur {{total}}",
+    "ready": "Pret: {{url}}",
+    "createdAgo": "Cree il y a {{time}}"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "title": "Equipes",
+  "createTeam": "Criar Equipe",
+  "createNew": "Criar Nova Equipe",
+  "noTeams": "Nenhuma equipe ainda",
+  "createFirst": "Crie sua primeira equipe",
+  "openBoard": "Abrir Quadro",
+  "deleteTeam": "Excluir Equipe",
+  "deleteTitle": "Excluir equipe",
+  "cannotUndo": "Esta acao nao pode ser desfeita",
+  "deleteWarning": "Voce esta prestes a excluir {{name}}. Isso ira:",
+  "deleteAction1": "Parar e remover todos os containers",
+  "deleteAction2": "Arquivar todos os quadros e dados",
+  "deleteAction3": "Remover todos os membros da equipe",
+  "typeToConfirm": "Digite {{slug}} para confirmar",
+  "teamCreated": "Equipe \"{{slug}}\" criada com sucesso!",
+  "teamDeleted": "Equipe \"{{slug}}\" excluida com sucesso!",
+  "noAccessShort": "Voce nao tem acesso a equipe \"{{team}}\". Solicite um convite.",
+  "form": {
+    "teamName": "Nome da Equipe",
+    "teamNamePlaceholder": "Equipe de Marketing",
+    "teamSlug": "Identificador URL da Equipe",
+    "slugHint": "3-63 caracteres, letras minusculas, numeros e hifens apenas",
+    "description": "Descricao",
+    "descriptionPlaceholder": "Uma breve descricao da sua equipe...",
+    "nameRequired": "Nome da equipe e obrigatorio",
+    "slugMinLength": "O identificador deve ter pelo menos 3 caracteres"
+  },
+  "whatHappens": {
+    "title": "O que acontece depois?",
+    "step1": "Seu ambiente de equipe sera provisionado automaticamente",
+    "step2": "Um subdominio unico sera criado para sua equipe",
+    "step3": "Certificado SSL sera emitido para acesso seguro",
+    "step4": "Voce podera convidar membros apos a configuracao"
+  },
+  "tasks": {
+    "title": "Gerenciador de Tarefas",
+    "liveUpdates": "Atualizacoes em tempo real",
+    "disconnected": "Desconectado",
+    "connecting": "Conectando...",
+    "noTasks": "Nenhuma tarefa ainda",
+    "taskCompleted": "Tarefa concluida com sucesso!",
+    "step": "Passo {{current}} de {{total}}",
+    "ready": "Pronto: {{url}}",
+    "createdAgo": "Criado ha {{time}}"
+  }
+}

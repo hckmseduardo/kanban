@@ -1,0 +1,35 @@
+{
+  "nav": {
+    "taskManager": "Gestionnaire de taches",
+    "logout": "Deconnexion"
+  },
+  "buttons": {
+    "save": "Enregistrer",
+    "cancel": "Annuler",
+    "delete": "Supprimer",
+    "create": "Creer",
+    "open": "Ouvrir",
+    "retry": "Reessayer"
+  },
+  "status": {
+    "loading": "Chargement...",
+    "deleting": "Suppression...",
+    "creating": "Creation...",
+    "settingUp": "Configuration...",
+    "active": "Actif",
+    "provisioning": "provisionnement",
+    "pending": "en attente",
+    "completed": "termine",
+    "failed": "echoue",
+    "inProgress": "en cours"
+  },
+  "theme": {
+    "light": "Clair",
+    "dark": "Sombre",
+    "system": "Systeme"
+  },
+  "errors": {
+    "taskFailed": "Tache echouee: {{error}}",
+    "unknownError": "Erreur inconnue"
+  }
+}

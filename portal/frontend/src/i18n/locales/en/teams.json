@@ -1,0 +1,47 @@
+{
+  "title": "Teams",
+  "createTeam": "Create Team",
+  "createNew": "Create New Team",
+  "noTeams": "No teams yet",
+  "createFirst": "Create your first team",
+  "openBoard": "Open Board",
+  "deleteTeam": "Delete Team",
+  "deleteTitle": "Delete team",
+  "cannotUndo": "This action cannot be undone",
+  "deleteWarning": "You are about to delete {{name}}. This will:",
+  "deleteAction1": "Stop and remove all containers",
+  "deleteAction2": "Archive all boards and data",
+  "deleteAction3": "Remove all team members",
+  "typeToConfirm": "Type {{slug}} to confirm",
+  "teamCreated": "Team \"{{slug}}\" created successfully!",
+  "teamDeleted": "Team \"{{slug}}\" deleted successfully!",
+  "noAccessShort": "You don't have access to team \"{{team}}\". Please request an invitation.",
+  "form": {
+    "teamName": "Team Name",
+    "teamNamePlaceholder": "Marketing Team",
+    "teamSlug": "Team URL Slug",
+    "slugHint": "3-63 characters, lowercase letters, numbers, and hyphens only",
+    "description": "Description",
+    "descriptionPlaceholder": "A brief description of your team...",
+    "nameRequired": "Team name is required",
+    "slugMinLength": "Team slug must be at least 3 characters"
+  },
+  "whatHappens": {
+    "title": "What happens next?",
+    "step1": "Your team environment will be provisioned automatically",
+    "step2": "A unique subdomain will be created for your team",
+    "step3": "SSL certificate will be issued for secure access",
+    "step4": "You'll be able to invite team members once setup is complete"
+  },
+  "tasks": {
+    "title": "Task Manager",
+    "liveUpdates": "Live updates",
+    "disconnected": "Disconnected",
+    "connecting": "Connecting...",
+    "noTasks": "No tasks yet",
+    "taskCompleted": "Task completed successfully!",
+    "step": "Step {{current}} of {{total}}",
+    "ready": "Ready: {{url}}",
+    "createdAgo": "Created {{time}} ago"
+  }
+}

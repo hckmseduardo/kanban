@@ -1,0 +1,35 @@
+{
+  "nav": {
+    "taskManager": "Gerenciador de Tarefas",
+    "logout": "Sair"
+  },
+  "buttons": {
+    "save": "Salvar",
+    "cancel": "Cancelar",
+    "delete": "Excluir",
+    "create": "Criar",
+    "open": "Abrir",
+    "retry": "Tentar novamente"
+  },
+  "status": {
+    "loading": "Carregando...",
+    "deleting": "Excluindo...",
+    "creating": "Criando...",
+    "settingUp": "Configurando...",
+    "active": "Ativo",
+    "provisioning": "provisionando",
+    "pending": "pendente",
+    "completed": "concluido",
+    "failed": "falhou",
+    "inProgress": "em andamento"
+  },
+  "theme": {
+    "light": "Claro",
+    "dark": "Escuro",
+    "system": "Sistema"
+  },
+  "errors": {
+    "taskFailed": "Tarefa falhou: {{error}}",
+    "unknownError": "Erro desconhecido"
+  }
+}

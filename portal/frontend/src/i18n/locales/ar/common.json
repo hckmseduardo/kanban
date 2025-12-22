@@ -1,0 +1,35 @@
+{
+  "nav": {
+    "taskManager": "مدير المهام",
+    "logout": "تسجيل الخروج"
+  },
+  "buttons": {
+    "save": "حفظ",
+    "cancel": "إلغاء",
+    "delete": "حذف",
+    "create": "إنشاء",
+    "open": "فتح",
+    "retry": "إعادة المحاولة"
+  },
+  "status": {
+    "loading": "جاري التحميل...",
+    "deleting": "جاري الحذف...",
+    "creating": "جاري الإنشاء...",
+    "settingUp": "جاري الإعداد...",
+    "active": "نشط",
+    "provisioning": "جاري التوفير",
+    "pending": "قيد الانتظار",
+    "completed": "مكتمل",
+    "failed": "فشل",
+    "inProgress": "قيد التنفيذ"
+  },
+  "theme": {
+    "light": "فاتح",
+    "dark": "داكن",
+    "system": "النظام"
+  },
+  "errors": {
+    "taskFailed": "فشلت المهمة: {{error}}",
+    "unknownError": "خطأ غير معروف"
+  }
+}

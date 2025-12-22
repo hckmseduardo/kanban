@@ -1,0 +1,47 @@
+{
+  "title": "Equipos",
+  "createTeam": "Crear Equipo",
+  "createNew": "Crear Nuevo Equipo",
+  "noTeams": "Sin equipos aun",
+  "createFirst": "Crea tu primer equipo",
+  "openBoard": "Abrir Tablero",
+  "deleteTeam": "Eliminar Equipo",
+  "deleteTitle": "Eliminar equipo",
+  "cannotUndo": "Esta accion no se puede deshacer",
+  "deleteWarning": "Estas a punto de eliminar {{name}}. Esto:",
+  "deleteAction1": "Detendra y eliminara todos los contenedores",
+  "deleteAction2": "Archivara todos los tableros y datos",
+  "deleteAction3": "Eliminara todos los miembros del equipo",
+  "typeToConfirm": "Escribe {{slug}} para confirmar",
+  "teamCreated": "Equipo \"{{slug}}\" creado exitosamente!",
+  "teamDeleted": "Equipo \"{{slug}}\" eliminado exitosamente!",
+  "noAccessShort": "No tienes acceso al equipo \"{{team}}\". Solicita una invitacion.",
+  "form": {
+    "teamName": "Nombre del Equipo",
+    "teamNamePlaceholder": "Equipo de Marketing",
+    "teamSlug": "Identificador URL del Equipo",
+    "slugHint": "3-63 caracteres, letras minusculas, numeros y guiones solamente",
+    "description": "Descripcion",
+    "descriptionPlaceholder": "Una breve descripcion de tu equipo...",
+    "nameRequired": "El nombre del equipo es obligatorio",
+    "slugMinLength": "El identificador debe tener al menos 3 caracteres"
+  },
+  "whatHappens": {
+    "title": "Que pasa despues?",
+    "step1": "Tu entorno de equipo sera aprovisionado automaticamente",
+    "step2": "Se creara un subdominio unico para tu equipo",
+    "step3": "Se emitira un certificado SSL para acceso seguro",
+    "step4": "Podras invitar miembros una vez completada la configuracion"
+  },
+  "tasks": {
+    "title": "Gestor de Tareas",
+    "liveUpdates": "Actualizaciones en vivo",
+    "disconnected": "Desconectado",
+    "connecting": "Conectando...",
+    "noTasks": "Sin tareas aun",
+    "taskCompleted": "Tarea completada exitosamente!",
+    "step": "Paso {{current}} de {{total}}",
+    "ready": "Listo: {{url}}",
+    "createdAgo": "Creado hace {{time}}"
+  }
+}

@@ -1,8 +1,10 @@
 import { Outlet, Link } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 import { useAuthStore } from '../stores/authStore'
 import { useState, useRef, useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import ThemeToggle from './ThemeToggle'
+import LanguageSelector from './LanguageSelector'
 import { useTaskWebSocket } from '../hooks/useTaskWebSocket'
 
 interface Toast {
@@ -12,6 +14,7 @@ interface Toast {
 }
 
 export default function Layout() {
+  const { t } = useTranslation()
   const { user, logout } = useAuthStore()
   const queryClient = useQueryClient()
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false)
@@ -78,6 +81,7 @@ export default function Layout() {
 
             {/* User Menu */}
             <div className="flex items-center gap-2">
+              <LanguageSelector />
               <ThemeToggle />
               <div className="relative" ref={menuRef}>
                 <button
@@ -108,16 +112,16 @@ export default function Layout() {
                         className="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-dark-700"
                         onClick={() => setIsUserMenuOpen(false)}
                       >
-                        Task Manager
+                        {t('nav.taskManager')}
                       </Link>
                       <button
                         onClick={() => {
                           setIsUserMenuOpen(false)
                           logout()
                         }}
-                        className="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-dark-700"
+                        className="block w-full text-left rtl:text-right px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-dark-700"
                       >
-                        Logout
+                        {t('nav.logout')}
                       </button>
                     </div>
                   </div>

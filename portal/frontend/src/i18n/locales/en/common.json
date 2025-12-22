@@ -1,0 +1,35 @@
+{
+  "nav": {
+    "taskManager": "Task Manager",
+    "logout": "Logout"
+  },
+  "buttons": {
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "create": "Create",
+    "open": "Open",
+    "retry": "Retry"
+  },
+  "status": {
+    "loading": "Loading...",
+    "deleting": "Deleting...",
+    "creating": "Creating...",
+    "settingUp": "Setting up...",
+    "active": "Active",
+    "provisioning": "provisioning",
+    "pending": "pending",
+    "completed": "completed",
+    "failed": "failed",
+    "inProgress": "in_progress"
+  },
+  "theme": {
+    "light": "Light",
+    "dark": "Dark",
+    "system": "System"
+  },
+  "errors": {
+    "taskFailed": "Task failed: {{error}}",
+    "unknownError": "Unknown error"
+  }
+}
