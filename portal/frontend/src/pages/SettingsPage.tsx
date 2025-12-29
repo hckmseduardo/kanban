@@ -63,8 +63,8 @@ export default function SettingsPage() {
   }
 
   const handleCopyApiUrl = async () => {
-    const apiUrl = `${window.location.origin.replace('://', '://api.')}`
-    await navigator.clipboard.writeText(apiUrl)
+    const url = `${window.location.origin}/api/api`
+    await navigator.clipboard.writeText(url)
     setCopiedApiUrl(true)
     setTimeout(() => setCopiedApiUrl(false), 2000)
   }
@@ -77,7 +77,7 @@ export default function SettingsPage() {
     )
   }
 
-  const apiUrl = window.location.origin.replace('://', '://api.')
+  const apiUrl = `${window.location.origin}/api/api`
 
   return (
     <div className="space-y-8">

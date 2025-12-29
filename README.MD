@@ -1178,16 +1178,16 @@ User clicks "Create Team" in Portal
 # Token format: pk_xxxx...
 
 # List all teams
-curl -H "Authorization: Bearer pk_your_token" https://api.kanban.example.com/api/teams
+curl -H "Authorization: Bearer pk_your_token" https://kanban.example.com/api/api/teams
 
 # Create a team
-curl -X POST https://api.kanban.example.com/api/teams \
+curl -X POST "https://kanban.example.com/api/api/teams?owner_id=user-uuid" \
   -H "Authorization: Bearer pk_your_token" \
   -H "Content-Type: application/json" \
-  -d '{"name": "My Team", "slug": "my-team"}&owner_id=user-uuid'
+  -d '{"name": "My Team", "slug": "my-team"}'
 
 # Add a member
-curl -X POST https://api.kanban.example.com/api/teams/my-team/members \
+curl -X POST https://kanban.example.com/api/api/teams/my-team/members \
   -H "Authorization: Bearer pk_your_token" \
   -H "Content-Type: application/json" \
   -d '{"email": "user@example.com", "role": "member"}'
