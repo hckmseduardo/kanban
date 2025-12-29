@@ -492,3 +492,204 @@ async def unregister_team_member(
     logger.info(f"Unregistered user {request.user_id} from team {slug}")
 
     return {"message": "Member unregistered successfully", "was_member": True}
+
+
+# =============================================================================
+# API Token Management
+# =============================================================================
+
+import secrets
+import hashlib
+
+
+def generate_api_token() -> tuple[str, str]:
+    """Generate a secure API token and its hash.
+    Returns (plaintext_token, token_hash)
+    """
+    # Generate a secure random token
+    token = secrets.token_urlsafe(32)  # 256 bits of randomness
+    # Hash it for storage
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    return token, token_hash
+
+
+def hash_token(token: str) -> str:
+    """Hash a token for lookup"""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+class ApiTokenCreateRequest(BaseModel):
+    name: str
+    scopes: Optional[List[str]] = None
+    expires_in_days: Optional[int] = None  # None = never expires
+
+
+class ApiTokenResponse(BaseModel):
+    id: str
+    team_id: str
+    name: str
+    scopes: List[str]
+    created_by: str
+    created_at: str
+    expires_at: Optional[str]
+    last_used_at: Optional[str]
+    is_active: bool
+
+
+class ApiTokenCreateResponse(BaseModel):
+    token: ApiTokenResponse
+    plaintext_token: str  # Only shown once at creation
+
+
+@router.post("/{slug}/api-tokens", response_model=ApiTokenCreateResponse)
+async def create_api_token(
+    slug: str,
+    request: ApiTokenCreateRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Create a new API token for the team.
+
+    The plaintext token is only shown once. Store it securely.
+    """
+    team = db_service.get_team_by_slug(slug)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    # Check if user is admin or owner
+    membership = db_service.get_membership(team["id"], current_user["id"])
+    if not membership or membership["role"] not in ["owner", "admin"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    # Generate token
+    plaintext_token, token_hash = generate_api_token()
+
+    # Calculate expiry
+    expires_at = None
+    if request.expires_in_days:
+        from datetime import datetime, timedelta
+        expires_at = (datetime.utcnow() + timedelta(days=request.expires_in_days)).isoformat()
+
+    # Create token record
+    token_data = db_service.create_api_token(
+        team_id=team["id"],
+        name=request.name,
+        token_hash=token_hash,
+        created_by=current_user["id"],
+        scopes=request.scopes,
+        expires_at=expires_at
+    )
+
+    logger.info(f"API token '{request.name}' created for team {slug} by {current_user['id']}")
+
+    return ApiTokenCreateResponse(
+        token=ApiTokenResponse(
+            id=token_data["id"],
+            team_id=token_data["team_id"],
+            name=token_data["name"],
+            scopes=token_data["scopes"],
+            created_by=token_data["created_by"],
+            created_at=token_data["created_at"],
+            expires_at=token_data.get("expires_at"),
+            last_used_at=token_data.get("last_used_at"),
+            is_active=token_data["is_active"]
+        ),
+        plaintext_token=plaintext_token
+    )
+
+
+@router.get("/{slug}/api-tokens", response_model=List[ApiTokenResponse])
+async def list_api_tokens(
+    slug: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """List all API tokens for a team"""
+    team = db_service.get_team_by_slug(slug)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    # Check membership (any member can view tokens)
+    membership = db_service.get_membership(team["id"], current_user["id"])
+    if not membership:
+        raise HTTPException(status_code=403, detail="Not a member of this team")
+
+    tokens = db_service.get_team_api_tokens(team["id"])
+
+    return [
+        ApiTokenResponse(
+            id=t["id"],
+            team_id=t["team_id"],
+            name=t["name"],
+            scopes=t["scopes"],
+            created_by=t["created_by"],
+            created_at=t["created_at"],
+            expires_at=t.get("expires_at"),
+            last_used_at=t.get("last_used_at"),
+            is_active=t["is_active"]
+        )
+        for t in tokens
+    ]
+
+
+@router.delete("/{slug}/api-tokens/{token_id}")
+async def delete_api_token(
+    slug: str,
+    token_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Delete (revoke) an API token"""
+    team = db_service.get_team_by_slug(slug)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    # Check if user is admin or owner
+    membership = db_service.get_membership(team["id"], current_user["id"])
+    if not membership or membership["role"] not in ["owner", "admin"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    # Verify token belongs to this team
+    token = db_service.get_api_token_by_id(token_id)
+    if not token or token["team_id"] != team["id"]:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    db_service.delete_api_token(token_id)
+
+    logger.info(f"API token '{token_id}' deleted from team {slug} by {current_user['id']}")
+
+    return {"message": "Token deleted"}
+
+
+@router.post("/validate-api-token")
+async def validate_api_token(
+    token: str = Query(..., description="The API token to validate")
+):
+    """Validate an API token and return team info.
+
+    This endpoint is called by team instances to validate incoming API tokens.
+    """
+    token_hash = hash_token(token)
+    token_data = db_service.get_api_token_by_hash(token_hash)
+
+    if not token_data:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    # Check expiry
+    if token_data.get("expires_at"):
+        from datetime import datetime
+        if datetime.fromisoformat(token_data["expires_at"]) < datetime.utcnow():
+            raise HTTPException(status_code=401, detail="Token expired")
+
+    # Get team info
+    team = db_service.get_team_by_id(token_data["team_id"])
+    if not team:
+        raise HTTPException(status_code=401, detail="Team not found")
+
+    # Update last used
+    db_service.update_api_token_last_used(token_data["id"])
+
+    return {
+        "valid": True,
+        "team_id": team["id"],
+        "team_slug": team["slug"],
+        "scopes": token_data["scopes"],
+        "token_name": token_data["name"]
+    }
