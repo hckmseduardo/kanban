@@ -34,12 +34,14 @@ async def lifespan(app: FastAPI):
 
 
 # Create FastAPI app
+# root_path="/api" tells FastAPI it's behind a reverse proxy at /api path
 app = FastAPI(
     title=settings.app_name,
     description="Central API for Kanban platform - user and team management",
     version="0.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    root_path="/api",
     lifespan=lifespan
 )
 
