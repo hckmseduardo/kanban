@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.routes import auth, users, teams, tasks
+from app.routes import auth, users, teams, tasks, portal_api
 from app.services.redis_service import redis_service
 from app.services.task_service import task_service
 
@@ -105,6 +105,7 @@ app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 app.include_router(users.router, prefix="/users", tags=["Users"])
 app.include_router(teams.router, prefix="/teams", tags=["Teams"])
 app.include_router(tasks.router, prefix="/tasks", tags=["Tasks"])
+app.include_router(portal_api.router, prefix="/api", tags=["Portal API"])
 
 
 # Health check endpoints

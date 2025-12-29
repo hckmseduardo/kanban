@@ -71,6 +71,18 @@ class DatabaseService:
         self._ensure_db()
         return self.db.table("invites")
 
+    @property
+    def api_tokens(self):
+        """API tokens table (for team API tokens)"""
+        self._ensure_db()
+        return self.db.table("api_tokens")
+
+    @property
+    def portal_api_tokens(self):
+        """Portal API tokens table (for portal-level API access)"""
+        self._ensure_db()
+        return self.db.table("portal_api_tokens")
+
     # =========================================================================
     # User Operations
     # =========================================================================
@@ -265,6 +277,165 @@ class DatabaseService:
             (Membership.team_id == team_id) & (Membership.user_id == user_id)
         )
         logger.info(f"User {user_id} removed from team {team_id}")
+
+    # =========================================================================
+    # API Token Operations
+    # =========================================================================
+
+    def create_api_token(
+        self,
+        team_id: str,
+        name: str,
+        token_hash: str,
+        created_by: str,
+        scopes: List[str] = None,
+        expires_at: str = None
+    ) -> dict:
+        """Create a new API token for a team"""
+        import uuid
+        token_data = {
+            "id": str(uuid.uuid4()),
+            "team_id": team_id,
+            "name": name,
+            "token_hash": token_hash,  # Store hashed token, not plaintext
+            "scopes": scopes or ["read", "write", "webhook"],
+            "created_by": created_by,
+            "created_at": datetime.utcnow().isoformat(),
+            "expires_at": expires_at,
+            "last_used_at": None,
+            "is_active": True
+        }
+        self.api_tokens.insert(token_data)
+        logger.info(f"API token created for team {team_id}: {name}")
+        return token_data
+
+    def get_api_token_by_id(self, token_id: str) -> Optional[dict]:
+        """Get API token by ID"""
+        Token = Query()
+        result = self.api_tokens.search(Token.id == token_id)
+        return result[0] if result else None
+
+    def get_api_token_by_hash(self, token_hash: str) -> Optional[dict]:
+        """Get API token by hash (for validation)"""
+        Token = Query()
+        result = self.api_tokens.search(
+            (Token.token_hash == token_hash) & (Token.is_active == True)
+        )
+        return result[0] if result else None
+
+    def get_team_api_tokens(self, team_id: str) -> List[dict]:
+        """Get all API tokens for a team"""
+        Token = Query()
+        tokens = self.api_tokens.search(Token.team_id == team_id)
+        # Don't return token_hash in list
+        return [{k: v for k, v in t.items() if k != "token_hash"} for t in tokens]
+
+    def update_api_token_last_used(self, token_id: str):
+        """Update last_used_at timestamp"""
+        Token = Query()
+        self.api_tokens.update(
+            {"last_used_at": datetime.utcnow().isoformat()},
+            Token.id == token_id
+        )
+
+    def revoke_api_token(self, token_id: str) -> bool:
+        """Revoke (deactivate) an API token"""
+        Token = Query()
+        result = self.api_tokens.update(
+            {"is_active": False, "revoked_at": datetime.utcnow().isoformat()},
+            Token.id == token_id
+        )
+        if result:
+            logger.info(f"API token revoked: {token_id}")
+        return bool(result)
+
+    def delete_api_token(self, token_id: str) -> bool:
+        """Permanently delete an API token"""
+        Token = Query()
+        result = self.api_tokens.remove(Token.id == token_id)
+        if result:
+            logger.info(f"API token deleted: {token_id}")
+        return bool(result)
+
+    # =========================================================================
+    # Portal API Token Operations
+    # =========================================================================
+
+    def create_portal_api_token(
+        self,
+        name: str,
+        token_hash: str,
+        created_by: str,
+        scopes: List[str] = None,
+        expires_at: str = None
+    ) -> dict:
+        """Create a new Portal API token"""
+        import uuid
+        token_data = {
+            "id": str(uuid.uuid4()),
+            "name": name,
+            "token_hash": token_hash,  # Store hashed token, not plaintext
+            "scopes": scopes or ["teams:read", "teams:write", "boards:read", "boards:write", "members:read", "members:write"],
+            "created_by": created_by,
+            "created_at": datetime.utcnow().isoformat(),
+            "expires_at": expires_at,
+            "last_used_at": None,
+            "is_active": True
+        }
+        self.portal_api_tokens.insert(token_data)
+        logger.info(f"Portal API token created: {name}")
+        return token_data
+
+    def get_portal_api_token_by_id(self, token_id: str) -> Optional[dict]:
+        """Get Portal API token by ID"""
+        Token = Query()
+        result = self.portal_api_tokens.search(Token.id == token_id)
+        return result[0] if result else None
+
+    def get_portal_api_token_by_hash(self, token_hash: str) -> Optional[dict]:
+        """Get Portal API token by hash (for validation)"""
+        Token = Query()
+        result = self.portal_api_tokens.search(
+            (Token.token_hash == token_hash) & (Token.is_active == True)
+        )
+        return result[0] if result else None
+
+    def get_all_portal_api_tokens(self, created_by: str = None) -> List[dict]:
+        """Get all Portal API tokens, optionally filtered by creator"""
+        Token = Query()
+        if created_by:
+            tokens = self.portal_api_tokens.search(Token.created_by == created_by)
+        else:
+            tokens = self.portal_api_tokens.all()
+        # Don't return token_hash in list
+        return [{k: v for k, v in t.items() if k != "token_hash"} for t in tokens]
+
+    def update_portal_api_token_last_used(self, token_id: str):
+        """Update last_used_at timestamp for portal token"""
+        Token = Query()
+        self.portal_api_tokens.update(
+            {"last_used_at": datetime.utcnow().isoformat()},
+            Token.id == token_id
+        )
+
+    def revoke_portal_api_token(self, token_id: str) -> bool:
+        """Revoke (deactivate) a Portal API token"""
+        Token = Query()
+        result = self.portal_api_tokens.update(
+            {"is_active": False, "revoked_at": datetime.utcnow().isoformat()},
+            Token.id == token_id
+        )
+        if result:
+            logger.info(f"Portal API token revoked: {token_id}")
+        return bool(result)
+
+    def delete_portal_api_token(self, token_id: str) -> bool:
+        """Permanently delete a Portal API token"""
+        Token = Query()
+        result = self.portal_api_tokens.remove(Token.id == token_id)
+        if result:
+            logger.info(f"Portal API token deleted: {token_id}")
+        return bool(result)
 
 
 # Singleton instance

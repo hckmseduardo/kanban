@@ -5,7 +5,9 @@ import Layout from './components/Layout'
 import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
 import CreateTeamPage from './pages/CreateTeamPage'
+import TeamDetailPage from './pages/TeamDetailPage'
 import TasksPage from './pages/TasksPage'
+import SettingsPage from './pages/SettingsPage'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuthStore()
@@ -56,7 +58,9 @@ function App() {
       >
         <Route index element={<DashboardPage />} />
         <Route path="teams/new" element={<CreateTeamPage />} />
+        <Route path="teams/:slug" element={<TeamDetailPage />} />
         <Route path="tasks" element={<TasksPage />} />
+        <Route path="settings" element={<SettingsPage />} />
       </Route>
 
       <Route path="*" element={<Navigate to="/" replace />} />

@@ -1144,6 +1144,55 @@ User clicks "Create Team" in Portal
 | `DELETE` | `/teams/{slug}/invites/{id}` | Revoke invite |
 | `POST` | `/invites/{code}/accept` | Accept invite |
 
+#### Portal API Tokens
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/tokens` | Create Portal API token |
+| `GET` | `/api/tokens` | List your tokens |
+| `DELETE` | `/api/tokens/{id}` | Delete token |
+
+#### Programmatic Team Management (requires Portal API Token)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/teams` | List all teams |
+| `POST` | `/api/teams` | Create team |
+| `GET` | `/api/teams/{slug}` | Get team details |
+| `DELETE` | `/api/teams/{slug}` | Delete team |
+| `GET` | `/api/teams/{slug}/members` | List team members |
+| `POST` | `/api/teams/{slug}/members` | Add team member |
+| `DELETE` | `/api/teams/{slug}/members/{id}` | Remove team member |
+
+**Available Scopes:**
+- `teams:read` - List and view teams
+- `teams:write` - Create and delete teams
+- `members:read` - List team members
+- `members:write` - Add/remove team members
+- `boards:read` - List team boards
+- `boards:write` - Create team boards
+
+**Example Usage:**
+```bash
+# Create a Portal API token via the UI at Settings
+# Token format: pk_xxxx...
+
+# List all teams
+curl -H "Authorization: Bearer pk_your_token" https://api.kanban.example.com/api/teams
+
+# Create a team
+curl -X POST https://api.kanban.example.com/api/teams \
+  -H "Authorization: Bearer pk_your_token" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "My Team", "slug": "my-team"}&owner_id=user-uuid'
+
+# Add a member
+curl -X POST https://api.kanban.example.com/api/teams/my-team/members \
+  -H "Authorization: Bearer pk_your_token" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "role": "member"}'
+```
+
 ### Team Instance API (`{slug}.devkanban.io/api`)
 
 #### Authentication

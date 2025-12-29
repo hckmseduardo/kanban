@@ -83,3 +83,65 @@ export const authApi = {
   getCrossDomainToken: (teamSlug: string, userId: string) =>
     api.get('/auth/cross-domain-token', { params: { team_slug: teamSlug, user_id: userId } }),
 }
+
+export interface ApiToken {
+  id: string
+  team_id: string
+  name: string
+  scopes: string[]
+  created_by: string
+  created_at: string
+  expires_at: string | null
+  last_used_at: string | null
+  is_active: boolean
+}
+
+export interface CreateApiTokenRequest {
+  name: string
+  scopes?: string[]
+  expires_in_days?: number
+}
+
+export interface CreateApiTokenResponse {
+  token: ApiToken
+  plaintext_token: string
+}
+
+export const apiTokensApi = {
+  list: (slug: string) =>
+    api.get<ApiToken[]>(`/teams/${slug}/api-tokens`),
+  create: (slug: string, data: CreateApiTokenRequest) =>
+    api.post<CreateApiTokenResponse>(`/teams/${slug}/api-tokens`, data),
+  delete: (slug: string, tokenId: string) =>
+    api.delete(`/teams/${slug}/api-tokens/${tokenId}`),
+}
+
+// Portal API Tokens (for programmatic portal access)
+export interface PortalApiToken {
+  id: string
+  name: string
+  scopes: string[]
+  created_by: string
+  created_at: string
+  expires_at: string | null
+  last_used_at: string | null
+  is_active: boolean
+}
+
+export interface CreatePortalApiTokenRequest {
+  name: string
+  scopes?: string[]
+}
+
+export interface CreatePortalApiTokenResponse extends PortalApiToken {
+  token: string // Only returned on creation
+}
+
+export const portalApiTokensApi = {
+  list: () =>
+    api.get<PortalApiToken[]>('/api/tokens'),
+  create: (data: CreatePortalApiTokenRequest) =>
+    api.post<CreatePortalApiTokenResponse>('/api/tokens', data),
+  delete: (tokenId: string) =>
+    api.delete(`/api/tokens/${tokenId}`),
+}
