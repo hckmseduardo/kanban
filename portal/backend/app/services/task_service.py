@@ -78,6 +78,28 @@ class TaskService:
             priority="high"
         )
 
+    async def create_team_start_task(
+        self,
+        team_id: str,
+        team_slug: str,
+        user_id: str
+    ) -> str:
+        """Create task to start a suspended team's containers.
+
+        This is used when a user tries to access a team that was
+        automatically suspended due to inactivity.
+        """
+        return await redis_service.enqueue_task(
+            queue_name=self.QUEUE_PROVISIONING,
+            task_type="team.start",
+            payload={
+                "team_id": team_id,
+                "team_slug": team_slug
+            },
+            user_id=user_id,
+            priority="high"
+        )
+
     async def create_cert_issue_task(
         self,
         team_slug: str,

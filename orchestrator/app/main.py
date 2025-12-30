@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import shlex
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -33,6 +34,10 @@ TEMPLATE_DIR = Path("/app/kanban-team")
 TRAEFIK_DIR = Path("/app/traefik-dynamic")
 DNS_DIR = Path("/app/dns-zones")
 NETWORK_NAME = "kanban-global"
+
+# Auto-scaling configuration
+IDLE_CHECK_INTERVAL = int(os.getenv("IDLE_CHECK_INTERVAL", "900"))  # 15 minutes
+IDLE_THRESHOLD = int(os.getenv("IDLE_THRESHOLD", "900"))  # 15 minutes
 
 
 def run_docker_cmd(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
@@ -90,6 +95,10 @@ class Orchestrator:
                 sig, lambda: asyncio.create_task(self.stop())
             )
 
+        # Start idle team checker background task
+        asyncio.create_task(self.check_idle_teams())
+        logger.info(f"Idle team checker started (interval: {IDLE_CHECK_INTERVAL}s, threshold: {IDLE_THRESHOLD}s)")
+
         logger.info(f"Orchestrator listening on queues: {self.QUEUES}")
 
         while self.running:
@@ -129,6 +138,8 @@ class Orchestrator:
                 await self.delete_team(task)
             elif task_type == "team.restart":
                 await self.restart_team(task)
+            elif task_type == "team.start":
+                await self.start_team(task)
             else:
                 logger.warning(f"Unknown task type: {task_type}")
 
@@ -725,6 +736,200 @@ class Orchestrator:
             "task_id": task_id,
             "error": error
         }))
+
+    # ========== Auto-scaling: Idle Team Management ==========
+
+    async def check_idle_teams(self):
+        """Background task to check for idle teams and suspend them.
+
+        Runs every IDLE_CHECK_INTERVAL seconds and suspends teams that have
+        no WebSocket activity for more than IDLE_THRESHOLD seconds.
+        """
+        logger.info("Starting idle team checker...")
+
+        while self.running:
+            try:
+                # Wait for the check interval
+                await asyncio.sleep(IDLE_CHECK_INTERVAL)
+
+                if not self.running:
+                    break
+
+                logger.info("Checking for idle teams...")
+
+                # Get all running team containers
+                running_teams = await self._get_running_teams()
+                logger.info(f"Found {len(running_teams)} running teams: {running_teams}")
+
+                current_time = int(time.time())
+
+                for team_slug in running_teams:
+                    # Check last activity from Redis
+                    last_activity = await self.redis.get(f"team:{team_slug}:last_activity")
+
+                    if last_activity is None:
+                        # No activity recorded - suspend the team
+                        logger.info(f"[{team_slug}] No activity recorded, suspending")
+                        await self.suspend_team(team_slug)
+                    else:
+                        last_activity_time = int(last_activity)
+                        idle_time = current_time - last_activity_time
+
+                        if idle_time > IDLE_THRESHOLD:
+                            logger.info(f"[{team_slug}] Idle for {idle_time}s (threshold: {IDLE_THRESHOLD}s), suspending")
+                            await self.suspend_team(team_slug)
+                        else:
+                            logger.debug(f"[{team_slug}] Active ({idle_time}s since last activity)")
+
+            except Exception as e:
+                logger.error(f"Idle check error: {e}", exc_info=True)
+                await asyncio.sleep(60)  # Wait a minute before retrying
+
+        logger.info("Idle team checker stopped")
+
+    async def _get_running_teams(self) -> list[str]:
+        """Get list of team slugs with running containers."""
+        if not self.docker_available:
+            return []
+
+        try:
+            result = run_docker_cmd([
+                "ps", "--filter", "name=kanban-team-",
+                "--format", "{{.Names}}"
+            ], check=False)
+
+            if result.returncode != 0:
+                return []
+
+            teams = set()
+            for line in result.stdout.strip().split('\n'):
+                if line and line.startswith('kanban-team-'):
+                    # Extract team slug from container name
+                    # Format: kanban-team-{slug}-api-1 or kanban-team-{slug}-web-1
+                    # Remove prefix "kanban-team-" and suffix "-api-1" or "-web-1"
+                    name = line[len('kanban-team-'):]  # Remove prefix
+                    # Remove the service suffix (-api-1, -web-1)
+                    if name.endswith('-api-1'):
+                        slug = name[:-6]
+                    elif name.endswith('-web-1'):
+                        slug = name[:-6]
+                    else:
+                        # Unknown format, try to extract slug
+                        parts = name.rsplit('-', 2)
+                        slug = '-'.join(parts[:-2]) if len(parts) >= 3 else parts[0]
+
+                    if slug:
+                        teams.add(slug)
+
+            return list(teams)
+        except Exception as e:
+            logger.error(f"Failed to get running teams: {e}")
+            return []
+
+    async def suspend_team(self, team_slug: str):
+        """Suspend a team by removing its containers (not deleting data).
+
+        This is called when a team has been idle for too long.
+        The team can be restarted on-demand when a user accesses it.
+        Data is preserved in the data directory.
+        """
+        if not self.docker_available:
+            return
+
+        logger.info(f"[{team_slug}] Suspending team - removing containers...")
+
+        project_name = f"kanban-team-{team_slug}"
+        compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
+        team_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{team_slug}"
+
+        env = os.environ.copy()
+        env.update({
+            "TEAM_SLUG": team_slug,
+            "DOMAIN": DOMAIN,
+            "DATA_PATH": team_data_host_path,
+        })
+
+        # Remove containers (down instead of stop) - data is preserved
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "down"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False
+        )
+
+        if result.returncode == 0:
+            logger.info(f"[{team_slug}] Containers removed successfully")
+
+            # Publish team status update for portal to process
+            await self.redis.publish("team:status", json.dumps({
+                "team_slug": team_slug,
+                "status": "suspended"
+            }))
+        else:
+            logger.error(f"[{team_slug}] Failed to suspend: {result.stderr}")
+
+    # ========== Auto-scaling: On-Demand Team Start ==========
+
+    async def start_team(self, task: dict):
+        """Start a suspended team's containers.
+
+        This is called when a user tries to access a suspended team.
+        """
+        task_id = task["task_id"]
+        payload = task["payload"]
+        team_slug = payload["team_slug"]
+        team_id = payload.get("team_id")
+
+        logger.info(f"Starting suspended team: {team_slug}")
+
+        steps = [
+            ("Checking team data", self._start_check_data),
+            ("Starting containers", self._restart_start_containers),
+            ("Running health check", self._health_check),
+            ("Activating team", self._start_activate),
+        ]
+
+        try:
+            for i, (step_name, step_func) in enumerate(steps, 1):
+                await self.update_progress(task_id, i, len(steps), step_name)
+                await step_func(team_slug, team_id)
+                logger.info(f"[{team_slug}] {step_name} - completed")
+
+            await self.complete_task(task_id, {
+                "action": "start_team",
+                "team_slug": team_slug,
+                "url": f"https://{team_slug}.{DOMAIN}"
+            })
+
+            logger.info(f"Team {team_slug} started successfully")
+
+        except Exception as e:
+            logger.error(f"Team start failed: {e}")
+            await self.fail_task(task_id, str(e))
+            raise
+
+    async def _start_check_data(self, team_slug: str, team_id: str):
+        """Verify team data directory exists."""
+        team_dir = TEAMS_DIR / team_slug
+        if not team_dir.exists():
+            raise RuntimeError(f"Team data directory not found: {team_dir}")
+
+        db_file = team_dir / "db" / "team.json"
+        if not db_file.exists():
+            raise RuntimeError(f"Team database not found: {db_file}")
+
+        logger.info(f"[{team_slug}] Team data verified")
+
+    async def _start_activate(self, team_slug: str, team_id: str):
+        """Activate team and update status."""
+        # Publish team status update for portal to process
+        await self.redis.publish("team:status", json.dumps({
+            "team_id": team_id,
+            "team_slug": team_slug,
+            "status": "active"
+        }))
+        await asyncio.sleep(0.5)
 
 
 async def main():

@@ -6,6 +6,7 @@ import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
 import CreateTeamPage from './pages/CreateTeamPage'
 import TeamDetailPage from './pages/TeamDetailPage'
+import TeamStartingPage from './pages/TeamStartingPage'
 import TasksPage from './pages/TasksPage'
 import SettingsPage from './pages/SettingsPage'
 
@@ -59,6 +60,7 @@ function App() {
         <Route index element={<DashboardPage />} />
         <Route path="teams/new" element={<CreateTeamPage />} />
         <Route path="teams/:slug" element={<TeamDetailPage />} />
+        <Route path="teams/:slug/starting" element={<TeamStartingPage />} />
         <Route path="tasks" element={<TasksPage />} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>

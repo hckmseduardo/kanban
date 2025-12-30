@@ -63,6 +63,8 @@ export const teamsApi = {
   getMembers: (slug: string) => api.get(`/teams/${slug}/members`),
   restart: (slug: string, rebuild: boolean = false) =>
     api.post(`/teams/${slug}/restart`, { rebuild }),
+  start: (slug: string) => api.post(`/teams/${slug}/start`),
+  getStatus: (slug: string) => api.get(`/teams/${slug}/status`),
 }
 
 export const tasksApi = {

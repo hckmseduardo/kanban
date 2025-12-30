@@ -107,12 +107,25 @@ class TaskWorker:
                         team_slug = data.get("team_slug")
                         status = data.get("status")
 
+                        # If we don't have team_id but have team_slug, look it up
+                        if not team_id and team_slug:
+                            team = db_service.get_team_by_slug(team_slug)
+                            if team:
+                                team_id = team["id"]
+                            else:
+                                logger.warning(f"Team {team_slug} not found in database")
+                                continue
+
                         if team_id and status:
                             logger.info(f"Updating team {team_slug} status to: {status}")
                             if status == "deleted":
                                 # Remove team from database
                                 db_service.delete_team(team_id)
                                 logger.info(f"Team {team_slug} removed from database")
+                            elif status == "suspended":
+                                # Team was suspended due to inactivity
+                                db_service.update_team(team_id, {"status": "suspended"})
+                                logger.info(f"Team {team_slug} suspended (idle timeout)")
                             else:
                                 db_service.update_team(team_id, {"status": status})
                                 logger.info(f"Team {team_slug} status updated to {status}")

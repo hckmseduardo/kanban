@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { usersApi, teamsApi, authApi, setNavigatingAway } from '../services/api'
 import { useAuthStore } from '../stores/authStore'
 
 export default function DashboardPage() {
   const { user } = useAuthStore()
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const [deleteConfirm, setDeleteConfirm] = useState<{ slug: string; name: string } | null>(null)
   const [deleteInput, setDeleteInput] = useState('')
 
@@ -28,6 +29,12 @@ export default function DashboardPage() {
 
   const handleOpenTeam = async (team: any) => {
     if (!user) return
+
+    // If team is suspended or starting, redirect to the starting page
+    if (team.status === 'suspended' || team.status === 'starting') {
+      navigate(`/teams/${team.slug}/starting`)
+      return
+    }
 
     setNavigatingAway()
 
@@ -62,9 +69,9 @@ export default function DashboardPage() {
         {teams?.map((team: any) => (
           <div
             key={team.id}
-            onClick={() => team.status === 'active' && handleOpenTeam(team)}
+            onClick={() => ['active', 'suspended', 'starting'].includes(team.status) && handleOpenTeam(team)}
             className={`bg-white dark:bg-dark-800 overflow-hidden shadow dark:shadow-dark-700/30 rounded-xl transition-all duration-200 flex flex-col ${
-              team.status === 'active'
+              ['active', 'suspended', 'starting'].includes(team.status)
                 ? 'cursor-pointer hover:shadow-lg dark:hover:shadow-dark-700/50 hover:-translate-y-1 hover:ring-2 hover:ring-primary-400 dark:hover:ring-primary-500'
                 : 'opacity-75'
             }`}
@@ -73,6 +80,8 @@ export default function DashboardPage() {
             <div className={`h-1.5 ${
               team.status === 'active' ? 'bg-gradient-to-r from-primary-500 to-primary-600' :
               team.status === 'provisioning' ? 'bg-gradient-to-r from-yellow-400 to-yellow-500' :
+              team.status === 'starting' ? 'bg-gradient-to-r from-yellow-400 to-yellow-500' :
+              team.status === 'suspended' ? 'bg-gradient-to-r from-blue-400 to-blue-500' :
               team.status === 'pending_deletion' ? 'bg-gradient-to-r from-red-400 to-red-500' :
               'bg-gray-300 dark:bg-dark-600'
             }`} />
@@ -116,11 +125,15 @@ export default function DashboardPage() {
                 <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${
                   team.status === 'active' ? 'bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400 ring-1 ring-green-200 dark:ring-green-800' :
                   team.status === 'provisioning' ? 'bg-yellow-50 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400 ring-1 ring-yellow-200 dark:ring-yellow-800' :
+                  team.status === 'starting' ? 'bg-yellow-50 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400 ring-1 ring-yellow-200 dark:ring-yellow-800' :
+                  team.status === 'suspended' ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 ring-1 ring-blue-200 dark:ring-blue-800' :
                   team.status === 'pending_deletion' ? 'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400 ring-1 ring-red-200 dark:ring-red-800' :
                   'bg-gray-50 dark:bg-dark-700 text-gray-600 dark:text-gray-400 ring-1 ring-gray-200 dark:ring-dark-600'
                 }`}>
                   {team.status === 'pending_deletion' ? 'Deleting...' :
                    team.status === 'provisioning' ? 'Setting up...' :
+                   team.status === 'starting' ? 'Starting...' :
+                   team.status === 'suspended' ? 'Suspended' :
                    team.status === 'active' ? 'Active' : team.status}
                 </span>
                 <div className="flex items-center gap-2">
@@ -156,6 +169,22 @@ export default function DashboardPage() {
                       Open
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                      </svg>
+                    </span>
+                  )}
+                  {team.status === 'suspended' && (
+                    <span className="text-blue-600 dark:text-blue-400 text-sm font-medium flex items-center gap-1">
+                      Start & Open
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                      </svg>
+                    </span>
+                  )}
+                  {team.status === 'starting' && (
+                    <span className="text-yellow-600 dark:text-yellow-400 text-sm font-medium flex items-center gap-1">
+                      Starting...
+                      <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                       </svg>
                     </span>
                   )}

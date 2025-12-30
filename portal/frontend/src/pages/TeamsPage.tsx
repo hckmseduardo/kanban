@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams, useNavigate } from 'react-router-dom'
 import { teamsApi, authApi, setNavigatingAway } from '../services/api'
 import { useAuthStore } from '../stores/authStore'
 import { useTaskWebSocket } from '../hooks/useTaskWebSocket'
@@ -14,6 +14,7 @@ interface Toast {
 export default function TeamsPage() {
   const { user } = useAuthStore()
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const [deleteConfirm, setDeleteConfirm] = useState<{ slug: string; name: string } | null>(null)
   const [deleteInput, setDeleteInput] = useState('')
@@ -111,6 +112,20 @@ export default function TeamsPage() {
       return
     }
 
+    // If team is suspended, redirect to the starting page
+    if (team.status === 'suspended') {
+      console.log('[TeamsPage] Team is suspended, navigating to start page')
+      navigate(`/teams/${team.slug}/starting`)
+      return
+    }
+
+    // If team is starting, redirect to the starting page to see progress
+    if (team.status === 'starting') {
+      console.log('[TeamsPage] Team is starting, navigating to start page')
+      navigate(`/teams/${team.slug}/starting`)
+      return
+    }
+
     // Mark that we're navigating away to prevent 401 handler from redirecting to login
     setNavigatingAway()
 
@@ -189,10 +204,17 @@ export default function TeamsPage() {
                 <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
                   team.status === 'active' ? 'bg-green-100 text-green-800' :
                   team.status === 'provisioning' ? 'bg-yellow-100 text-yellow-800' :
+                  team.status === 'suspended' ? 'bg-blue-100 text-blue-800' :
+                  team.status === 'starting' ? 'bg-yellow-100 text-yellow-800' :
+                  team.status === 'restarting' ? 'bg-yellow-100 text-yellow-800' :
                   team.status === 'pending_deletion' ? 'bg-red-100 text-red-800' :
                   'bg-gray-100 text-gray-800'
                 }`}>
-                  {team.status === 'pending_deletion' ? 'Deleting...' : team.status}
+                  {team.status === 'pending_deletion' ? 'Deleting...' :
+                   team.status === 'suspended' ? 'Suspended' :
+                   team.status === 'starting' ? 'Starting...' :
+                   team.status === 'restarting' ? 'Restarting...' :
+                   team.status}
                 </span>
                 <div className="flex items-center gap-2">
                   {team.status === 'active' && (
@@ -201,6 +223,22 @@ export default function TeamsPage() {
                       className="text-primary-600 hover:text-primary-700 text-sm font-medium"
                     >
                       Open Board →
+                    </button>
+                  )}
+                  {team.status === 'suspended' && (
+                    <button
+                      onClick={() => handleOpenTeam(team)}
+                      className="text-blue-600 hover:text-blue-700 text-sm font-medium"
+                    >
+                      Start & Open →
+                    </button>
+                  )}
+                  {team.status === 'starting' && (
+                    <button
+                      onClick={() => handleOpenTeam(team)}
+                      className="text-yellow-600 hover:text-yellow-700 text-sm font-medium"
+                    >
+                      View Progress →
                     </button>
                   )}
                   {team.status !== 'pending_deletion' && (

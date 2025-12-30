@@ -358,6 +358,70 @@ async def restart_team(
     }
 
 
+@router.post("/{slug}/start")
+async def start_team(
+    slug: str,
+    auth: AuthContext = Depends(get_auth_context)
+):
+    """Start a suspended team's containers.
+
+    This endpoint is called when a user tries to access a team that was
+    automatically suspended due to inactivity. It starts the containers
+    and updates the team status.
+
+    Authentication: JWT or Portal API token (pk_*)
+    """
+    team = db_service.get_team_by_slug(slug)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    # Check membership
+    membership = db_service.get_membership(team["id"], auth.user["id"])
+    if not membership:
+        raise HTTPException(status_code=403, detail="Not a member of this team")
+
+    # Check if team is suspended
+    current_status = team.get("status")
+    if current_status == "active":
+        return {
+            "message": "Team is already active",
+            "status": "active",
+            "task_id": None
+        }
+
+    if current_status == "starting":
+        # Already starting, return without creating new task
+        return {
+            "message": "Team is already starting",
+            "status": "starting",
+            "task_id": None
+        }
+
+    if current_status not in ["suspended", None]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot start team with status: {current_status}"
+        )
+
+    # Update status to starting
+    db_service.update_team(team["id"], {"status": "starting"})
+
+    # Create start task
+    task_id = await task_service.create_team_start_task(
+        team_id=team["id"],
+        team_slug=slug,
+        user_id=auth.user["id"]
+    )
+
+    logger.info(f"Team {slug} start initiated, task: {task_id}")
+
+    return {
+        "message": "Team startup initiated",
+        "task_id": task_id,
+        "status": "starting"
+    }
+
+
 # Member management
 @router.get("/{slug}/members", response_model=List[TeamMemberResponse])
 async def list_team_members(
