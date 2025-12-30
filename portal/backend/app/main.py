@@ -34,7 +34,8 @@ async def lifespan(app: FastAPI):
 
 
 # Create FastAPI app
-# root_path="/api" tells FastAPI it's behind a reverse proxy at /api path
+# root_path is set for OpenAPI URL generation when behind reverse proxy
+# Traefik strips /api from incoming requests, but docs need to know the external path
 app = FastAPI(
     title=settings.app_name,
     description="Central API for Kanban platform - user and team management",
@@ -107,7 +108,7 @@ app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 app.include_router(users.router, prefix="/users", tags=["Users"])
 app.include_router(teams.router, prefix="/teams", tags=["Teams"])
 app.include_router(tasks.router, prefix="/tasks", tags=["Tasks"])
-app.include_router(portal_api.router, prefix="/api", tags=["Portal API"])
+app.include_router(portal_api.router, tags=["Portal API"])
 
 
 # Health check endpoints

@@ -227,7 +227,7 @@ async def delete_portal_token(
 # Team Management API (requires portal API token)
 # =============================================================================
 
-@router.get("/teams", response_model=List[TeamResponse])
+@router.get("/p/teams", response_model=List[TeamResponse])
 async def api_list_teams(
     token_data: dict = Depends(require_scope("teams:read"))
 ):
@@ -256,7 +256,7 @@ async def api_list_teams(
     return result
 
 
-@router.post("/teams", response_model=TeamResponse)
+@router.post("/p/teams", response_model=TeamResponse)
 async def api_create_team(
     data: TeamCreateRequest,
     owner_id: str = Query(..., description="User ID of the team owner"),
@@ -315,7 +315,7 @@ async def api_create_team(
     )
 
 
-@router.get("/teams/{slug}", response_model=TeamResponse)
+@router.get("/p/teams/{slug}", response_model=TeamResponse)
 async def api_get_team(
     slug: str,
     token_data: dict = Depends(require_scope("teams:read"))
@@ -342,7 +342,7 @@ async def api_get_team(
     )
 
 
-@router.delete("/teams/{slug}")
+@router.delete("/p/teams/{slug}")
 async def api_delete_team(
     slug: str,
     token_data: dict = Depends(require_scope("teams:write"))
@@ -371,7 +371,7 @@ async def api_delete_team(
 # Team Members Management API (requires portal API token)
 # =============================================================================
 
-@router.get("/teams/{slug}/members", response_model=List[MemberResponse])
+@router.get("/p/teams/{slug}/members", response_model=List[MemberResponse])
 async def api_list_team_members(
     slug: str,
     token_data: dict = Depends(require_scope("members:read"))
@@ -394,7 +394,7 @@ async def api_list_team_members(
     ]
 
 
-@router.post("/teams/{slug}/members", response_model=MemberResponse)
+@router.post("/p/teams/{slug}/members", response_model=MemberResponse)
 async def api_add_team_member(
     slug: str,
     data: MemberAddRequest,
@@ -432,7 +432,7 @@ async def api_add_team_member(
     )
 
 
-@router.delete("/teams/{slug}/members/{user_id}")
+@router.delete("/p/teams/{slug}/members/{user_id}")
 async def api_remove_team_member(
     slug: str,
     user_id: str,
@@ -459,7 +459,7 @@ async def api_remove_team_member(
 # Team Boards Management API (requires portal API token)
 # =============================================================================
 
-@router.get("/teams/{slug}/boards")
+@router.get("/p/teams/{slug}/boards")
 async def api_list_team_boards(
     slug: str,
     token_data: dict = Depends(require_scope("boards:read"))
@@ -492,7 +492,7 @@ async def api_list_team_boards(
     }
 
 
-@router.post("/teams/{slug}/boards")
+@router.post("/p/teams/{slug}/boards")
 async def api_create_team_board(
     slug: str,
     data: BoardCreateRequest,

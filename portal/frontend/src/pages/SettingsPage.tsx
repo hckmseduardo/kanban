@@ -63,7 +63,7 @@ export default function SettingsPage() {
   }
 
   const handleCopyApiUrl = async () => {
-    const url = `${window.location.origin}/api/api`
+    const url = `${window.location.origin}/api`
     await navigator.clipboard.writeText(url)
     setCopiedApiUrl(true)
     setTimeout(() => setCopiedApiUrl(false), 2000)
@@ -77,7 +77,7 @@ export default function SettingsPage() {
     )
   }
 
-  const apiUrl = `${window.location.origin}/api/api`
+  const apiUrl = `${window.location.origin}/api`
 
   return (
     <div className="space-y-8">
@@ -122,7 +122,7 @@ export default function SettingsPage() {
         <div className="mt-4 p-3 bg-gray-50 dark:bg-dark-700 rounded-lg">
           <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">Example request:</p>
           <code className="text-xs font-mono text-gray-700 dark:text-gray-300 break-all">
-            curl -H "Authorization: Bearer pk_your_token" {apiUrl}/api/teams
+            curl -H "Authorization: Bearer pk_your_token" {apiUrl}/p/teams
           </code>
         </div>
       </div>
@@ -209,32 +209,37 @@ export default function SettingsPage() {
         <div className="space-y-3">
           <div className="p-3 bg-gray-50 dark:bg-dark-700 rounded-lg">
             <code className="text-sm font-mono text-green-600 dark:text-green-400">GET</code>
-            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/api/teams</code>
+            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/tokens</code>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">List Portal API tokens</p>
+          </div>
+          <div className="p-3 bg-gray-50 dark:bg-dark-700 rounded-lg">
+            <code className="text-sm font-mono text-green-600 dark:text-green-400">GET</code>
+            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/p/teams</code>
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">List all teams</p>
           </div>
           <div className="p-3 bg-gray-50 dark:bg-dark-700 rounded-lg">
             <code className="text-sm font-mono text-blue-600 dark:text-blue-400">POST</code>
-            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/api/teams</code>
+            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/p/teams</code>
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Create a new team</p>
           </div>
           <div className="p-3 bg-gray-50 dark:bg-dark-700 rounded-lg">
             <code className="text-sm font-mono text-green-600 dark:text-green-400">GET</code>
-            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/api/teams/:slug</code>
+            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/p/teams/:slug</code>
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Get team details</p>
           </div>
           <div className="p-3 bg-gray-50 dark:bg-dark-700 rounded-lg">
             <code className="text-sm font-mono text-red-600 dark:text-red-400">DELETE</code>
-            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/api/teams/:slug</code>
+            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/p/teams/:slug</code>
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Delete a team</p>
           </div>
           <div className="p-3 bg-gray-50 dark:bg-dark-700 rounded-lg">
             <code className="text-sm font-mono text-green-600 dark:text-green-400">GET</code>
-            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/api/teams/:slug/members</code>
+            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/p/teams/:slug/members</code>
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">List team members</p>
           </div>
           <div className="p-3 bg-gray-50 dark:bg-dark-700 rounded-lg">
             <code className="text-sm font-mono text-blue-600 dark:text-blue-400">POST</code>
-            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/api/teams/:slug/members</code>
+            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/p/teams/:slug/members</code>
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Add a team member</p>
           </div>
         </div>
