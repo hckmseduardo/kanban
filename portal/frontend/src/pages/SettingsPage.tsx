@@ -122,7 +122,7 @@ export default function SettingsPage() {
         <div className="mt-4 p-3 bg-gray-50 dark:bg-dark-700 rounded-lg">
           <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">Example request:</p>
           <code className="text-xs font-mono text-gray-700 dark:text-gray-300 break-all">
-            curl -H "Authorization: Bearer pk_your_token" {apiUrl}/p/teams
+            curl -H "Authorization: Bearer pk_your_token" {apiUrl}/teams
           </code>
         </div>
       </div>
@@ -204,43 +204,43 @@ export default function SettingsPage() {
       <div className="bg-white dark:bg-dark-800 shadow dark:shadow-dark-700/30 rounded-lg p-6">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">API Documentation</h2>
         <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-          Available endpoints with Portal API tokens:
+          Available endpoints with Portal API tokens (pk_*):
         </p>
         <div className="space-y-3">
           <div className="p-3 bg-gray-50 dark:bg-dark-700 rounded-lg">
             <code className="text-sm font-mono text-green-600 dark:text-green-400">GET</code>
-            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/tokens</code>
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">List Portal API tokens</p>
-          </div>
-          <div className="p-3 bg-gray-50 dark:bg-dark-700 rounded-lg">
-            <code className="text-sm font-mono text-green-600 dark:text-green-400">GET</code>
-            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/p/teams</code>
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">List all teams</p>
+            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/teams</code>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">List your teams</p>
           </div>
           <div className="p-3 bg-gray-50 dark:bg-dark-700 rounded-lg">
             <code className="text-sm font-mono text-blue-600 dark:text-blue-400">POST</code>
-            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/p/teams</code>
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Create a new team</p>
+            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/teams</code>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Create a new team (requires teams:write scope)</p>
           </div>
           <div className="p-3 bg-gray-50 dark:bg-dark-700 rounded-lg">
             <code className="text-sm font-mono text-green-600 dark:text-green-400">GET</code>
-            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/p/teams/:slug</code>
+            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/teams/:slug</code>
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Get team details</p>
           </div>
           <div className="p-3 bg-gray-50 dark:bg-dark-700 rounded-lg">
+            <code className="text-sm font-mono text-orange-600 dark:text-orange-400">PUT</code>
+            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/teams/:slug</code>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Update team (requires teams:write scope)</p>
+          </div>
+          <div className="p-3 bg-gray-50 dark:bg-dark-700 rounded-lg">
             <code className="text-sm font-mono text-red-600 dark:text-red-400">DELETE</code>
-            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/p/teams/:slug</code>
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Delete a team</p>
+            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/teams/:slug</code>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Delete team (owner only, requires teams:write scope)</p>
           </div>
           <div className="p-3 bg-gray-50 dark:bg-dark-700 rounded-lg">
             <code className="text-sm font-mono text-green-600 dark:text-green-400">GET</code>
-            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/p/teams/:slug/members</code>
+            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/teams/:slug/members</code>
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">List team members</p>
           </div>
           <div className="p-3 bg-gray-50 dark:bg-dark-700 rounded-lg">
             <code className="text-sm font-mono text-blue-600 dark:text-blue-400">POST</code>
-            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/p/teams/:slug/members</code>
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Add a team member</p>
+            <code className="text-sm font-mono text-gray-700 dark:text-gray-300 ml-2">/teams/:slug/members</code>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Add team member (requires members:write scope)</p>
           </div>
         </div>
         <p className="mt-4 text-sm text-gray-500 dark:text-gray-400">

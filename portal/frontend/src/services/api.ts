@@ -141,9 +141,9 @@ export interface CreatePortalApiTokenResponse extends PortalApiToken {
 
 export const portalApiTokensApi = {
   list: () =>
-    api.get<PortalApiToken[]>('tokens'),
+    api.get<PortalApiToken[]>('portal/tokens'),
   create: (data: CreatePortalApiTokenRequest) =>
-    api.post<CreatePortalApiTokenResponse>('tokens', data),
+    api.post<CreatePortalApiTokenResponse>('portal/tokens', data),
   delete: (tokenId: string) =>
-    api.delete(`tokens/${tokenId}`),
+    api.delete(`portal/tokens/${tokenId}`),
 }

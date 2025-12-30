@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
 
 from app.auth.jwt import get_current_user
+from app.auth.unified import AuthContext, get_auth_context, require_scope
 from app.config import settings
 from app.services.database_service import db_service
 from app.services.task_service import task_service
@@ -87,11 +88,14 @@ class AddMemberRequest(BaseModel):
 @router.post("", response_model=dict)
 async def create_team(
     request: TeamCreateRequest,
-    current_user: dict = Depends(get_current_user)
+    auth: AuthContext = Depends(require_scope("teams:write"))
 ):
     """
     Create a new team.
     This starts an async provisioning process.
+
+    Authentication: JWT or Portal API token (pk_*)
+    Required scope: teams:write
     """
     # Check if slug is available
     existing = db_service.get_team_by_slug(request.slug)
@@ -105,7 +109,7 @@ async def create_team(
         "slug": request.slug,
         "name": request.name,
         "description": request.description,
-        "owner_id": current_user["id"],
+        "owner_id": auth.user["id"],
         "subdomain": get_team_subdomain(request.slug)
     }
 
@@ -114,7 +118,7 @@ async def create_team(
     # Add creator as owner
     db_service.add_team_member(
         team_id=team_id,
-        user_id=current_user["id"],
+        user_id=auth.user["id"],
         role="owner"
     )
 
@@ -122,9 +126,9 @@ async def create_team(
     task_id = await task_service.create_team_provision_task(
         team_id=team_id,
         team_slug=request.slug,
-        owner_id=current_user["id"],
-        owner_email=current_user.get("email"),
-        owner_name=current_user.get("display_name")
+        owner_id=auth.user["id"],
+        owner_email=auth.user.get("email"),
+        owner_name=auth.user.get("display_name")
     )
 
     logger.info(f"Team {request.slug} creation started, task: {task_id}")
@@ -150,10 +154,13 @@ async def create_team(
 
 @router.get("", response_model=List[TeamResponse])
 async def list_teams(
-    current_user: dict = Depends(get_current_user)
+    auth: AuthContext = Depends(get_auth_context)
 ):
-    """Get all teams for current user"""
-    teams = db_service.get_user_teams(current_user["id"])
+    """Get all teams for current user.
+
+    Authentication: JWT or Portal API token (pk_*)
+    """
+    teams = db_service.get_user_teams(auth.user["id"])
 
     # Filter out teams being deleted (worker will clean them up)
     active_teams = [t for t in teams if t.get("status") != "pending_deletion"]
@@ -179,15 +186,18 @@ async def list_teams(
 @router.get("/{slug}", response_model=TeamResponse)
 async def get_team(
     slug: str,
-    current_user: dict = Depends(get_current_user)
+    auth: AuthContext = Depends(get_auth_context)
 ):
-    """Get team by slug"""
+    """Get team by slug.
+
+    Authentication: JWT or Portal API token (pk_*)
+    """
     team = db_service.get_team_by_slug(slug)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
 
     # Check membership
-    membership = db_service.get_membership(team["id"], current_user["id"])
+    membership = db_service.get_membership(team["id"], auth.user["id"])
     if not membership:
         raise HTTPException(status_code=403, detail="Not a member of this team")
 
@@ -210,15 +220,19 @@ async def get_team(
 async def update_team(
     slug: str,
     request: TeamUpdateRequest,
-    current_user: dict = Depends(get_current_user)
+    auth: AuthContext = Depends(require_scope("teams:write"))
 ):
-    """Update team details"""
+    """Update team details.
+
+    Authentication: JWT or Portal API token (pk_*)
+    Required scope: teams:write
+    """
     team = db_service.get_team_by_slug(slug)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
 
     # Check if user is admin or owner
-    membership = db_service.get_membership(team["id"], current_user["id"])
+    membership = db_service.get_membership(team["id"], auth.user["id"])
     if not membership or membership["role"] not in ["owner", "admin"]:
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
@@ -246,22 +260,26 @@ async def update_team(
 @router.delete("/{slug}")
 async def delete_team(
     slug: str,
-    current_user: dict = Depends(get_current_user)
+    auth: AuthContext = Depends(require_scope("teams:write"))
 ):
-    """Delete a team (owner only)"""
+    """Delete a team (owner only).
+
+    Authentication: JWT or Portal API token (pk_*)
+    Required scope: teams:write
+    """
     team = db_service.get_team_by_slug(slug)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
 
     # Only owner can delete
-    if team["owner_id"] != current_user["id"]:
+    if team["owner_id"] != auth.user["id"]:
         raise HTTPException(status_code=403, detail="Only team owner can delete")
 
     # Start deletion task
     task_id = await task_service.create_team_delete_task(
         team_id=team["id"],
         team_slug=slug,
-        user_id=current_user["id"]
+        user_id=auth.user["id"]
     )
 
     # Mark as pending deletion
@@ -276,9 +294,12 @@ async def delete_team(
 @router.get("/{slug}/status")
 async def get_team_status(
     slug: str,
-    current_user: dict = Depends(get_current_user)
+    auth: AuthContext = Depends(get_auth_context)
 ):
-    """Get team provisioning status"""
+    """Get team provisioning status.
+
+    Authentication: JWT or Portal API token (pk_*)
+    """
     team = db_service.get_team_by_slug(slug)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
@@ -297,9 +318,12 @@ class RestartTeamRequest(BaseModel):
 async def restart_team(
     slug: str,
     request: RestartTeamRequest = RestartTeamRequest(),
-    current_user: dict = Depends(get_current_user)
+    auth: AuthContext = Depends(require_scope("teams:write"))
 ):
     """Restart or rebuild a team's containers.
+
+    Authentication: JWT or Portal API token (pk_*)
+    Required scope: teams:write
 
     Args:
         rebuild: If True, removes images and rebuilds from scratch.
@@ -310,7 +334,7 @@ async def restart_team(
         raise HTTPException(status_code=404, detail="Team not found")
 
     # Check if user is admin or owner
-    membership = db_service.get_membership(team["id"], current_user["id"])
+    membership = db_service.get_membership(team["id"], auth.user["id"])
     if not membership or membership["role"] not in ["owner", "admin"]:
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
@@ -321,7 +345,7 @@ async def restart_team(
     task_id = await task_service.create_team_restart_task(
         team_id=team["id"],
         team_slug=slug,
-        user_id=current_user["id"],
+        user_id=auth.user["id"],
         rebuild=request.rebuild
     )
 
@@ -338,15 +362,18 @@ async def restart_team(
 @router.get("/{slug}/members", response_model=List[TeamMemberResponse])
 async def list_team_members(
     slug: str,
-    current_user: dict = Depends(get_current_user)
+    auth: AuthContext = Depends(get_auth_context)
 ):
-    """Get all members of a team"""
+    """Get all members of a team.
+
+    Authentication: JWT or Portal API token (pk_*)
+    """
     team = db_service.get_team_by_slug(slug)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
 
     # Check membership
-    membership = db_service.get_membership(team["id"], current_user["id"])
+    membership = db_service.get_membership(team["id"], auth.user["id"])
     if not membership:
         raise HTTPException(status_code=403, detail="Not a member of this team")
 
@@ -369,15 +396,19 @@ async def list_team_members(
 async def add_team_member(
     slug: str,
     request: AddMemberRequest,
-    current_user: dict = Depends(get_current_user)
+    auth: AuthContext = Depends(require_scope("members:write"))
 ):
-    """Add a member to the team"""
+    """Add a member to the team.
+
+    Authentication: JWT or Portal API token (pk_*)
+    Required scope: members:write
+    """
     team = db_service.get_team_by_slug(slug)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
 
     # Check if user is admin or owner
-    membership = db_service.get_membership(team["id"], current_user["id"])
+    membership = db_service.get_membership(team["id"], auth.user["id"])
     if not membership or membership["role"] not in ["owner", "admin"]:
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
@@ -396,7 +427,7 @@ async def add_team_member(
         team_id=team["id"],
         user_id=user["id"],
         role=request.role,
-        invited_by=current_user["id"]
+        invited_by=auth.user["id"]
     )
 
     return {"message": f"User {request.email} added to team"}
@@ -406,15 +437,19 @@ async def add_team_member(
 async def remove_team_member(
     slug: str,
     user_id: str,
-    current_user: dict = Depends(get_current_user)
+    auth: AuthContext = Depends(require_scope("members:write"))
 ):
-    """Remove a member from the team"""
+    """Remove a member from the team.
+
+    Authentication: JWT or Portal API token (pk_*)
+    Required scope: members:write
+    """
     team = db_service.get_team_by_slug(slug)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
 
     # Check if user is admin or owner
-    membership = db_service.get_membership(team["id"], current_user["id"])
+    membership = db_service.get_membership(team["id"], auth.user["id"])
     if not membership or membership["role"] not in ["owner", "admin"]:
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
