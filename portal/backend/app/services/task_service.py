@@ -58,6 +58,26 @@ class TaskService:
             priority="high"
         )
 
+    async def create_team_restart_task(
+        self,
+        team_id: str,
+        team_slug: str,
+        user_id: str,
+        rebuild: bool = False
+    ) -> str:
+        """Create task to restart/rebuild a team's containers"""
+        return await redis_service.enqueue_task(
+            queue_name=self.QUEUE_PROVISIONING,
+            task_type="team.restart",
+            payload={
+                "team_id": team_id,
+                "team_slug": team_slug,
+                "rebuild": rebuild
+            },
+            user_id=user_id,
+            priority="high"
+        )
+
     async def create_cert_issue_task(
         self,
         team_slug: str,

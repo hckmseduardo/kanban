@@ -61,6 +61,8 @@ export const teamsApi = {
     api.put(`/teams/${slug}`, data),
   delete: (slug: string) => api.delete(`/teams/${slug}`),
   getMembers: (slug: string) => api.get(`/teams/${slug}/members`),
+  restart: (slug: string, rebuild: boolean = false) =>
+    api.post(`/teams/${slug}/restart`, { rebuild }),
 }
 
 export const tasksApi = {

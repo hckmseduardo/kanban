@@ -127,6 +127,8 @@ class Orchestrator:
                 await self.provision_team(task)
             elif task_type == "team.delete":
                 await self.delete_team(task)
+            elif task_type == "team.restart":
+                await self.restart_team(task)
             else:
                 logger.warning(f"Unknown task type: {task_type}")
 
@@ -484,6 +486,173 @@ class Orchestrator:
             logger.info(f"[{team_slug}] DNS record removed")
 
         await asyncio.sleep(0.2)
+
+    async def restart_team(self, task: dict):
+        """Restart/rebuild a team's containers"""
+        task_id = task["task_id"]
+        payload = task["payload"]
+        team_slug = payload["team_slug"]
+        team_id = payload.get("team_id")
+        rebuild = payload.get("rebuild", False)
+
+        logger.info(f"Restarting team: {team_slug} (rebuild={rebuild})")
+
+        if rebuild:
+            steps = [
+                ("Stopping containers", self._restart_stop_containers),
+                ("Removing old images", self._restart_remove_images),
+                ("Rebuilding containers", self._restart_rebuild_containers),
+                ("Starting containers", self._restart_start_containers),
+                ("Running health check", self._health_check),
+            ]
+        else:
+            steps = [
+                ("Stopping containers", self._restart_stop_containers),
+                ("Starting containers", self._restart_start_containers),
+                ("Running health check", self._health_check),
+            ]
+
+        try:
+            for i, (step_name, step_func) in enumerate(steps, 1):
+                await self.update_progress(task_id, i, len(steps), step_name)
+                await step_func(team_slug, team_id)
+                logger.info(f"[{team_slug}] {step_name} - completed")
+
+            # Publish status update
+            await self.redis.publish("team:status", json.dumps({
+                "team_id": team_id,
+                "team_slug": team_slug,
+                "status": "active"
+            }))
+
+            await self.complete_task(task_id, {
+                "action": "restart_team",
+                "team_slug": team_slug,
+                "rebuild": rebuild,
+                "url": f"https://{team_slug}.{DOMAIN}"
+            })
+
+            logger.info(f"Team {team_slug} restarted successfully")
+
+        except Exception as e:
+            logger.error(f"Team restart failed: {e}")
+            await self.fail_task(task_id, str(e))
+            raise
+
+    async def _restart_stop_containers(self, team_slug: str, team_id: str):
+        """Stop team containers"""
+        if not self.docker_available:
+            logger.warning("Docker not available, skipping container stop")
+            return
+
+        project_name = f"kanban-team-{team_slug}"
+        compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
+        team_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{team_slug}"
+
+        env = os.environ.copy()
+        env.update({
+            "TEAM_SLUG": team_slug,
+            "DOMAIN": DOMAIN,
+            "DATA_PATH": team_data_host_path,
+        })
+
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "stop"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False
+        )
+
+        if result.returncode == 0:
+            logger.info(f"[{team_slug}] Containers stopped")
+        else:
+            logger.warning(f"[{team_slug}] Stop warning: {result.stderr}")
+
+    async def _restart_remove_images(self, team_slug: str, team_id: str):
+        """Remove team container images for rebuild"""
+        if not self.docker_available:
+            return
+
+        project_name = f"kanban-team-{team_slug}"
+        compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
+        team_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{team_slug}"
+
+        env = os.environ.copy()
+        env.update({
+            "TEAM_SLUG": team_slug,
+            "DOMAIN": DOMAIN,
+            "DATA_PATH": team_data_host_path,
+        })
+
+        # Remove containers and local images
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "down", "--rmi", "local", "--remove-orphans"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False
+        )
+
+        logger.info(f"[{team_slug}] Old images removed")
+
+    async def _restart_rebuild_containers(self, team_slug: str, team_id: str):
+        """Rebuild team containers"""
+        if not self.docker_available:
+            raise RuntimeError("Docker CLI not available")
+
+        project_name = f"kanban-team-{team_slug}"
+        compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
+        team_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{team_slug}"
+
+        env = os.environ.copy()
+        env.update({
+            "TEAM_SLUG": team_slug,
+            "DOMAIN": DOMAIN,
+            "DATA_PATH": team_data_host_path,
+        })
+
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "build", "--no-cache"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to rebuild containers: {result.stderr}")
+
+        logger.info(f"[{team_slug}] Containers rebuilt")
+
+    async def _restart_start_containers(self, team_slug: str, team_id: str):
+        """Start team containers"""
+        if not self.docker_available:
+            raise RuntimeError("Docker CLI not available")
+
+        project_name = f"kanban-team-{team_slug}"
+        compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
+        team_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{team_slug}"
+
+        env = os.environ.copy()
+        env.update({
+            "TEAM_SLUG": team_slug,
+            "DOMAIN": DOMAIN,
+            "DATA_PATH": team_data_host_path,
+        })
+
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "up", "-d"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to start containers: {result.stderr}")
+
+        logger.info(f"[{team_slug}] Containers started")
 
     async def update_progress(
         self,

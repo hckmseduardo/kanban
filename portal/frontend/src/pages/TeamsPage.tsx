@@ -215,7 +215,7 @@ export default function TeamsPage() {
                       </svg>
                     </Link>
                   )}
-                  {team.owner_id === user?.id && team.status !== 'pending_deletion' && (
+                  {(team.owner_id === user?.id || team.role === 'owner') && team.status !== 'pending_deletion' && (
                     <button
                       onClick={() => setDeleteConfirm({ slug: team.slug, name: team.name })}
                       className="text-red-500 hover:text-red-700 p-1"

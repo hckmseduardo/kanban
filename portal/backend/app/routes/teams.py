@@ -289,6 +289,51 @@ async def get_team_status(
     }
 
 
+class RestartTeamRequest(BaseModel):
+    rebuild: bool = False
+
+
+@router.post("/{slug}/restart")
+async def restart_team(
+    slug: str,
+    request: RestartTeamRequest = RestartTeamRequest(),
+    current_user: dict = Depends(get_current_user)
+):
+    """Restart or rebuild a team's containers.
+
+    Args:
+        rebuild: If True, removes images and rebuilds from scratch.
+                 If False (default), just restarts the containers.
+    """
+    team = db_service.get_team_by_slug(slug)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    # Check if user is admin or owner
+    membership = db_service.get_membership(team["id"], current_user["id"])
+    if not membership or membership["role"] not in ["owner", "admin"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    # Update status to restarting
+    db_service.update_team(team["id"], {"status": "restarting"})
+
+    # Create restart task
+    task_id = await task_service.create_team_restart_task(
+        team_id=team["id"],
+        team_slug=slug,
+        user_id=current_user["id"],
+        rebuild=request.rebuild
+    )
+
+    action = "rebuild" if request.rebuild else "restart"
+    logger.info(f"Team {slug} {action} started, task: {task_id}")
+
+    return {
+        "message": f"Team {action} started",
+        "task_id": task_id
+    }
+
+
 # Member management
 @router.get("/{slug}/members", response_model=List[TeamMemberResponse])
 async def list_team_members(
