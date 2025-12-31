@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     certbot_email: str = "admin@localhost"
     letsencrypt_staging: bool = False  # Use staging server for testing
 
+    # Test credentials (loaded from Key Vault for integration testing)
+    test_user_email: Optional[str] = None
+    test_user_password: Optional[str] = None
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
@@ -71,6 +75,9 @@ class KeyVaultService:
         "entra-scopes": "entra_scopes",
         "redis-url": "redis_url",
         "certbot-email": "certbot_email",
+        # Test credentials for integration testing
+        "test-user-email": "test_user_email",
+        "test-user-password": "test_user_password",
     }
 
     def __init__(self, vault_url: str):

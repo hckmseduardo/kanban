@@ -161,3 +161,45 @@ async def get_cross_domain_token(
 
     token = create_cross_domain_token(user_id, team_slug)
     return {"token": token, "expires_in": 300}  # 5 minutes
+
+
+@router.post("/test-login")
+async def test_login(
+    email: str = Query(..., description="Test user email"),
+    password: str = Query(..., description="Test user password")
+):
+    """
+    Login with email/password using ROPC flow.
+    Used for integration testing with test user credentials from Key Vault.
+
+    Note: ROPC must be enabled in the Entra app registration.
+    """
+    try:
+        # Authenticate with Entra using ROPC flow
+        entra_user = await entra_auth.authenticate_with_password(email, password)
+
+        # Create or update user in database
+        user = db_service.upsert_user_from_entra(entra_user)
+
+        # Create JWT token
+        access_token = create_access_token(
+            data={"sub": user["id"], "email": user["email"]},
+            expires_delta=timedelta(minutes=settings.access_token_expire_minutes)
+        )
+
+        logger.info(f"Test login success for user {user['id']}")
+
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user": {
+                "id": user["id"],
+                "email": user["email"],
+                "display_name": user["display_name"],
+                "avatar_url": user.get("avatar_url")
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Test login failed: {e}", exc_info=True)
+        raise HTTPException(status_code=401, detail=f"Authentication failed: {str(e)}")

@@ -141,6 +141,61 @@ class EntraAuthService:
             logger.error(f"Failed to decode ID token: {e}")
             raise ValueError("Failed to decode ID token")
 
+    async def authenticate_with_password(self, username: str, password: str) -> dict:
+        """
+        Authenticate using Resource Owner Password Credentials (ROPC) flow.
+        Used for integration testing with test user credentials.
+
+        Note: ROPC must be enabled in the Entra app registration.
+        """
+        if not self.client_id or not self.client_secret:
+            raise ValueError("Entra ID credentials not configured")
+
+        token_url = f"{self.authority}/oauth2/v2.0/token"
+
+        data = {
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "grant_type": "password",
+            "username": username,
+            "password": password,
+            "scope": " ".join(self.scopes)
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(token_url, data=data)
+
+            if response.status_code != 200:
+                logger.error(f"ROPC authentication failed: {response.text}")
+                raise ValueError(f"Authentication failed: {response.status_code}")
+
+            token_response = response.json()
+
+        # Decode ID token
+        id_token = token_response.get("id_token")
+        if not id_token:
+            raise ValueError("No ID token in response")
+
+        user_info = self.decode_id_token(id_token)
+
+        # Try multiple fields for email
+        email = (
+            user_info.get("preferred_username") or
+            user_info.get("email") or
+            user_info.get("upn") or
+            username
+        )
+
+        logger.info(f"ROPC auth success: oid={user_info.get('oid')}, email={email}")
+
+        return {
+            "oid": user_info.get("oid"),
+            "email": email,
+            "name": user_info.get("name"),
+            "idp": user_info.get("idp", "microsoft"),
+            "access_token": token_response.get("access_token")
+        }
+
     async def authenticate(self, code: str) -> dict:
         """
         Complete authentication flow:
