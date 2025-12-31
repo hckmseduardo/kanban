@@ -17,8 +17,9 @@ RUN pip install --no-cache-dir -r requirements.txt -r requirements-test.txt
 # Copy application code
 COPY app/ ./app/
 
-# Copy test files
-COPY tests/ ./tests/
+# Tests are mounted via docker-compose volumes from root-level tests/ folder
+# Create empty tests directory for standalone builds (tests will be mounted)
+RUN mkdir -p ./tests/portal
 
 # Set environment variables for testing
 ENV TESTING=true

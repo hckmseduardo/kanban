@@ -1,8 +1,6 @@
 # Docker Compose for running Kanban Portal API tests
 # Usage: docker-compose -f docker-compose.test.yml up --build --abort-on-container-exit
 
-version: '3.8'
-
 services:
   # Test runner container
   test:
@@ -17,17 +15,19 @@ services:
       - REDIS_URL=redis://redis:6379
       - DOMAIN=localhost
       - PORT=4443
+      - DATABASE_PATH=/tmp/test_portal.json
     depends_on:
       redis:
         condition: service_healthy
     volumes:
       # Mount for live code updates during development
       - ./app:/app/app:ro
-      - ./tests:/app/tests:ro
+      # Mount root-level tests folder
+      - ../../tests:/app/tests
       # Mount for test reports
       - ./test-reports:/app/test-reports
     command: >
-      pytest tests/ -v --tb=short
+      pytest tests/portal/ -v --tb=short
       --junitxml=/app/test-reports/junit.xml
       --cov=app --cov-report=html:/app/test-reports/coverage
       --cov-report=term-missing

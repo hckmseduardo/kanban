@@ -31,7 +31,7 @@ if [ $# -gt 0 ]; then
     echo -e "${GREEN}Running tests with args: ${PYTEST_ARGS}${NC}"
 
     docker-compose -f docker-compose.test.yml run --rm test \
-        pytest tests/ -v --tb=short \
+        pytest tests/portal/ -v --tb=short \
         --junitxml=/app/test-reports/junit.xml \
         $PYTEST_ARGS
 else

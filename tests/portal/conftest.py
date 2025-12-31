@@ -1,9 +1,11 @@
 """Shared test fixtures for Kanban Portal API integration tests.
 
 These tests run against the actual API with real database and services.
+Test team uses full GUID to avoid conflicts with real teams.
 """
 
 import os
+import sys
 import uuid
 import asyncio
 from datetime import datetime
@@ -12,6 +14,9 @@ from typing import AsyncGenerator
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
+
+# Add portal backend to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../portal/backend'))
 
 # Set test environment
 os.environ["TESTING"] = "true"
@@ -131,23 +136,54 @@ async def api_headers(portal_api_token) -> dict:
 
 
 # =============================================================================
-# Test Team Fixture - Creates real team via API
+# Scoped Token Fixtures
+# =============================================================================
+
+@pytest_asyncio.fixture(scope="session")
+async def read_only_token(test_client, jwt_headers) -> str:
+    """Create a Portal API token with read-only scopes"""
+    response = await test_client.post(
+        "/portal/tokens",
+        json={
+            "name": "Read Only Token",
+            "scopes": ["teams:read", "boards:read", "cards:read", "members:read"]
+        },
+        headers=jwt_headers
+    )
+    assert response.status_code == 200
+    return response.json()["token"]
+
+
+@pytest_asyncio.fixture(scope="session")
+async def read_only_headers(read_only_token) -> dict:
+    """HTTP headers with read-only Portal API token"""
+    return {"Authorization": f"Bearer {read_only_token}"}
+
+
+# =============================================================================
+# Test Team Fixture - Creates real team via API with GUID slug
 # =============================================================================
 
 @pytest_asyncio.fixture(scope="session")
 async def test_team(test_client, api_headers, test_user):
-    """Create a test team via the API and wait for provisioning"""
+    """Create a test team via the API with GUID slug.
+
+    Uses full UUID in slug to avoid conflicts with real teams.
+    Team is deleted after all tests complete.
+    """
     from app.services.database_service import db_service
 
-    team_slug = f"test-team-{uuid.uuid4().hex[:8]}"
+    # Use full UUID to ensure uniqueness
+    team_slug = f"test-{uuid.uuid4().hex}"
+    team_name = f"Integration Test Team {team_slug[:12]}"
 
     # Create team via API
     response = await test_client.post(
         "/teams",
         json={
-            "name": "Integration Test Team",
+            "name": team_name,
             "slug": team_slug,
-            "description": "Team for integration testing"
+            "description": "Team created for integration testing - will be deleted automatically"
         },
         headers=api_headers
     )
@@ -155,11 +191,9 @@ async def test_team(test_client, api_headers, test_user):
     assert response.status_code == 200, f"Failed to create team: {response.text}"
     team_data = response.json()
 
-    # For integration tests, we need to wait for team provisioning
-    # or set the team status to active manually for testing
+    # For integration tests, we need to set the team status to active
     team = db_service.get_team_by_slug(team_slug)
     if team and team.get("status") != "active":
-        # Update team status to active for testing purposes
         db_service.update_team(team["id"], {"status": "active"})
 
     # Refresh team data
@@ -167,11 +201,45 @@ async def test_team(test_client, api_headers, test_user):
 
     yield team
 
-    # Cleanup: Delete team after tests
+    # Cleanup: Delete team after all tests complete
     try:
-        db_service.delete_team(team["id"])
+        delete_response = await test_client.delete(
+            f"/teams/{team_slug}",
+            headers=api_headers
+        )
+        if delete_response.status_code not in [200, 204, 404]:
+            print(f"Warning: Team cleanup returned {delete_response.status_code}")
+    except Exception as e:
+        print(f"Warning: Failed to cleanup test team: {e}")
+
+    # Also cleanup from database directly as fallback
+    try:
+        if team:
+            db_service.delete_team(team["id"])
     except Exception:
         pass
+
+
+# =============================================================================
+# Additional Helper Fixtures
+# =============================================================================
+
+@pytest_asyncio.fixture
+async def unique_slug() -> str:
+    """Generate a unique slug for tests that need to create resources"""
+    return f"test-{uuid.uuid4().hex[:12]}"
+
+
+@pytest_asyncio.fixture
+async def test_webhook_data() -> dict:
+    """Standard webhook data for testing"""
+    return {
+        "name": f"Test Webhook {uuid.uuid4().hex[:8]}",
+        "url": "https://httpbin.org/post",
+        "events": ["card.created", "card.moved", "card.updated"],
+        "secret": "test-webhook-secret",
+        "active": True
+    }
 
 
 # =============================================================================
