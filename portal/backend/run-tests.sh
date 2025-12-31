@@ -22,8 +22,9 @@ echo -e "${YELLOW}========================================${NC}"
 echo -e "${YELLOW}  Kanban Portal API - Test Runner${NC}"
 echo -e "${YELLOW}========================================${NC}"
 
-# Create test-reports directory
-mkdir -p test-reports
+# Create results directory in tests folder
+RESULTS_DIR="${SCRIPT_DIR}/../../tests/results"
+mkdir -p "$RESULTS_DIR"
 
 # Check if custom pytest args provided
 if [ $# -gt 0 ]; then
@@ -32,7 +33,7 @@ if [ $# -gt 0 ]; then
 
     docker-compose -f docker-compose.test.yml run --rm test \
         pytest tests/portal/ -v --tb=short \
-        --junitxml=/app/test-reports/junit.xml \
+        --junitxml=/app/tests/results/junit.xml \
         $PYTEST_ARGS
 else
     echo -e "${GREEN}Running all tests with coverage...${NC}"
@@ -45,16 +46,16 @@ fi
 
 EXIT_CODE=$?
 
-# Cleanup containers
+# Cleanup containers and remove them
 echo -e "${YELLOW}Cleaning up containers...${NC}"
-docker-compose -f docker-compose.test.yml down --volumes
+docker-compose -f docker-compose.test.yml down --volumes --remove-orphans
 
 if [ $EXIT_CODE -eq 0 ]; then
     echo -e "${GREEN}========================================${NC}"
     echo -e "${GREEN}  All tests passed!${NC}"
     echo -e "${GREEN}========================================${NC}"
-    echo -e "Coverage report: ${SCRIPT_DIR}/test-reports/coverage/index.html"
-    echo -e "JUnit report: ${SCRIPT_DIR}/test-reports/junit.xml"
+    echo -e "Coverage report: ${RESULTS_DIR}/coverage/index.html"
+    echo -e "JUnit report: ${RESULTS_DIR}/junit.xml"
 else
     echo -e "${RED}========================================${NC}"
     echo -e "${RED}  Tests failed with exit code: $EXIT_CODE${NC}"

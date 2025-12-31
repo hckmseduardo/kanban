@@ -36,3 +36,6 @@ data/
 
 # Certificates (local development)
 certs/
+
+# Test results
+tests/results/

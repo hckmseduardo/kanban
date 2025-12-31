@@ -1,5 +1,7 @@
 # Docker Compose for running Kanban Portal API tests
-# Usage: docker-compose -f docker-compose.test.yml up --build --abort-on-container-exit
+# Recommended: Use ./run-tests.sh for automatic cleanup
+# Manual: docker-compose -f docker-compose.test.yml up --build --abort-on-container-exit
+#         docker-compose -f docker-compose.test.yml down --volumes --remove-orphans
 
 services:
   # Test runner container
@@ -22,14 +24,12 @@ services:
     volumes:
       # Mount for live code updates during development
       - ./app:/app/app:ro
-      # Mount root-level tests folder
+      # Mount root-level tests folder (includes results subfolder)
       - ../../tests:/app/tests
-      # Mount for test reports
-      - ./test-reports:/app/test-reports
     command: >
       pytest tests/portal/ -v --tb=short
-      --junitxml=/app/test-reports/junit.xml
-      --cov=app --cov-report=html:/app/test-reports/coverage
+      --junitxml=/app/tests/results/junit.xml
+      --cov=app --cov-report=html:/app/tests/results/coverage
       --cov-report=term-missing
     networks:
       - test-network
