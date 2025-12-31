@@ -86,61 +86,82 @@ class TaskWorker:
         self.running = False
 
     async def listen_team_status(self):
-        """Listen for team status updates from orchestrator"""
+        """Listen for team status updates from orchestrator.
+
+        Includes retry logic for Redis connection failures.
+        """
         logger.info("Starting team status listener on channel: team:status")
 
-        pubsub_client = redis.from_url(
-            settings.redis_url,
-            encoding="utf-8",
-            decode_responses=True
-        )
-        pubsub = pubsub_client.pubsub()
-        await pubsub.subscribe("team:status")
+        while self.running:
+            pubsub_client = None
+            pubsub = None
 
-        try:
-            while self.running:
-                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-                if message and message["type"] == "message":
+            try:
+                pubsub_client = redis.from_url(
+                    settings.redis_url,
+                    encoding="utf-8",
+                    decode_responses=True
+                )
+                pubsub = pubsub_client.pubsub()
+                await pubsub.subscribe("team:status")
+                logger.info("Team status listener connected to Redis")
+
+                while self.running:
+                    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                    if message and message["type"] == "message":
+                        try:
+                            data = json.loads(message["data"])
+                            team_id = data.get("team_id")
+                            team_slug = data.get("team_slug")
+                            status = data.get("status")
+
+                            # If we don't have team_id but have team_slug, look it up
+                            if not team_id and team_slug:
+                                team = db_service.get_team_by_slug(team_slug)
+                                if team:
+                                    team_id = team["id"]
+                                else:
+                                    logger.warning(f"Team {team_slug} not found in database")
+                                    continue
+
+                            if team_id and status:
+                                logger.info(f"Updating team {team_slug} status to: {status}")
+                                if status == "deleted":
+                                    # Remove team from database
+                                    db_service.delete_team(team_id)
+                                    logger.info(f"Team {team_slug} removed from database")
+                                elif status == "suspended":
+                                    # Team was suspended due to inactivity
+                                    db_service.update_team(team_id, {"status": "suspended"})
+                                    logger.info(f"Team {team_slug} suspended (idle timeout)")
+                                else:
+                                    db_service.update_team(team_id, {"status": status})
+                                    logger.info(f"Team {team_slug} status updated to {status}")
+
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Invalid JSON in team:status message: {e}")
+                        except Exception as e:
+                            logger.error(f"Error updating team status: {e}")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Team status listener error: {e}, reconnecting in 5s...")
+                await asyncio.sleep(5)
+            finally:
+                # Cleanup pubsub connection
+                if pubsub:
                     try:
-                        data = json.loads(message["data"])
-                        team_id = data.get("team_id")
-                        team_slug = data.get("team_slug")
-                        status = data.get("status")
+                        await pubsub.unsubscribe("team:status")
+                    except Exception:
+                        pass
+                if pubsub_client:
+                    try:
+                        await pubsub_client.aclose()
+                    except Exception:
+                        pass
 
-                        # If we don't have team_id but have team_slug, look it up
-                        if not team_id and team_slug:
-                            team = db_service.get_team_by_slug(team_slug)
-                            if team:
-                                team_id = team["id"]
-                            else:
-                                logger.warning(f"Team {team_slug} not found in database")
-                                continue
-
-                        if team_id and status:
-                            logger.info(f"Updating team {team_slug} status to: {status}")
-                            if status == "deleted":
-                                # Remove team from database
-                                db_service.delete_team(team_id)
-                                logger.info(f"Team {team_slug} removed from database")
-                            elif status == "suspended":
-                                # Team was suspended due to inactivity
-                                db_service.update_team(team_id, {"status": "suspended"})
-                                logger.info(f"Team {team_slug} suspended (idle timeout)")
-                            else:
-                                db_service.update_team(team_id, {"status": status})
-                                logger.info(f"Team {team_slug} status updated to {status}")
-
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Invalid JSON in team:status message: {e}")
-                    except Exception as e:
-                        logger.error(f"Error updating team status: {e}")
-
-        except asyncio.CancelledError:
-            pass
-        finally:
-            await pubsub.unsubscribe("team:status")
-            await pubsub_client.close()
-            logger.info("Team status listener stopped")
+        logger.info("Team status listener stopped")
 
     async def process_task(self, task_id: str):
         """Process a single task"""
