@@ -1,0 +1,51 @@
+# Docker Compose for running Kanban Portal API tests
+# Usage: docker-compose -f docker-compose.test.yml up --build --abort-on-container-exit
+
+version: '3.8'
+
+services:
+  # Test runner container
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    container_name: kanban-portal-test
+    environment:
+      - TESTING=true
+      - PORTAL_SECRET_KEY=test-secret-key-for-testing
+      - CROSS_DOMAIN_SECRET=test-cross-domain-secret
+      - REDIS_URL=redis://redis:6379
+      - DOMAIN=localhost
+      - PORT=4443
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      # Mount for live code updates during development
+      - ./app:/app/app:ro
+      - ./tests:/app/tests:ro
+      # Mount for test reports
+      - ./test-reports:/app/test-reports
+    command: >
+      pytest tests/ -v --tb=short
+      --junitxml=/app/test-reports/junit.xml
+      --cov=app --cov-report=html:/app/test-reports/coverage
+      --cov-report=term-missing
+    networks:
+      - test-network
+
+  # Redis for testing (isolated instance)
+  redis:
+    image: redis:7-alpine
+    container_name: kanban-test-redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - test-network
+
+networks:
+  test-network:
+    driver: bridge

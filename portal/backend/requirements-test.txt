@@ -1,0 +1,20 @@
+# Testing dependencies for Kanban Portal API
+
+# Core testing
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0
+pytest-timeout>=2.2.0
+pytest-mock>=3.12.0
+
+# HTTP testing
+httpx>=0.25.0
+respx>=0.20.0
+
+# Test utilities
+factory-boy>=3.3.0
+freezegun>=1.4.0
+faker>=22.0.0
+
+# Async support
+anyio>=4.0.0

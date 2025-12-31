@@ -1,6 +1,8 @@
 """Portal API routes - Portal API token management
 
-Portal API tokens (pk_*) allow programmatic access to the /teams endpoints.
+Portal API tokens (pk_*) allow programmatic access to portal endpoints:
+- /api/teams/* - Team management and Team API (boards, columns, cards)
+
 Token management requires JWT authentication (logged-in user).
 """
 
@@ -66,14 +68,24 @@ async def create_portal_token(
 ):
     """Create a new Portal API token.
 
-    Portal API tokens can be used to access /teams endpoints programmatically.
+    Portal API tokens can be used to access portal endpoints programmatically.
     The token acts on behalf of the user who created it.
 
     Available scopes:
+
+    Team Management (/api/teams):
     - teams:read - List and view teams
     - teams:write - Create, update, delete teams
     - members:read - List team members
     - members:write - Add/remove team members
+
+    Team Data (/api/teams/{slug}/boards, /cards, etc.):
+    - boards:read - List and view boards, columns, labels
+    - boards:write - Create, update, delete boards and columns
+    - cards:read - List and view cards
+    - cards:write - Create, update, delete, move, archive cards
+
+    Wildcard:
     - * - Full access (all scopes)
     """
     token, token_hash = generate_portal_api_token()
@@ -123,3 +135,73 @@ async def delete_portal_token(
     db_service.delete_portal_api_token(token_id)
     logger.info(f"Portal API token '{token_id}' deleted by user {user['id']}")
     return {"message": "Token deleted"}
+
+
+# =============================================================================
+# Portal API Token Validation (for team APIs)
+# =============================================================================
+
+@router.post("/validate-token")
+async def validate_portal_token(
+    token: str,
+    team_slug: Optional[str] = None
+):
+    """Validate a Portal API token.
+
+    This endpoint is called by team APIs to validate Portal API tokens (pk_*).
+    No authentication required as this is used for token validation.
+
+    Args:
+        token: The Portal API token (pk_*)
+        team_slug: Optional team slug to verify membership
+
+    Returns:
+        Token info including user, scopes, and team membership if requested
+    """
+    if not token.startswith("pk_"):
+        return {"valid": False, "detail": "Not a Portal API token"}
+
+    # Strip pk_ prefix before hashing
+    raw_token = token[3:]
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    token_data = db_service.get_portal_api_token_by_hash(token_hash)
+
+    if not token_data:
+        return {"valid": False, "detail": "Token not found"}
+
+    if not token_data.get("is_active", True):
+        return {"valid": False, "detail": "Token is inactive"}
+
+    # Check expiration
+    from datetime import datetime
+    if token_data.get("expires_at"):
+        expires = datetime.fromisoformat(token_data["expires_at"])
+        if datetime.utcnow() > expires:
+            return {"valid": False, "detail": "Token expired"}
+
+    # Get user info
+    user = db_service.get_user_by_id(token_data["created_by"])
+    if not user:
+        return {"valid": False, "detail": "Token creator not found"}
+
+    # If team_slug provided, verify membership
+    member_role = None
+    if team_slug:
+        team = db_service.get_team_by_slug(team_slug)
+        if team:
+            membership = db_service.get_membership(team["id"], user["id"])
+            if membership:
+                member_role = membership.get("role")
+
+    # Update last used
+    db_service.update_portal_api_token_last_used(token_data["id"])
+
+    return {
+        "valid": True,
+        "user_id": user["id"],
+        "user_email": user.get("email"),
+        "user_display_name": user.get("display_name"),
+        "token_name": token_data["name"],
+        "scopes": token_data.get("scopes", []),
+        "team_member_role": member_role
+    }

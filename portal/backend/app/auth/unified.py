@@ -26,6 +26,7 @@ class AuthContext:
     scopes: List[str]                   # Explicit scopes (API token) or ["*"] (JWT)
     token_id: Optional[str] = None      # API token ID (if api_token auth)
     token_name: Optional[str] = None    # API token name (if api_token auth)
+    raw_token: Optional[str] = None     # The raw token string (for passthrough)
 
     def has_scope(self, required_scope: str) -> bool:
         """Check if this auth context has the required scope"""
@@ -115,7 +116,8 @@ async def get_auth_context(
             auth_type="api_token",
             scopes=token_data.get("scopes", []),
             token_id=token_data["id"],
-            token_name=token_data["name"]
+            token_name=token_data["name"],
+            raw_token=token
         )
 
     # Try JWT token
@@ -148,7 +150,8 @@ async def get_auth_context(
     return AuthContext(
         user=user,
         auth_type="jwt",
-        scopes=["*"]  # JWT users have implicit full access
+        scopes=["*"],  # JWT users have implicit full access
+        raw_token=token
     )
 
 

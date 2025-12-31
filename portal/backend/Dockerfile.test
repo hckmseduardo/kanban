@@ -1,0 +1,33 @@
+# Dockerfile for running Kanban Portal API tests
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
+COPY requirements.txt requirements-test.txt ./
+
+# Install dependencies
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-test.txt
+
+# Copy application code
+COPY app/ ./app/
+
+# Copy test files
+COPY tests/ ./tests/
+
+# Set environment variables for testing
+ENV TESTING=true
+ENV PORTAL_SECRET_KEY=test-secret-key-for-testing
+ENV CROSS_DOMAIN_SECRET=test-cross-domain-secret
+ENV REDIS_URL=redis://redis:6379
+ENV DOMAIN=localhost
+ENV PORT=4443
+ENV PYTHONPATH=/app
+
+# Default command runs all tests
+CMD ["pytest", "tests/", "-v", "--tb=short"]
