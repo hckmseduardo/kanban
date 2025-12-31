@@ -1,10 +1,10 @@
-"""Team API routes - Programmatic access to team boards and cards
+"""Team API routes - Programmatic access to team boards, cards, and webhooks
 
-These endpoints allow managing boards and cards within teams using Portal API tokens.
+These endpoints allow managing boards, cards, and webhooks within teams using Portal API tokens.
 Requests are proxied to the team's internal API.
 
 Authentication: Portal API token (pk_*) or JWT
-Required scopes: boards:read, boards:write, cards:read, cards:write
+Required scopes: boards:read, boards:write, cards:read, cards:write, teams:write (for webhooks)
 
 Auto-start: If a team is suspended when an API call is made, the team will be
 automatically started. The request will wait up to 60 seconds for the team to
@@ -77,6 +77,30 @@ class ColumnUpdate(BaseModel):
     position: Optional[int] = None
     wip_limit: Optional[int] = None
     color: Optional[str] = None
+
+
+class WebhookCreate(BaseModel):
+    """Create a new webhook"""
+    name: str = Field(..., min_length=1, max_length=100)
+    url: str
+    events: List[str] = ["card.created", "card.moved", "card.updated"]
+    secret: Optional[str] = None
+    active: bool = True
+
+
+class WebhookUpdate(BaseModel):
+    """Update an existing webhook"""
+    name: Optional[str] = None
+    url: Optional[str] = None
+    events: Optional[List[str]] = None
+    secret: Optional[str] = None
+    active: Optional[bool] = None
+
+
+class WebhookTestUrl(BaseModel):
+    """Test a webhook URL without saving"""
+    url: str
+    secret: Optional[str] = None
 
 
 # =============================================================================
@@ -487,3 +511,134 @@ async def list_labels(
     await verify_team_access(slug, auth)
     status, data = await team_proxy.get(slug, f"/boards/{board_id}/labels", auth_token=auth.raw_token)
     return proxy_response(status, data)
+
+
+# =============================================================================
+# Webhook Endpoints
+# =============================================================================
+
+@router.get("/{slug}/webhooks")
+async def list_webhooks(
+    slug: str,
+    auth: AuthContext = Depends(require_scope("teams:write"))
+):
+    """List all webhooks for a team.
+
+    Authentication: Portal API token (pk_*) or JWT
+    Required scope: teams:write
+    """
+    await verify_team_access(slug, auth)
+    status, data = await team_proxy.get(slug, "/webhooks", auth_token=auth.raw_token)
+    return proxy_response(status, data)
+
+
+@router.post("/{slug}/webhooks")
+async def create_webhook(
+    slug: str,
+    data: WebhookCreate,
+    auth: AuthContext = Depends(require_scope("teams:write"))
+):
+    """Create a new webhook.
+
+    Authentication: Portal API token (pk_*) or JWT
+    Required scope: teams:write
+    """
+    await verify_team_access(slug, auth)
+    status, response = await team_proxy.post(
+        slug, "/webhooks", json=data.model_dump(), auth_token=auth.raw_token
+    )
+    return proxy_response(status, response)
+
+
+@router.post("/{slug}/webhooks/test-url")
+async def test_webhook_url(
+    slug: str,
+    data: WebhookTestUrl,
+    auth: AuthContext = Depends(require_scope("teams:write"))
+):
+    """Test a webhook URL without saving.
+
+    Authentication: Portal API token (pk_*) or JWT
+    Required scope: teams:write
+    """
+    await verify_team_access(slug, auth)
+    status, response = await team_proxy.post(
+        slug, "/webhooks/test-url", json=data.model_dump(), auth_token=auth.raw_token
+    )
+    return proxy_response(status, response)
+
+
+@router.get("/{slug}/webhooks/{webhook_id}")
+async def get_webhook(
+    slug: str,
+    webhook_id: str,
+    auth: AuthContext = Depends(require_scope("teams:write"))
+):
+    """Get a specific webhook.
+
+    Authentication: Portal API token (pk_*) or JWT
+    Required scope: teams:write
+    """
+    await verify_team_access(slug, auth)
+    status, data = await team_proxy.get(
+        slug, f"/webhooks/{webhook_id}", auth_token=auth.raw_token
+    )
+    return proxy_response(status, data)
+
+
+@router.patch("/{slug}/webhooks/{webhook_id}")
+async def update_webhook(
+    slug: str,
+    webhook_id: str,
+    data: WebhookUpdate,
+    auth: AuthContext = Depends(require_scope("teams:write"))
+):
+    """Update a webhook.
+
+    Authentication: Portal API token (pk_*) or JWT
+    Required scope: teams:write
+    """
+    await verify_team_access(slug, auth)
+    status, response = await team_proxy.patch(
+        slug,
+        f"/webhooks/{webhook_id}",
+        json=data.model_dump(exclude_unset=True),
+        auth_token=auth.raw_token
+    )
+    return proxy_response(status, response)
+
+
+@router.delete("/{slug}/webhooks/{webhook_id}")
+async def delete_webhook(
+    slug: str,
+    webhook_id: str,
+    auth: AuthContext = Depends(require_scope("teams:write"))
+):
+    """Delete a webhook.
+
+    Authentication: Portal API token (pk_*) or JWT
+    Required scope: teams:write
+    """
+    await verify_team_access(slug, auth)
+    status, response = await team_proxy.delete(
+        slug, f"/webhooks/{webhook_id}", auth_token=auth.raw_token
+    )
+    return proxy_response(status, response)
+
+
+@router.post("/{slug}/webhooks/{webhook_id}/test")
+async def test_webhook(
+    slug: str,
+    webhook_id: str,
+    auth: AuthContext = Depends(require_scope("teams:write"))
+):
+    """Send a test event to a webhook.
+
+    Authentication: Portal API token (pk_*) or JWT
+    Required scope: teams:write
+    """
+    await verify_team_access(slug, auth)
+    status, response = await team_proxy.post(
+        slug, f"/webhooks/{webhook_id}/test", auth_token=auth.raw_token
+    )
+    return proxy_response(status, response)
