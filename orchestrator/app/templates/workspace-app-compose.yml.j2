@@ -58,19 +58,19 @@ services:
       - "kanban.type=workspace-api"
       - "kanban.workspace={{ workspace_slug }}"
       - "traefik.enable=true"
-      # Strip /api prefix middleware
-      - "traefik.http.middlewares.{{ workspace_slug }}-api-strip.stripprefix.prefixes=/api"
+      # Strip /api prefix middleware (use -app- suffix to avoid conflict with kanban-team routers)
+      - "traefik.http.middlewares.{{ workspace_slug }}-app-api-strip.stripprefix.prefixes=/api"
       # HTTPS router
-      - "traefik.http.routers.{{ workspace_slug }}-api.rule=Host(`{{ workspace_slug }}.app.{{ domain | replace('kanban.', '') }}`) && PathPrefix(`/api`)"
-      - "traefik.http.routers.{{ workspace_slug }}-api.entrypoints=websecure"
-      - "traefik.http.routers.{{ workspace_slug }}-api.tls=true"
-      - "traefik.http.routers.{{ workspace_slug }}-api.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.{{ workspace_slug }}-api.middlewares={{ workspace_slug }}-api-strip"
-      - "traefik.http.services.{{ workspace_slug }}-api.loadbalancer.server.port=8000"
+      - "traefik.http.routers.{{ workspace_slug }}-app-api.rule=Host(`{{ workspace_slug }}.app.{{ domain | replace('kanban.', '') }}`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.{{ workspace_slug }}-app-api.entrypoints=websecure"
+      - "traefik.http.routers.{{ workspace_slug }}-app-api.tls=true"
+      - "traefik.http.routers.{{ workspace_slug }}-app-api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.{{ workspace_slug }}-app-api.middlewares={{ workspace_slug }}-app-api-strip"
+      - "traefik.http.services.{{ workspace_slug }}-app-api.loadbalancer.server.port=8000"
       # HTTP router (redirect to HTTPS)
-      - "traefik.http.routers.{{ workspace_slug }}-api-http.rule=Host(`{{ workspace_slug }}.app.{{ domain | replace('kanban.', '') }}`) && PathPrefix(`/api`)"
-      - "traefik.http.routers.{{ workspace_slug }}-api-http.entrypoints=web"
-      - "traefik.http.routers.{{ workspace_slug }}-api-http.middlewares=redirect-to-https@file"
+      - "traefik.http.routers.{{ workspace_slug }}-app-api-http.rule=Host(`{{ workspace_slug }}.app.{{ domain | replace('kanban.', '') }}`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.{{ workspace_slug }}-app-api-http.entrypoints=web"
+      - "traefik.http.routers.{{ workspace_slug }}-app-api-http.middlewares=redirect-to-https@file"
 
   # React Frontend (Vite dev server)
   {{ workspace_slug }}-web:
@@ -91,16 +91,16 @@ services:
       - "kanban.type=workspace-web"
       - "kanban.workspace={{ workspace_slug }}"
       - "traefik.enable=true"
-      # HTTPS router
-      - "traefik.http.routers.{{ workspace_slug }}-web.rule=Host(`{{ workspace_slug }}.app.{{ domain | replace('kanban.', '') }}`)"
-      - "traefik.http.routers.{{ workspace_slug }}-web.entrypoints=websecure"
-      - "traefik.http.routers.{{ workspace_slug }}-web.tls=true"
-      - "traefik.http.routers.{{ workspace_slug }}-web.tls.certresolver=letsencrypt"
-      - "traefik.http.services.{{ workspace_slug }}-web.loadbalancer.server.port=5173"
+      # HTTPS router (use -app- suffix to avoid conflict with kanban-team routers)
+      - "traefik.http.routers.{{ workspace_slug }}-app-web.rule=Host(`{{ workspace_slug }}.app.{{ domain | replace('kanban.', '') }}`)"
+      - "traefik.http.routers.{{ workspace_slug }}-app-web.entrypoints=websecure"
+      - "traefik.http.routers.{{ workspace_slug }}-app-web.tls=true"
+      - "traefik.http.routers.{{ workspace_slug }}-app-web.tls.certresolver=letsencrypt"
+      - "traefik.http.services.{{ workspace_slug }}-app-web.loadbalancer.server.port=5173"
       # HTTP router (redirect to HTTPS)
-      - "traefik.http.routers.{{ workspace_slug }}-web-http.rule=Host(`{{ workspace_slug }}.app.{{ domain | replace('kanban.', '') }}`) && !PathPrefix(`/.well-known/acme-challenge`)"
-      - "traefik.http.routers.{{ workspace_slug }}-web-http.entrypoints=web"
-      - "traefik.http.routers.{{ workspace_slug }}-web-http.middlewares=redirect-to-https@file"
+      - "traefik.http.routers.{{ workspace_slug }}-app-web-http.rule=Host(`{{ workspace_slug }}.app.{{ domain | replace('kanban.', '') }}`) && !PathPrefix(`/.well-known/acme-challenge`)"
+      - "traefik.http.routers.{{ workspace_slug }}-app-web-http.entrypoints=web"
+      - "traefik.http.routers.{{ workspace_slug }}-app-web-http.middlewares=redirect-to-https@file"
 
   # Redis for caching and sessions (optional)
   {{ workspace_slug }}-redis:
