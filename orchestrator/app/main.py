@@ -1091,7 +1091,7 @@ class Orchestrator:
             raise
 
     async def _workspace_create_azure_app(self, workspace_slug: str, workspace_id: str):
-        """Create Azure AD app registration for the workspace app"""
+        """Create Entra External ID (CIAM) app registration for the workspace app"""
         # Generate redirect URIs based on app subdomain
         base_domain = DOMAIN
         if base_domain.startswith("kanban."):
@@ -1108,7 +1108,7 @@ class Orchestrator:
 
         display_name = f"Workspace {workspace_slug} App"
 
-        logger.info(f"[{workspace_slug}] Creating Azure AD app registration: {display_name}")
+        logger.info(f"[{workspace_slug}] Creating Entra External ID app registration: {display_name}")
 
         try:
             result = await azure_service.create_app_registration(
@@ -1117,16 +1117,24 @@ class Orchestrator:
                 homepage_url=app_url,
             )
 
-            # Store Azure credentials in payload for later steps
+            # Store Entra CIAM credentials in payload for later steps
+            # Use entra_* naming to match template expectations
+            self._current_payload["entra_tenant_id"] = result.tenant_id
+            self._current_payload["entra_authority"] = result.authority
+            self._current_payload["entra_client_id"] = result.app_id
+            self._current_payload["entra_client_secret"] = result.client_secret
+            self._current_payload["entra_object_id"] = result.object_id
+
+            # Also keep azure_* for backwards compatibility with status updates
             self._current_payload["azure_app_id"] = result.app_id
             self._current_payload["azure_object_id"] = result.object_id
             self._current_payload["azure_client_secret"] = result.client_secret
             self._current_payload["azure_tenant_id"] = result.tenant_id
 
-            logger.info(f"[{workspace_slug}] Azure app registration created: {result.app_id}")
+            logger.info(f"[{workspace_slug}] Entra External ID app created: {result.app_id} (authority: {result.authority})")
 
         except Exception as e:
-            logger.error(f"[{workspace_slug}] Failed to create Azure app registration: {e}")
+            logger.error(f"[{workspace_slug}] Failed to create Entra External ID app registration: {e}")
             raise
 
     async def _workspace_clone_repo(self, workspace_slug: str, workspace_id: str):
@@ -1231,10 +1239,11 @@ class Orchestrator:
                 domain=DOMAIN,
                 port=PORT,
                 network_name=NETWORK_NAME,
-                # Azure AD credentials
-                azure_tenant_id=payload.get("azure_tenant_id", ""),
-                azure_app_id=payload.get("azure_app_id", ""),
-                azure_client_secret=payload.get("azure_client_secret", ""),
+                # Entra External ID (CIAM) credentials
+                entra_tenant_id=payload.get("entra_tenant_id", ""),
+                entra_authority=payload.get("entra_authority", ""),
+                entra_client_id=payload.get("entra_client_id", ""),
+                entra_client_secret=payload.get("entra_client_secret", ""),
             )
         except Exception as e:
             logger.error(f"[{workspace_slug}] Failed to render workspace app template: {e}")
@@ -1685,10 +1694,11 @@ class Orchestrator:
                 domain=DOMAIN,
                 port=PORT,
                 network_name=NETWORK_NAME,
-                # Azure AD credentials (inherited from workspace)
-                azure_tenant_id=self._current_payload.get("azure_tenant_id", ""),
-                azure_app_id=self._current_payload.get("azure_app_id", ""),
-                azure_client_secret=self._current_payload.get("azure_client_secret", ""),
+                # Entra External ID (CIAM) credentials (inherited from workspace)
+                entra_tenant_id=self._current_payload.get("entra_tenant_id", ""),
+                entra_authority=self._current_payload.get("entra_authority", ""),
+                entra_client_id=self._current_payload.get("entra_client_id", ""),
+                entra_client_secret=self._current_payload.get("entra_client_secret", ""),
             )
         except Exception as e:
             logger.error(f"[{full_slug}] Failed to render sandbox template: {e}")

@@ -1,7 +1,11 @@
-"""Azure service for Microsoft Entra ID app registration management.
+"""Azure service for Microsoft Entra External ID (CIAM) app registration management.
 
-This service handles Azure AD app registration operations for workspace provisioning,
+This service handles Entra External ID app registration operations for workspace provisioning,
 including creating app registrations, configuring redirect URIs, and generating secrets.
+
+Entra External ID (CIAM) uses a different authority URL pattern than standard Azure AD:
+- Standard Azure AD: https://login.microsoftonline.com/{tenant-id}
+- Entra External ID: https://{domain}.ciamlogin.com/{tenant-id}
 """
 
 import logging
@@ -14,23 +18,28 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # Configuration from environment
-# Uses AZURE_APP_FACTORY_* vars to avoid conflict with Key Vault credentials
+# Uses AZURE_APP_FACTORY_* vars for the service principal that creates app registrations
+# in the CIAM tenant
 AZURE_TENANT_ID = os.getenv("AZURE_APP_FACTORY_TENANT_ID", os.getenv("AZURE_TENANT_ID", ""))
 AZURE_CLIENT_ID = os.getenv("AZURE_APP_FACTORY_CLIENT_ID", os.getenv("AZURE_CLIENT_ID", ""))
 AZURE_CLIENT_SECRET = os.getenv("AZURE_APP_FACTORY_CLIENT_SECRET", os.getenv("AZURE_CLIENT_SECRET", ""))
 
+# CIAM-specific configuration
+ENTRA_CIAM_AUTHORITY = os.getenv("ENTRA_CIAM_AUTHORITY", "")
+
 
 @dataclass
 class AppRegistrationResult:
-    """Result of creating an Azure AD app registration."""
+    """Result of creating an Entra External ID app registration."""
     app_id: str  # Application (client) ID
     object_id: str  # Object ID for Graph API operations
     client_secret: str  # Generated client secret
     tenant_id: str  # Tenant ID
+    authority: str  # CIAM authority URL (e.g., https://domain.ciamlogin.com/tenant-id)
 
 
 class AzureService:
-    """Service for Azure AD app registration operations."""
+    """Service for Entra External ID (CIAM) app registration operations."""
 
     GRAPH_URL = "https://graph.microsoft.com/v1.0"
     LOGIN_URL = "https://login.microsoftonline.com"
@@ -40,10 +49,12 @@ class AzureService:
         tenant_id: str = None,
         client_id: str = None,
         client_secret: str = None,
+        ciam_authority: str = None,
     ):
         self._tenant_id = tenant_id or AZURE_TENANT_ID
         self._client_id = client_id or AZURE_CLIENT_ID
         self._client_secret = client_secret or AZURE_CLIENT_SECRET
+        self._ciam_authority = ciam_authority or ENTRA_CIAM_AUTHORITY
         self._access_token: Optional[str] = None
 
     @property
@@ -51,6 +62,14 @@ class AzureService:
         if not self._tenant_id:
             raise ValueError("Azure tenant ID not configured. Set AZURE_APP_FACTORY_TENANT_ID.")
         return self._tenant_id
+
+    @property
+    def ciam_authority(self) -> str:
+        """Get the CIAM authority URL for the tenant."""
+        if self._ciam_authority:
+            return self._ciam_authority
+        # Fallback to standard Azure AD authority if CIAM not configured
+        return f"{self.LOGIN_URL}/{self.tenant_id}"
 
     async def _get_access_token(self) -> str:
         """Get access token for Microsoft Graph API using client credentials flow."""
@@ -127,7 +146,7 @@ class AzureService:
         redirect_uris: list[str],
         homepage_url: str = None,
     ) -> AppRegistrationResult:
-        """Create a new Azure AD app registration.
+        """Create a new Entra External ID (CIAM) app registration.
 
         Args:
             display_name: Display name for the app registration
@@ -135,12 +154,13 @@ class AzureService:
             homepage_url: Optional homepage URL
 
         Returns:
-            AppRegistrationResult with app credentials
+            AppRegistrationResult with app credentials including CIAM authority URL
         """
         # Create the app registration
+        # For Entra External ID (CIAM), use AzureADMyOrg since CIAM has its own user directory
         app_data = {
             "displayName": display_name,
-            "signInAudience": "AzureADandPersonalMicrosoftAccount",  # Multi-tenant + personal accounts
+            "signInAudience": "AzureADMyOrg",  # Single tenant - CIAM tenant only
             "web": {
                 "redirectUris": redirect_uris,
                 "implicitGrantSettings": {
@@ -242,6 +262,7 @@ class AzureService:
             object_id=object_id,
             client_secret=client_secret,
             tenant_id=self.tenant_id,
+            authority=self.ciam_authority,
         )
 
     async def get_app_registration(self, object_id: str) -> Optional[dict]:

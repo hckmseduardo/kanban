@@ -45,10 +45,11 @@ services:
       - CORS_ORIGINS=https://{{ full_slug }}.sandbox.{{ domain | replace('kanban.', '') }}{% if port != '443' %}:{{ port }}{% endif %}
       - SANDBOX_MODE=true
       - GIT_BRANCH={{ git_branch }}
-      # Microsoft Entra ID / Azure AD (inherited from workspace)
-      - ENTRA_TENANT_ID={{ azure_tenant_id | default('') }}
-      - ENTRA_CLIENT_ID={{ azure_app_id | default('') }}
-      - ENTRA_CLIENT_SECRET={{ azure_client_secret | default('') }}
+      # Microsoft Entra External ID (CIAM) - shared app registration
+      - ENTRA_TENANT_ID={{ entra_tenant_id }}
+      - ENTRA_AUTHORITY={{ entra_authority }}
+      - ENTRA_CLIENT_ID={{ entra_client_id }}
+      - ENTRA_CLIENT_SECRET={{ entra_client_secret }}
       - ENTRA_REDIRECT_URI=https://{{ full_slug }}.sandbox.{{ domain | replace('kanban.', '') }}{% if port != '443' %}:{{ port }}{% endif %}/api/auth/callback
     volumes:
       - {{ data_path }}/uploads:/app/uploads

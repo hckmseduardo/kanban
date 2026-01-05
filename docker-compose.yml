@@ -194,10 +194,11 @@ services:
       - EMAIL_FROM_NAME=${EMAIL_FROM_NAME:-Kanban}
       # GitHub integration for App Factory
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
-      # Azure AD integration for App Factory (separate from Key Vault creds)
+      # Entra External ID (CIAM) integration for App Factory
       - AZURE_APP_FACTORY_TENANT_ID=${AZURE_APP_FACTORY_TENANT_ID:-}
       - AZURE_APP_FACTORY_CLIENT_ID=${AZURE_APP_FACTORY_CLIENT_ID:-}
       - AZURE_APP_FACTORY_CLIENT_SECRET=${AZURE_APP_FACTORY_CLIENT_SECRET:-}
+      - ENTRA_CIAM_AUTHORITY=${ENTRA_CIAM_AUTHORITY:-}
     volumes:
       - ./orchestrator/app:/app/app
       - ./data/teams:/app/data/teams
