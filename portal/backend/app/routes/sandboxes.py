@@ -212,6 +212,7 @@ async def create_sandbox(
         azure_tenant_id=workspace.get("azure_tenant_id"),
         azure_app_id=workspace.get("azure_app_id"),
         azure_client_secret=workspace.get("azure_client_secret"),
+        azure_object_id=workspace.get("azure_object_id"),
     )
 
     logger.info(
@@ -354,6 +355,7 @@ async def delete_sandbox(
         workspace_slug=workspace["slug"],
         github_org=workspace.get("github_org"),
         github_repo_name=workspace.get("github_repo_name"),
+        azure_object_id=workspace.get("azure_object_id"),
     )
 
     # Update status to deleting

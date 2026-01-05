@@ -216,6 +216,7 @@ class TaskService:
         azure_tenant_id: str = None,
         azure_app_id: str = None,
         azure_client_secret: str = None,
+        azure_object_id: str = None,
     ) -> str:
         """Create task to provision a new sandbox.
 
@@ -224,6 +225,7 @@ class TaskService:
         2. Clone database from workspace
         3. Deploy sandbox containers
         4. Provision dedicated agent
+        5. Add redirect URI to Azure app registration
         """
         return await redis_service.enqueue_task(
             queue_name=self.QUEUE_PROVISIONING,
@@ -240,6 +242,7 @@ class TaskService:
                 "azure_tenant_id": azure_tenant_id,
                 "azure_app_id": azure_app_id,
                 "azure_client_secret": azure_client_secret,
+                "azure_object_id": azure_object_id,
             },
             user_id=owner_id,
             priority="high"
@@ -254,6 +257,7 @@ class TaskService:
         workspace_slug: str = None,
         github_org: str = None,
         github_repo_name: str = None,
+        azure_object_id: str = None,
     ) -> str:
         """Create task to delete a sandbox.
 
@@ -262,6 +266,7 @@ class TaskService:
         2. Delete git branch
         3. Delete database
         4. Clean up agent
+        5. Remove redirect URI from Azure app registration
         """
         return await redis_service.enqueue_task(
             queue_name=self.QUEUE_PROVISIONING,
@@ -273,6 +278,7 @@ class TaskService:
                 "workspace_slug": workspace_slug,
                 "github_org": github_org,
                 "github_repo_name": github_repo_name,
+                "azure_object_id": azure_object_id,
             },
             user_id=user_id,
             priority="high"

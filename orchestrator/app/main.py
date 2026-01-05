@@ -1384,7 +1384,9 @@ class Orchestrator:
             ("Deleting sandboxes", self._workspace_delete_sandboxes),
             ("Stopping app containers", self._workspace_stop_app),
             ("Stopping workspace agent", self._workspace_delete_agent),
+            ("Deleting GitHub repository", self._workspace_delete_github_repo),
             ("Deleting Azure app registration", self._workspace_delete_azure_app),
+            ("Archiving workspace data", self._workspace_archive_data),
             ("Stopping kanban team", self._delete_stop_containers),
             ("Removing containers", self._delete_remove_containers),
             ("Archiving data", self._delete_archive_data),
@@ -1497,6 +1499,29 @@ class Orchestrator:
         except Exception as e:
             logger.warning(f"[{workspace_slug}] Error stopping agent (may not exist): {e}")
 
+    async def _workspace_delete_github_repo(self, workspace_slug: str, workspace_id: str):
+        """Delete GitHub repository for the workspace app"""
+        github_org = self._current_payload.get("github_org")
+        github_repo_name = self._current_payload.get("github_repo_name")
+
+        if not github_org or not github_repo_name:
+            logger.warning(f"[{workspace_slug}] No GitHub repo info, skipping deletion")
+            return
+
+        logger.info(f"[{workspace_slug}] Deleting GitHub repository: {github_org}/{github_repo_name}")
+
+        try:
+            deleted = await github_service.delete_repository(
+                owner=github_org,
+                repo=github_repo_name,
+            )
+            if deleted:
+                logger.info(f"[{workspace_slug}] GitHub repository deleted")
+            else:
+                logger.warning(f"[{workspace_slug}] GitHub repository not found (may have been deleted already)")
+        except Exception as e:
+            logger.warning(f"[{workspace_slug}] Failed to delete GitHub repository (non-fatal): {e}")
+
     async def _workspace_delete_azure_app(self, workspace_slug: str, workspace_id: str):
         """Delete Azure AD app registration if it exists"""
         azure_object_id = self._current_payload.get("azure_object_id")
@@ -1516,6 +1541,36 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"[{workspace_slug}] Failed to delete Azure app registration: {e}")
             # Don't raise - continue with deletion even if Azure cleanup fails
+
+    async def _workspace_archive_data(self, workspace_slug: str, workspace_id: str):
+        """Archive workspace data directory before deletion.
+
+        This includes postgres data, redis data, uploads, etc.
+        Archiving prevents orphaned data from causing issues if the workspace is recreated.
+        """
+        workspace_dir = WORKSPACES_DIR / workspace_slug
+        archive_dir = WORKSPACES_DIR / ".archived"
+
+        if not workspace_dir.exists():
+            logger.info(f"[{workspace_slug}] Workspace data directory not found, nothing to archive")
+            return
+
+        try:
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            archived_name = f"{workspace_slug}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            archived_path = archive_dir / archived_name
+
+            shutil.move(str(workspace_dir), str(archived_path))
+            logger.info(f"[{workspace_slug}] Workspace data archived to {archived_path}")
+        except Exception as e:
+            logger.error(f"[{workspace_slug}] Failed to archive workspace data: {e}")
+            # Try to delete instead if move fails
+            try:
+                shutil.rmtree(str(workspace_dir))
+                logger.info(f"[{workspace_slug}] Workspace data deleted (archive failed)")
+            except Exception as e2:
+                logger.error(f"[{workspace_slug}] Failed to delete workspace data: {e2}")
+                # Don't raise - continue with deletion
 
     # ========== App Factory: Sandbox Provisioning ==========
 
@@ -1544,6 +1599,7 @@ class Orchestrator:
 
         steps = [
             ("Validating sandbox configuration", self._sandbox_validate),
+            ("Updating Azure redirect URIs", self._sandbox_update_azure_redirect_uris),
             ("Creating git branch", self._sandbox_create_branch),
             ("Issuing SSL certificate", self._sandbox_issue_certificate),
             ("Cloning workspace database", self._sandbox_clone_database),
@@ -1578,6 +1634,54 @@ class Orchestrator:
         """Validate sandbox configuration"""
         if not full_slug or len(full_slug) < 5:
             raise ValueError("Invalid sandbox full_slug")
+
+    async def _sandbox_update_azure_redirect_uris(self, full_slug: str, sandbox_id: str):
+        """Add sandbox redirect URI to Azure app registration"""
+        azure_object_id = self._current_payload.get("azure_object_id")
+        workspace_slug = self._current_payload.get("workspace_slug")
+
+        if not azure_object_id:
+            logger.warning(f"[{full_slug}] No Azure object ID provided, skipping redirect URI update")
+            return
+
+        # Build the sandbox redirect URI
+        # Domain format: {full_slug}.sandbox.{base_domain}/api/auth/callback
+        base_domain = DOMAIN.replace("kanban.", "") if DOMAIN.startswith("kanban.") else DOMAIN
+        sandbox_redirect_uri = f"https://{full_slug}.sandbox.{base_domain}"
+        if PORT and PORT != "443":
+            sandbox_redirect_uri += f":{PORT}"
+        sandbox_redirect_uri += "/api/auth/callback"
+
+        logger.info(f"[{full_slug}] Adding redirect URI to Azure app: {sandbox_redirect_uri}")
+
+        try:
+            # Get existing redirect URIs
+            app = await azure_service.get_app_registration(azure_object_id)
+            if not app:
+                logger.error(f"[{full_slug}] Azure app registration not found: {azure_object_id}")
+                raise Exception("Azure app registration not found")
+
+            existing_uris = app.get("web", {}).get("redirectUris", [])
+
+            # Check if already present
+            if sandbox_redirect_uri in existing_uris:
+                logger.info(f"[{full_slug}] Redirect URI already present, skipping")
+                return
+
+            # Add new URI to existing list
+            updated_uris = existing_uris + [sandbox_redirect_uri]
+
+            # Update app registration
+            success = await azure_service.update_redirect_uris(azure_object_id, updated_uris)
+            if not success:
+                raise Exception("Failed to update Azure redirect URIs")
+
+            logger.info(f"[{full_slug}] Redirect URI added successfully")
+
+        except Exception as e:
+            logger.error(f"[{full_slug}] Failed to update Azure redirect URIs: {e}")
+            # This is not fatal - continue with provisioning
+            # The user can manually add the redirect URI later
 
     async def _sandbox_create_branch(self, full_slug: str, sandbox_id: str):
         """Create git branch for sandbox"""
@@ -1849,6 +1953,7 @@ class Orchestrator:
             ("Stopping sandbox containers", self._sandbox_stop_containers),
             ("Removing sandbox containers", self._sandbox_remove_containers),
             ("Deleting git branch", self._sandbox_delete_branch),
+            ("Removing Azure redirect URI", self._sandbox_remove_azure_redirect_uri),
             ("Archiving sandbox data", self._sandbox_archive_data),
         ]
 
@@ -1948,6 +2053,50 @@ class Orchestrator:
 
         except Exception as e:
             logger.warning(f"[{full_slug}] Failed to delete branch (non-fatal): {e}")
+
+    async def _sandbox_remove_azure_redirect_uri(self, full_slug: str, sandbox_id: str):
+        """Remove sandbox redirect URI from Azure app registration"""
+        azure_object_id = self._current_payload.get("azure_object_id")
+
+        if not azure_object_id:
+            logger.warning(f"[{full_slug}] No Azure object ID provided, skipping redirect URI removal")
+            return
+
+        # Build the sandbox redirect URI to remove
+        base_domain = DOMAIN.replace("kanban.", "") if DOMAIN.startswith("kanban.") else DOMAIN
+        sandbox_redirect_uri = f"https://{full_slug}.sandbox.{base_domain}"
+        if PORT and PORT != "443":
+            sandbox_redirect_uri += f":{PORT}"
+        sandbox_redirect_uri += "/api/auth/callback"
+
+        logger.info(f"[{full_slug}] Removing redirect URI from Azure app: {sandbox_redirect_uri}")
+
+        try:
+            # Get existing redirect URIs
+            app = await azure_service.get_app_registration(azure_object_id)
+            if not app:
+                logger.warning(f"[{full_slug}] Azure app registration not found, skipping")
+                return
+
+            existing_uris = app.get("web", {}).get("redirectUris", [])
+
+            # Check if URI is present
+            if sandbox_redirect_uri not in existing_uris:
+                logger.info(f"[{full_slug}] Redirect URI not present, skipping")
+                return
+
+            # Remove URI from list
+            updated_uris = [uri for uri in existing_uris if uri != sandbox_redirect_uri]
+
+            # Update app registration
+            success = await azure_service.update_redirect_uris(azure_object_id, updated_uris)
+            if success:
+                logger.info(f"[{full_slug}] Redirect URI removed successfully")
+            else:
+                logger.warning(f"[{full_slug}] Failed to update Azure redirect URIs")
+
+        except Exception as e:
+            logger.warning(f"[{full_slug}] Failed to remove Azure redirect URI (non-fatal): {e}")
 
     async def _sandbox_archive_data(self, full_slug: str, sandbox_id: str):
         """Archive sandbox data"""

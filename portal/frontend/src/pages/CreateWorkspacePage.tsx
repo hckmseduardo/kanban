@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { workspacesApi, appTemplatesApi, AppTemplate } from '../services/api'
 
 export default function CreateWorkspacePage() {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [name, setName] = useState('')
   const [slug, setSlug] = useState('')
   const [description, setDescription] = useState('')
@@ -21,6 +22,8 @@ export default function CreateWorkspacePage() {
     mutationFn: (data: { name: string; slug: string; description?: string; app_template_slug?: string }) =>
       workspacesApi.create(data),
     onSuccess: () => {
+      // Invalidate the workspaces cache so the list refreshes
+      queryClient.invalidateQueries({ queryKey: ['workspaces'] })
       navigate('/')
     },
     onError: (err: any) => {
