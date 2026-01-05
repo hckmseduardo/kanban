@@ -36,6 +36,7 @@ CERT_MODE = os.getenv("CERT_MODE", "development")
 HOST_IP = os.getenv("HOST_IP", "127.0.1")
 HOST_PROJECT_PATH = os.getenv("HOST_PROJECT_PATH", "/Volumes/dados/projects/kanban")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+ENTRA_CIAM_AUTHORITY = os.getenv("ENTRA_CIAM_AUTHORITY", "")
 
 TEAMS_DIR = Path("/app/data/teams")
 # Use HOST_PROJECT_PATH for workspaces so docker compose build contexts resolve correctly
@@ -1527,6 +1528,15 @@ class Orchestrator:
         sandbox_slug = payload["sandbox_slug"]
         full_slug = payload["full_slug"]
         source_branch = payload.get("source_branch", "main")
+
+        # Map azure_* credentials from portal to entra_* for templates
+        # Portal stores as azure_*, templates expect entra_*
+        if payload.get("azure_tenant_id") and not payload.get("entra_tenant_id"):
+            payload["entra_tenant_id"] = payload["azure_tenant_id"]
+            payload["entra_client_id"] = payload.get("azure_app_id", "")
+            payload["entra_client_secret"] = payload.get("azure_client_secret", "")
+            # Use CIAM authority from environment
+            payload["entra_authority"] = ENTRA_CIAM_AUTHORITY
 
         self._current_payload = payload
 
