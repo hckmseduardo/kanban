@@ -149,3 +149,105 @@ export const portalApiTokensApi = {
   delete: (tokenId: string) =>
     api.delete(`portal/tokens/${tokenId}`),
 }
+
+// Workspace Types
+export interface AppTemplate {
+  id: string
+  slug: string
+  name: string
+  description: string
+  github_template_owner: string
+  github_template_repo: string
+  active: boolean
+  created_at: string
+}
+
+export interface Workspace {
+  id: string
+  slug: string
+  name: string
+  description: string | null
+  owner_id: string
+  kanban_team_id: string | null
+  kanban_subdomain: string
+  app_template_id: string | null
+  app_template_slug: string | null
+  github_repo_url: string | null
+  github_repo_name: string | null
+  app_subdomain: string | null
+  app_database_name: string | null
+  status: 'provisioning' | 'active' | 'suspended' | 'deleted'
+  created_at: string
+  provisioned_at: string | null
+}
+
+export interface CreateWorkspaceRequest {
+  name: string
+  slug: string
+  description?: string
+  app_template_slug?: string
+  github_org?: string
+}
+
+export interface Sandbox {
+  id: string
+  workspace_id: string
+  slug: string
+  full_slug: string
+  name: string
+  description: string | null
+  owner_id: string
+  git_branch: string
+  source_branch: string
+  subdomain: string
+  database_name: string
+  agent_container_name: string
+  agent_webhook_url: string
+  agent_webhook_secret: string | null
+  status: 'provisioning' | 'active' | 'deleted'
+  created_at: string
+  provisioned_at: string | null
+}
+
+export interface CreateSandboxRequest {
+  name: string
+  slug: string
+  description?: string
+  source_branch?: string
+}
+
+// App Templates API
+export const appTemplatesApi = {
+  list: () => api.get<{ templates: AppTemplate[]; total: number }>('/app-templates'),
+  get: (slug: string) => api.get<AppTemplate>(`/app-templates/${slug}`),
+}
+
+// Workspaces API
+export const workspacesApi = {
+  list: () => api.get<{ workspaces: Workspace[]; total: number }>('/workspaces'),
+  get: (slug: string) => api.get<Workspace>(`/workspaces/${slug}`),
+  create: (data: CreateWorkspaceRequest) =>
+    api.post<{ message: string; workspace: Workspace; task_id: string }>('/workspaces', data),
+  delete: (slug: string) =>
+    api.delete<{ message: string; task_id: string }>(`/workspaces/${slug}`),
+  getStatus: (slug: string) => api.get(`/workspaces/${slug}/status`),
+}
+
+// Sandboxes API
+export const sandboxesApi = {
+  list: (workspaceSlug: string) =>
+    api.get<{ sandboxes: Sandbox[]; total: number }>(`/workspaces/${workspaceSlug}/sandboxes`),
+  get: (workspaceSlug: string, sandboxSlug: string) =>
+    api.get<Sandbox>(`/workspaces/${workspaceSlug}/sandboxes/${sandboxSlug}`),
+  create: (workspaceSlug: string, data: CreateSandboxRequest) =>
+    api.post<{ message: string; sandbox: Sandbox; task_id: string }>(
+      `/workspaces/${workspaceSlug}/sandboxes`,
+      data
+    ),
+  delete: (workspaceSlug: string, sandboxSlug: string) =>
+    api.delete<{ message: string; task_id: string }>(
+      `/workspaces/${workspaceSlug}/sandboxes/${sandboxSlug}`
+    ),
+  restartAgent: (workspaceSlug: string, sandboxSlug: string) =>
+    api.post(`/workspaces/${workspaceSlug}/sandboxes/${sandboxSlug}/agent/restart`),
+}

@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     test_user_email: Optional[str] = None
     test_user_password: Optional[str] = None
 
+    # GitHub (for App Factory)
+    github_token: Optional[str] = None
+    github_default_org: str = "amazing-ai-tools"
+    github_template_repo: str = "basic-app"
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
@@ -78,6 +83,8 @@ class KeyVaultService:
         # Test credentials for integration testing
         "test-user-email": "test_user_email",
         "test-user-password": "test_user_password",
+        # GitHub for App Factory
+        "github-token": "github_token",
     }
 
     def __init__(self, vault_url: str):

@@ -59,8 +59,10 @@ class TaskWorker:
                 sig, lambda: asyncio.create_task(self.stop())
             )
 
-        # Start pubsub listener for team status updates
+        # Start pubsub listeners for status updates from orchestrator
         asyncio.create_task(self.listen_team_status())
+        asyncio.create_task(self.listen_workspace_status())
+        asyncio.create_task(self.listen_sandbox_status())
 
         logger.info(f"Worker listening on queues: {self.QUEUES}")
 
@@ -162,6 +164,173 @@ class TaskWorker:
                         pass
 
         logger.info("Team status listener stopped")
+
+    async def listen_workspace_status(self):
+        """Listen for workspace status updates from orchestrator."""
+        logger.info("Starting workspace status listener on channel: workspace:status")
+
+        while self.running:
+            pubsub_client = None
+            pubsub = None
+
+            try:
+                pubsub_client = redis.from_url(
+                    settings.redis_url,
+                    encoding="utf-8",
+                    decode_responses=True
+                )
+                pubsub = pubsub_client.pubsub()
+                await pubsub.subscribe("workspace:status")
+                logger.info("Workspace status listener connected to Redis")
+
+                while self.running:
+                    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                    if message and message["type"] == "message":
+                        try:
+                            data = json.loads(message["data"])
+                            workspace_id = data.get("workspace_id")
+                            workspace_slug = data.get("workspace_slug")
+                            status = data.get("status")
+                            kanban_team_id = data.get("kanban_team_id")
+
+                            # If we don't have workspace_id but have workspace_slug, look it up
+                            if not workspace_id and workspace_slug:
+                                workspace = db_service.get_workspace_by_slug(workspace_slug)
+                                if workspace:
+                                    workspace_id = workspace["id"]
+                                else:
+                                    logger.warning(f"Workspace {workspace_slug} not found in database")
+                                    continue
+
+                            if workspace_id and status:
+                                logger.info(f"Updating workspace {workspace_slug} status to: {status}")
+                                updates = {"status": status}
+                                if kanban_team_id:
+                                    updates["kanban_team_id"] = kanban_team_id
+                                # Include GitHub info if provided (for app workspaces)
+                                if data.get("github_repo_name"):
+                                    updates["github_repo_name"] = data["github_repo_name"]
+                                if data.get("github_repo_url"):
+                                    updates["github_repo_url"] = data["github_repo_url"]
+                                # Include Azure AD credentials if provided (for app workspaces)
+                                logger.info(f"Workspace status data keys: {list(data.keys())}")
+                                if data.get("azure_app_id"):
+                                    logger.info(f"Including Azure credentials for workspace {workspace_slug}")
+                                    updates["azure_app_id"] = data["azure_app_id"]
+                                    updates["azure_object_id"] = data["azure_object_id"]
+                                    updates["azure_client_secret"] = data["azure_client_secret"]
+                                    updates["azure_tenant_id"] = data["azure_tenant_id"]
+                                if status == "active":
+                                    from datetime import datetime, timezone
+                                    updates["provisioned_at"] = datetime.now(timezone.utc).isoformat()
+
+                                if status == "deleted":
+                                    db_service.delete_workspace(workspace_id)
+                                    logger.info(f"Workspace {workspace_slug} removed from database")
+                                else:
+                                    db_service.update_workspace(workspace_id, updates)
+                                    logger.info(f"Workspace {workspace_slug} status updated to {status}")
+
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Invalid JSON in workspace:status message: {e}")
+                        except Exception as e:
+                            logger.error(f"Error updating workspace status: {e}")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Workspace status listener error: {e}, reconnecting in 5s...")
+                await asyncio.sleep(5)
+            finally:
+                if pubsub:
+                    try:
+                        await pubsub.unsubscribe("workspace:status")
+                    except Exception:
+                        pass
+                if pubsub_client:
+                    try:
+                        await pubsub_client.aclose()
+                    except Exception:
+                        pass
+
+        logger.info("Workspace status listener stopped")
+
+    async def listen_sandbox_status(self):
+        """Listen for sandbox status updates from orchestrator."""
+        logger.info("Starting sandbox status listener on channel: sandbox:status")
+
+        while self.running:
+            pubsub_client = None
+            pubsub = None
+
+            try:
+                pubsub_client = redis.from_url(
+                    settings.redis_url,
+                    encoding="utf-8",
+                    decode_responses=True
+                )
+                pubsub = pubsub_client.pubsub()
+                await pubsub.subscribe("sandbox:status")
+                logger.info("Sandbox status listener connected to Redis")
+
+                while self.running:
+                    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                    if message and message["type"] == "message":
+                        try:
+                            data = json.loads(message["data"])
+                            sandbox_id = data.get("sandbox_id")
+                            full_slug = data.get("full_slug")
+                            status = data.get("status")
+                            agent_webhook_secret = data.get("agent_webhook_secret")
+
+                            # Look up sandbox if needed
+                            if not sandbox_id and full_slug:
+                                sandbox = db_service.get_sandbox_by_full_slug(full_slug)
+                                if sandbox:
+                                    sandbox_id = sandbox["id"]
+                                else:
+                                    logger.warning(f"Sandbox {full_slug} not found in database")
+                                    continue
+
+                            if sandbox_id and status:
+                                logger.info(f"Updating sandbox {full_slug} status to: {status}")
+                                updates = {"status": status}
+                                if agent_webhook_secret:
+                                    updates["agent_webhook_secret"] = agent_webhook_secret
+                                if status == "active":
+                                    from datetime import datetime, timezone
+                                    updates["provisioned_at"] = datetime.now(timezone.utc).isoformat()
+
+                                if status == "deleted":
+                                    db_service.delete_sandbox(sandbox_id)
+                                    logger.info(f"Sandbox {full_slug} removed from database")
+                                else:
+                                    db_service.update_sandbox(sandbox_id, updates)
+                                    logger.info(f"Sandbox {full_slug} status updated to {status}")
+
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Invalid JSON in sandbox:status message: {e}")
+                        except Exception as e:
+                            logger.error(f"Error updating sandbox status: {e}")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Sandbox status listener error: {e}, reconnecting in 5s...")
+                await asyncio.sleep(5)
+            finally:
+                if pubsub:
+                    try:
+                        await pubsub.unsubscribe("sandbox:status")
+                    except Exception:
+                        pass
+                if pubsub_client:
+                    try:
+                        await pubsub_client.aclose()
+                    except Exception:
+                        pass
+
+        logger.info("Sandbox status listener stopped")
 
     async def process_task(self, task_id: str):
         """Process a single task"""

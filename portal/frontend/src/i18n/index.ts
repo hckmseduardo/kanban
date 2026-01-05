@@ -6,31 +6,37 @@ import LanguageDetector from 'i18next-browser-languagedetector'
 import enCommon from './locales/en/common.json'
 import enAuth from './locales/en/auth.json'
 import enTeams from './locales/en/teams.json'
+import enWorkspaces from './locales/en/workspaces.json'
 
 // Import French (Quebec) translations
 import frCACommon from './locales/fr-CA/common.json'
 import frCAAuth from './locales/fr-CA/auth.json'
 import frCATeams from './locales/fr-CA/teams.json'
+import frCAWorkspaces from './locales/fr-CA/workspaces.json'
 
 // Import Portuguese translations
 import ptCommon from './locales/pt/common.json'
 import ptAuth from './locales/pt/auth.json'
 import ptTeams from './locales/pt/teams.json'
+import ptWorkspaces from './locales/pt/workspaces.json'
 
 // Import Spanish translations
 import esCommon from './locales/es/common.json'
 import esAuth from './locales/es/auth.json'
 import esTeams from './locales/es/teams.json'
+import esWorkspaces from './locales/es/workspaces.json'
 
 // Import Chinese translations
 import zhCommon from './locales/zh/common.json'
 import zhAuth from './locales/zh/auth.json'
 import zhTeams from './locales/zh/teams.json'
+import zhWorkspaces from './locales/zh/workspaces.json'
 
 // Import Arabic translations
 import arCommon from './locales/ar/common.json'
 import arAuth from './locales/ar/auth.json'
 import arTeams from './locales/ar/teams.json'
+import arWorkspaces from './locales/ar/workspaces.json'
 
 export const supportedLanguages = [
   { code: 'en', name: 'English', flag: '🇺🇸' },
@@ -60,16 +66,16 @@ i18n
   .use(initReactI18next)
   .init({
     resources: {
-      en: { common: enCommon, auth: enAuth, teams: enTeams },
-      'fr-CA': { common: frCACommon, auth: frCAAuth, teams: frCATeams },
-      pt: { common: ptCommon, auth: ptAuth, teams: ptTeams },
-      es: { common: esCommon, auth: esAuth, teams: esTeams },
-      zh: { common: zhCommon, auth: zhAuth, teams: zhTeams },
-      ar: { common: arCommon, auth: arAuth, teams: arTeams }
+      en: { common: enCommon, auth: enAuth, teams: enTeams, workspaces: enWorkspaces },
+      'fr-CA': { common: frCACommon, auth: frCAAuth, teams: frCATeams, workspaces: frCAWorkspaces },
+      pt: { common: ptCommon, auth: ptAuth, teams: ptTeams, workspaces: ptWorkspaces },
+      es: { common: esCommon, auth: esAuth, teams: esTeams, workspaces: esWorkspaces },
+      zh: { common: zhCommon, auth: zhAuth, teams: zhTeams, workspaces: zhWorkspaces },
+      ar: { common: arCommon, auth: arAuth, teams: arTeams, workspaces: arWorkspaces }
     },
     fallbackLng: 'en',
     supportedLngs: ['en', 'fr-CA', 'pt', 'es', 'zh', 'ar'],
-    ns: ['common', 'auth', 'teams'],
+    ns: ['common', 'auth', 'teams', 'workspaces'],
     defaultNS: 'common',
     detection: {
       order: ['cookie', 'navigator'],

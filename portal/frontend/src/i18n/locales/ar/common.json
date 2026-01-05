@@ -1,6 +1,8 @@
 {
   "nav": {
+    "workspaces": "مساحات العمل",
     "taskManager": "مدير المهام",
+    "settings": "الإعدادات",
     "logout": "تسجيل الخروج"
   },
   "buttons": {

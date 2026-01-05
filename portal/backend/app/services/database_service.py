@@ -83,6 +83,24 @@ class DatabaseService:
         self._ensure_db()
         return self.db.table("portal_api_tokens")
 
+    @property
+    def app_templates(self):
+        """App templates table (registry of available app templates)"""
+        self._ensure_db()
+        return self.db.table("app_templates")
+
+    @property
+    def workspaces(self):
+        """Workspaces table (kanban team + optional app)"""
+        self._ensure_db()
+        return self.db.table("workspaces")
+
+    @property
+    def sandboxes(self):
+        """Sandboxes table (isolated development environments for workspace apps)"""
+        self._ensure_db()
+        return self.db.table("sandboxes")
+
     # =========================================================================
     # User Operations
     # =========================================================================
@@ -436,6 +454,207 @@ class DatabaseService:
         if result:
             logger.info(f"Portal API token deleted: {token_id}")
         return bool(result)
+
+    # =========================================================================
+    # App Template Operations
+    # =========================================================================
+
+    def get_app_template_by_id(self, template_id: str) -> Optional[dict]:
+        """Get app template by ID"""
+        Template = Query()
+        result = self.app_templates.search(Template.id == template_id)
+        return result[0] if result else None
+
+    def get_app_template_by_slug(self, slug: str) -> Optional[dict]:
+        """Get app template by slug"""
+        Template = Query()
+        result = self.app_templates.search(Template.slug == slug.lower())
+        return result[0] if result else None
+
+    def list_app_templates(self, active_only: bool = True) -> List[dict]:
+        """List all app templates"""
+        if active_only:
+            Template = Query()
+            return self.app_templates.search(Template.active == True)
+        return self.app_templates.all()
+
+    def create_app_template(self, template_data: dict) -> dict:
+        """Create a new app template"""
+        import uuid
+        template_data["id"] = str(uuid.uuid4())
+        template_data["slug"] = template_data["slug"].lower()
+        template_data["created_at"] = datetime.utcnow().isoformat()
+        template_data["active"] = template_data.get("active", True)
+        self.app_templates.insert(template_data)
+        logger.info(f"App template created: {template_data['id']} ({template_data['slug']})")
+        return template_data
+
+    def update_app_template(self, template_id: str, updates: dict) -> Optional[dict]:
+        """Update app template"""
+        Template = Query()
+        updates["updated_at"] = datetime.utcnow().isoformat()
+        self.app_templates.update(updates, Template.id == template_id)
+        return self.get_app_template_by_id(template_id)
+
+    def delete_app_template(self, template_id: str) -> bool:
+        """Delete an app template"""
+        Template = Query()
+        result = self.app_templates.remove(Template.id == template_id)
+        if result:
+            logger.info(f"App template deleted: {template_id}")
+        return bool(result)
+
+    # =========================================================================
+    # Workspace Operations
+    # =========================================================================
+
+    def get_workspace_by_id(self, workspace_id: str) -> Optional[dict]:
+        """Get workspace by ID"""
+        Workspace = Query()
+        result = self.workspaces.search(Workspace.id == workspace_id)
+        return result[0] if result else None
+
+    def get_workspace_by_slug(self, slug: str) -> Optional[dict]:
+        """Get workspace by slug
+
+        Note: We refresh to pick up changes from worker process.
+        """
+        self.refresh()
+        Workspace = Query()
+        result = self.workspaces.search(Workspace.slug == slug.lower())
+        return result[0] if result else None
+
+    def get_user_workspaces(self, user_id: str) -> List[dict]:
+        """Get all workspaces for a user (as owner or member)
+
+        Note: We refresh the database here because workspaces can be modified
+        by the worker process running in a separate container.
+        """
+        self.refresh()
+        Workspace = Query()
+        # Get workspaces owned by user
+        owned = self.workspaces.search(Workspace.owner_id == user_id)
+
+        # Also check team memberships for shared workspaces
+        # For now, just return owned workspaces
+        # TODO: Add workspace membership support if needed
+
+        return owned
+
+    def create_workspace(self, workspace_data: dict) -> dict:
+        """Create a new workspace"""
+        import uuid
+        workspace_data["id"] = str(uuid.uuid4())
+        workspace_data["slug"] = workspace_data["slug"].lower()
+        workspace_data["created_at"] = datetime.utcnow().isoformat()
+        workspace_data["updated_at"] = workspace_data["created_at"]
+        workspace_data["status"] = "provisioning"
+        self.workspaces.insert(workspace_data)
+        logger.info(f"Workspace created: {workspace_data['id']} ({workspace_data['slug']})")
+        return workspace_data
+
+    def update_workspace(self, workspace_id: str, updates: dict) -> Optional[dict]:
+        """Update workspace"""
+        Workspace = Query()
+        updates["updated_at"] = datetime.utcnow().isoformat()
+        self.workspaces.update(updates, Workspace.id == workspace_id)
+        return self.get_workspace_by_id(workspace_id)
+
+    def delete_workspace(self, workspace_id: str):
+        """Delete workspace and related sandboxes"""
+        Workspace = Query()
+        Sandbox = Query()
+
+        # Delete all sandboxes for this workspace
+        self.sandboxes.remove(Sandbox.workspace_id == workspace_id)
+
+        # Delete the workspace
+        self.workspaces.remove(Workspace.id == workspace_id)
+        logger.info(f"Workspace deleted: {workspace_id}")
+
+    # =========================================================================
+    # Sandbox Operations
+    # =========================================================================
+
+    def get_sandbox_by_id(self, sandbox_id: str) -> Optional[dict]:
+        """Get sandbox by ID"""
+        Sandbox = Query()
+        result = self.sandboxes.search(Sandbox.id == sandbox_id)
+        return result[0] if result else None
+
+    def get_sandbox_by_full_slug(self, full_slug: str) -> Optional[dict]:
+        """Get sandbox by full slug ({workspace_slug}-{sandbox_slug})"""
+        self.refresh()
+        Sandbox = Query()
+        result = self.sandboxes.search(Sandbox.full_slug == full_slug.lower())
+        return result[0] if result else None
+
+    def get_sandbox_by_workspace_and_slug(
+        self,
+        workspace_id: str,
+        sandbox_slug: str
+    ) -> Optional[dict]:
+        """Get sandbox by workspace ID and sandbox slug"""
+        self.refresh()
+        Sandbox = Query()
+        result = self.sandboxes.search(
+            (Sandbox.workspace_id == workspace_id) &
+            (Sandbox.slug == sandbox_slug.lower())
+        )
+        return result[0] if result else None
+
+    def get_sandboxes_by_workspace(self, workspace_id: str) -> List[dict]:
+        """Get all sandboxes for a workspace"""
+        self.refresh()
+        Sandbox = Query()
+        return self.sandboxes.search(Sandbox.workspace_id == workspace_id)
+
+    def create_sandbox(self, sandbox_data: dict) -> dict:
+        """Create a new sandbox"""
+        import uuid
+        import secrets
+
+        sandbox_data["id"] = str(uuid.uuid4())
+        sandbox_data["slug"] = sandbox_data["slug"].lower()
+        sandbox_data["full_slug"] = sandbox_data["full_slug"].lower()
+        sandbox_data["created_at"] = datetime.utcnow().isoformat()
+        sandbox_data["updated_at"] = sandbox_data["created_at"]
+        sandbox_data["status"] = "provisioning"
+
+        # Generate unique webhook secret for agent
+        sandbox_data["agent_webhook_secret"] = secrets.token_urlsafe(32)
+
+        self.sandboxes.insert(sandbox_data)
+        logger.info(f"Sandbox created: {sandbox_data['id']} ({sandbox_data['full_slug']})")
+        return sandbox_data
+
+    def update_sandbox(self, sandbox_id: str, updates: dict) -> Optional[dict]:
+        """Update sandbox"""
+        Sandbox = Query()
+        updates["updated_at"] = datetime.utcnow().isoformat()
+        self.sandboxes.update(updates, Sandbox.id == sandbox_id)
+        return self.get_sandbox_by_id(sandbox_id)
+
+    def regenerate_sandbox_webhook_secret(self, sandbox_id: str) -> Optional[str]:
+        """Regenerate webhook secret for a sandbox agent"""
+        import secrets
+        new_secret = secrets.token_urlsafe(32)
+        Sandbox = Query()
+        self.sandboxes.update(
+            {
+                "agent_webhook_secret": new_secret,
+                "updated_at": datetime.utcnow().isoformat()
+            },
+            Sandbox.id == sandbox_id
+        )
+        logger.info(f"Sandbox webhook secret regenerated: {sandbox_id}")
+        return new_secret
+
+    def delete_sandbox(self, sandbox_id: str):
+        """Delete a sandbox"""
+        Sandbox = Query()
+        self.sandboxes.remove(Sandbox.id == sandbox_id)
+        logger.info(f"Sandbox deleted: {sandbox_id}")
 
 
 # Singleton instance

@@ -1,6 +1,8 @@
 {
   "nav": {
+    "workspaces": "Espaços de Trabalho",
     "taskManager": "Gerenciador de Tarefas",
+    "settings": "Configurações",
     "logout": "Sair"
   },
   "buttons": {

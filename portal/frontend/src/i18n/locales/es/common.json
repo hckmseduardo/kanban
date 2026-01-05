@@ -1,7 +1,9 @@
 {
   "nav": {
+    "workspaces": "Espacios de Trabajo",
     "taskManager": "Gestor de Tareas",
-    "logout": "Cerrar sesion"
+    "settings": "Configuración",
+    "logout": "Cerrar sesión"
   },
   "buttons": {
     "save": "Guardar",

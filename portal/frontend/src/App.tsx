@@ -9,6 +9,9 @@ import TeamDetailPage from './pages/TeamDetailPage'
 import TeamStartingPage from './pages/TeamStartingPage'
 import TasksPage from './pages/TasksPage'
 import SettingsPage from './pages/SettingsPage'
+import WorkspacesPage from './pages/WorkspacesPage'
+import CreateWorkspacePage from './pages/CreateWorkspacePage'
+import WorkspaceDetailPage from './pages/WorkspaceDetailPage'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuthStore()
@@ -57,10 +60,10 @@ function App() {
           </ProtectedRoute>
         }
       >
-        <Route index element={<DashboardPage />} />
-        <Route path="teams/new" element={<CreateTeamPage />} />
-        <Route path="teams/:slug" element={<TeamDetailPage />} />
-        <Route path="teams/:slug/starting" element={<TeamStartingPage />} />
+        <Route index element={<WorkspacesPage />} />
+        <Route path="workspaces" element={<Navigate to="/" replace />} />
+        <Route path="workspaces/new" element={<CreateWorkspacePage />} />
+        <Route path="workspaces/:slug" element={<WorkspaceDetailPage />} />
         <Route path="tasks" element={<TasksPage />} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>

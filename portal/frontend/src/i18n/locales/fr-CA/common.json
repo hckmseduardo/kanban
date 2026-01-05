@@ -1,7 +1,9 @@
 {
   "nav": {
-    "taskManager": "Gestionnaire de taches",
-    "logout": "Deconnexion"
+    "workspaces": "Espaces de travail",
+    "taskManager": "Gestionnaire de tâches",
+    "settings": "Paramètres",
+    "logout": "Déconnexion"
   },
   "buttons": {
     "save": "Enregistrer",

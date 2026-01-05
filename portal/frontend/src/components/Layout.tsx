@@ -42,6 +42,26 @@ export default function Layout() {
         showToast('success', `Team "${teamSlug}" deleted successfully!`)
       }
 
+      // Workspace/Sandbox actions
+      const workspaceSlug = (result as any)?.workspace_slug
+      const sandboxSlug = (result as any)?.sandbox_slug
+
+      if (action === 'create_workspace') {
+        showToast('success', `Workspace "${workspaceSlug}" created successfully!`)
+        queryClient.invalidateQueries({ queryKey: ['workspaces'] })
+      } else if (action === 'delete_workspace') {
+        showToast('success', `Workspace "${workspaceSlug}" deleted successfully!`)
+        queryClient.invalidateQueries({ queryKey: ['workspaces'] })
+      } else if (action === 'create_sandbox') {
+        showToast('success', `Sandbox "${sandboxSlug}" created successfully!`)
+        queryClient.invalidateQueries({ queryKey: ['workspaces'] })
+        queryClient.invalidateQueries({ queryKey: ['sandboxes'] })
+      } else if (action === 'delete_sandbox') {
+        showToast('success', `Sandbox "${sandboxSlug}" deleted successfully!`)
+        queryClient.invalidateQueries({ queryKey: ['workspaces'] })
+        queryClient.invalidateQueries({ queryKey: ['sandboxes'] })
+      }
+
       // Refresh teams lists
       queryClient.invalidateQueries({ queryKey: ['user-teams'] })
       queryClient.invalidateQueries({ queryKey: ['teams'] })
@@ -107,6 +127,13 @@ export default function Layout() {
                         <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{user?.display_name}</p>
                         <p className="text-xs text-gray-500 dark:text-gray-400 truncate">{user?.email}</p>
                       </div>
+                      <Link
+                        to="/"
+                        className="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-dark-700"
+                        onClick={() => setIsUserMenuOpen(false)}
+                      >
+                        {t('nav.workspaces', 'Workspaces')}
+                      </Link>
                       <Link
                         to="/tasks"
                         className="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-dark-700"

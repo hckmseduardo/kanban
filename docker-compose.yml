@@ -192,9 +192,17 @@ services:
       - SMTP_PASSWORD=${SMTP_PASSWORD:-}
       - EMAIL_FROM_EMAIL=${EMAIL_FROM_EMAIL:-}
       - EMAIL_FROM_NAME=${EMAIL_FROM_NAME:-Kanban}
+      # GitHub integration for App Factory
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # Azure AD integration for App Factory (separate from Key Vault creds)
+      - AZURE_APP_FACTORY_TENANT_ID=${AZURE_APP_FACTORY_TENANT_ID:-}
+      - AZURE_APP_FACTORY_CLIENT_ID=${AZURE_APP_FACTORY_CLIENT_ID:-}
+      - AZURE_APP_FACTORY_CLIENT_SECRET=${AZURE_APP_FACTORY_CLIENT_SECRET:-}
     volumes:
       - ./orchestrator/app:/app/app
       - ./data/teams:/app/data/teams
+      # Mount workspaces at the HOST_PROJECT_PATH so docker compose build contexts resolve correctly
+      - ${HOST_PROJECT_PATH}/data/workspaces:${HOST_PROJECT_PATH}/data/workspaces
       - ./kanban-team:/app/kanban-team:ro
       - ./traefik/certs:/app/certs
       - ./traefik/dynamic:/app/traefik-dynamic

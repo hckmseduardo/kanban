@@ -1,6 +1,8 @@
 {
   "nav": {
+    "workspaces": "Workspaces",
     "taskManager": "Task Manager",
+    "settings": "Settings",
     "logout": "Logout"
   },
   "buttons": {
