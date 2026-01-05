@@ -1268,6 +1268,25 @@ class Orchestrator:
                 check=False
             )
 
+            # Clean up postgres data on the HOST to prevent password mismatch issues
+            # We use docker run with alpine to access the host path directly, avoiding
+            # mount propagation issues where the orchestrator can't see directories
+            # created by other containers
+            postgres_host_path = f"{workspace_data_path}/postgres"
+            cleanup_result = subprocess.run(
+                [
+                    "docker", "run", "--rm",
+                    "-v", f"{workspace_data_path}:{workspace_data_path}",
+                    "alpine:latest",
+                    "sh", "-c", f"rm -rf {postgres_host_path} && echo 'Postgres data cleaned'"
+                ],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if cleanup_result.returncode == 0 and "cleaned" in cleanup_result.stdout:
+                logger.info(f"[{workspace_slug}] Cleaned up existing postgres data on host")
+
             # Build and start the stack
             logger.info(f"[{workspace_slug}] Building and starting app containers...")
             result = subprocess.run(
@@ -1752,12 +1771,24 @@ class Orchestrator:
             pass
 
     async def _sandbox_create_directory(self, full_slug: str, sandbox_id: str):
-        """Create sandbox directory structure"""
+        """Create sandbox directory structure."""
+        # Sandbox data is stored at {HOST_PROJECT_PATH}/data/sandboxes/{full_slug}
+        sandbox_data_path = Path(f"{HOST_PROJECT_PATH}/data/sandboxes/{full_slug}")
+
+        # Note: Postgres data cleanup is now done in _sandbox_deploy_containers
+        # using docker run to avoid mount propagation issues
+
+        # Create directory structure
+        (sandbox_data_path / "uploads").mkdir(parents=True, exist_ok=True)
+        (sandbox_data_path / "redis").mkdir(parents=True, exist_ok=True)
+
+        # Also create the old directory structure for backwards compatibility
         sandbox_dir = TEAMS_DIR / full_slug
         (sandbox_dir / "db").mkdir(parents=True, exist_ok=True)
         (sandbox_dir / "app").mkdir(parents=True, exist_ok=True)
         (sandbox_dir / "logs").mkdir(parents=True, exist_ok=True)
-        logger.info(f"[{full_slug}] Directory structure created")
+
+        logger.info(f"[{full_slug}] Directory structure created at {sandbox_data_path}")
 
     async def _sandbox_deploy_containers(self, full_slug: str, sandbox_id: str):
         """Deploy sandbox containers using the sandbox-compose template"""
@@ -1835,6 +1866,25 @@ class Orchestrator:
                 text=True,
                 check=False
             )
+
+            # Clean up postgres data on the HOST to prevent password mismatch issues
+            # We use docker run with alpine to access the host path directly, avoiding
+            # mount propagation issues where the orchestrator can't see directories
+            # created by other containers
+            postgres_host_path = f"{sandbox_data_path}/postgres"
+            cleanup_result = subprocess.run(
+                [
+                    "docker", "run", "--rm",
+                    "-v", f"{sandbox_data_path}:{sandbox_data_path}",
+                    "alpine:latest",
+                    "sh", "-c", f"rm -rf {postgres_host_path} && echo 'Postgres data cleaned'"
+                ],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if cleanup_result.returncode == 0 and "cleaned" in cleanup_result.stdout:
+                logger.info(f"[{full_slug}] Cleaned up existing postgres data on host")
 
             # Start the stack
             result = subprocess.run(
@@ -2099,16 +2149,35 @@ class Orchestrator:
             logger.warning(f"[{full_slug}] Failed to remove Azure redirect URI (non-fatal): {e}")
 
     async def _sandbox_archive_data(self, full_slug: str, sandbox_id: str):
-        """Archive sandbox data"""
-        sandbox_dir = TEAMS_DIR / full_slug
-        archive_dir = TEAMS_DIR / ".archived" / "sandboxes"
+        """Archive sandbox data directory before deletion.
 
-        if sandbox_dir.exists():
+        This includes postgres data, redis data, uploads, etc.
+        Archiving prevents orphaned data from causing password mismatch issues if the sandbox is recreated.
+        """
+        # Sandbox data is stored at {HOST_PROJECT_PATH}/data/sandboxes/{full_slug}
+        sandbox_dir = Path(f"{HOST_PROJECT_PATH}/data/sandboxes/{full_slug}")
+        archive_dir = Path(f"{HOST_PROJECT_PATH}/data/sandboxes/.archived")
+
+        if not sandbox_dir.exists():
+            logger.info(f"[{full_slug}] Sandbox data directory not found, nothing to archive")
+            return
+
+        try:
             archive_dir.mkdir(parents=True, exist_ok=True)
             archived_name = f"{full_slug}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             archived_path = archive_dir / archived_name
+
             shutil.move(str(sandbox_dir), str(archived_path))
-            logger.info(f"[{full_slug}] Data archived to {archived_path}")
+            logger.info(f"[{full_slug}] Sandbox data archived to {archived_path}")
+        except Exception as e:
+            logger.error(f"[{full_slug}] Failed to archive sandbox data: {e}")
+            # Try to delete instead if move fails
+            try:
+                shutil.rmtree(str(sandbox_dir))
+                logger.info(f"[{full_slug}] Sandbox data deleted (archive failed)")
+            except Exception as e2:
+                logger.error(f"[{full_slug}] Failed to delete sandbox data: {e2}")
+                # Don't raise - continue with deletion
 
     async def restart_sandbox_agent(self, task: dict):
         """Restart a sandbox agent"""
