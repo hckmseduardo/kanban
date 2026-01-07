@@ -139,7 +139,7 @@ export default function WorkspacesPage() {
                   {getStatusLabel(workspace.status)}
                 </span>
                 <div className="flex items-center gap-2">
-                  {workspace.owner_id === user?.id && workspace.status !== 'deleted' && (
+                  {workspace.user_role === 'owner' && workspace.status !== 'deleted' && (
                     <button
                       onClick={(e) => {
                         e.preventDefault()

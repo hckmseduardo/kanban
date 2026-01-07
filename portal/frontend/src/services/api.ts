@@ -45,7 +45,12 @@ api.interceptors.response.use(
       }
       console.error('[API] Redirecting to login')
       localStorage.removeItem('token')
-      window.location.href = '/login'
+      // Preserve current URL as returnTo so user returns here after login
+      const currentPath = window.location.pathname + window.location.search
+      const loginUrl = currentPath && currentPath !== '/' && currentPath !== '/login'
+        ? `/login?returnTo=${encodeURIComponent(currentPath)}`
+        : '/login'
+      window.location.href = loginUrl
     }
     return Promise.reject(error)
   }
@@ -167,7 +172,7 @@ export interface Workspace {
   slug: string
   name: string
   description: string | null
-  owner_id: string
+  user_role: 'owner' | 'admin' | 'member' | 'viewer' | null
   kanban_team_id: string | null
   kanban_subdomain: string
   app_template_id: string | null
@@ -216,6 +221,47 @@ export interface CreateSandboxRequest {
   source_branch?: string
 }
 
+// Workspace Member Types
+export interface WorkspaceMember {
+  user_id: string
+  email: string
+  name: string | null
+  role: 'owner' | 'admin' | 'member' | 'viewer'
+  joined_at: string | null
+}
+
+export interface InviteMemberRequest {
+  email: string
+  role: 'admin' | 'member' | 'viewer'
+}
+
+export interface UpdateWorkspaceMemberRequest {
+  role: 'admin' | 'member' | 'viewer'
+}
+
+// Workspace Invitation Types
+export interface WorkspaceInvitation {
+  id: string
+  workspace_id: string
+  email: string
+  role: 'admin' | 'member' | 'viewer'
+  status: 'pending' | 'accepted' | 'cancelled' | 'expired'
+  invite_url: string
+  invited_by: string
+  created_at: string
+  expires_at: string
+}
+
+export interface InvitationInfo {
+  workspace_name: string
+  workspace_slug: string
+  email: string
+  role: string
+  status: string
+  invited_by: string
+  expires_at: string
+}
+
 // App Templates API
 export const appTemplatesApi = {
   list: () => api.get<{ templates: AppTemplate[]; total: number }>('/app-templates'),
@@ -231,6 +277,35 @@ export const workspacesApi = {
   delete: (slug: string) =>
     api.delete<{ message: string; task_id: string }>(`/workspaces/${slug}`),
   getStatus: (slug: string) => api.get(`/workspaces/${slug}/status`),
+  // Member management
+  getMembers: (slug: string) =>
+    api.get<{ members: WorkspaceMember[]; total: number }>(`/workspaces/${slug}/members`),
+  inviteMember: (slug: string, data: InviteMemberRequest) =>
+    api.post<WorkspaceInvitation>(`/workspaces/${slug}/members`, data),
+  updateMember: (slug: string, userId: string, data: UpdateWorkspaceMemberRequest) =>
+    api.patch<WorkspaceMember>(`/workspaces/${slug}/members/${userId}`, data),
+  removeMember: (slug: string, userId: string) =>
+    api.delete<{ message: string }>(`/workspaces/${slug}/members/${userId}`),
+  // Invitation management
+  getInvitations: (slug: string, status?: string) =>
+    api.get<{ invitations: WorkspaceInvitation[]; total: number }>(
+      `/workspaces/${slug}/invitations`,
+      { params: status ? { status } : undefined }
+    ),
+  cancelInvitation: (slug: string, invitationId: string) =>
+    api.delete<{ message: string }>(`/workspaces/${slug}/invitations/${invitationId}`),
+}
+
+// Invitation acceptance API (public routes)
+export const invitationsApi = {
+  getInfo: (token: string) =>
+    api.get<InvitationInfo>('/workspaces/invitations/info', { params: { token } }),
+  accept: (token: string) =>
+    api.post<{ message: string; workspace_slug: string; role?: string; already_member: boolean }>(
+      '/workspaces/invitations/accept',
+      null,
+      { params: { token } }
+    ),
 }
 
 // Sandboxes API

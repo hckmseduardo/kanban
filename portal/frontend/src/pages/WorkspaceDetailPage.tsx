@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { workspacesApi, sandboxesApi, teamsApi, Workspace, Sandbox, setNavigatingAway, authApi } from '../services/api'
+import { workspacesApi, sandboxesApi, Workspace, Sandbox, WorkspaceMember, WorkspaceInvitation, setNavigatingAway, authApi } from '../services/api'
 import { useAuthStore } from '../stores/authStore'
 
 export default function WorkspaceDetailPage() {
@@ -15,10 +15,22 @@ export default function WorkspaceDetailPage() {
   const [sandboxSlug, setSandboxSlug] = useState('')
   const [sandboxBranch, setSandboxBranch] = useState('main')
   const [createError, setCreateError] = useState('')
-  const [isStartingTeam, setIsStartingTeam] = useState(false)
 
   const [deleteConfirm, setDeleteConfirm] = useState<{ slug: string; name: string; type: 'workspace' | 'sandbox' } | null>(null)
   const [deleteInput, setDeleteInput] = useState('')
+
+  // Tab state
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'members'>('dashboard')
+
+  // Member management state
+  const [showInviteMember, setShowInviteMember] = useState(false)
+  const [newMemberEmail, setNewMemberEmail] = useState('')
+  const [newMemberRole, setNewMemberRole] = useState<'owner' | 'admin' | 'member' | 'viewer'>('member')
+  const [inviteError, setInviteError] = useState('')
+  const [inviteSuccess, setInviteSuccess] = useState<WorkspaceInvitation | null>(null)
+  const [removeMemberConfirm, setRemoveMemberConfirm] = useState<WorkspaceMember | null>(null)
+  const [cancelInviteConfirm, setCancelInviteConfirm] = useState<WorkspaceInvitation | null>(null)
+  const [editingMember, setEditingMember] = useState<string | null>(null)
 
   const { data: workspace, isLoading: workspaceLoading } = useQuery({
     queryKey: ['workspace', slug],
@@ -32,12 +44,26 @@ export default function WorkspaceDetailPage() {
     enabled: !!slug && !!workspace?.app_template_id,
   })
 
-  // Get team status to check if suspended
-  const { data: teamStatus, refetch: refetchTeamStatus } = useQuery({
-    queryKey: ['team-status', slug],
-    queryFn: () => teamsApi.getStatus(slug!).then(res => res.data),
-    enabled: !!slug && !!workspace?.kanban_team_id,
-    refetchInterval: isStartingTeam ? 2000 : false, // Poll while starting
+  // Get workspace members
+  const { data: membersData, isLoading: membersLoading } = useQuery({
+    queryKey: ['workspace-members', slug],
+    queryFn: () => workspacesApi.getMembers(slug!).then(res => res.data),
+    enabled: !!slug,
+  })
+
+  // Get pending invitations
+  const { data: invitationsData } = useQuery({
+    queryKey: ['workspace-invitations', slug],
+    queryFn: () => workspacesApi.getInvitations(slug!, 'pending').then(res => res.data),
+    enabled: !!slug,
+  })
+
+  // Get workspace status (for provisioning progress)
+  const { data: workspaceStatus } = useQuery({
+    queryKey: ['workspace-status', slug],
+    queryFn: () => workspacesApi.getStatus(slug!).then(res => res.data),
+    enabled: !!slug && workspace?.status === 'provisioning',
+    refetchInterval: workspace?.status === 'provisioning' ? 3000 : false,
   })
 
   const createSandboxMutation = useMutation({
@@ -69,6 +95,48 @@ export default function WorkspaceDetailPage() {
     mutationFn: () => workspacesApi.delete(slug!),
     onSuccess: () => {
       navigate('/workspaces')
+    }
+  })
+
+  // Member management mutations
+  const inviteMemberMutation = useMutation({
+    mutationFn: (data: { email: string; role: 'owner' | 'admin' | 'member' | 'viewer' }) =>
+      workspacesApi.inviteMember(slug!, data),
+    onSuccess: (response) => {
+      queryClient.invalidateQueries({ queryKey: ['workspace-invitations', slug] })
+      setInviteSuccess(response.data)
+      setNewMemberEmail('')
+      setNewMemberRole('member')
+      setInviteError('')
+    },
+    onError: (err: any) => {
+      setInviteError(err.response?.data?.detail || 'Failed to create invitation')
+    }
+  })
+
+  const cancelInviteMutation = useMutation({
+    mutationFn: (invitationId: string) =>
+      workspacesApi.cancelInvitation(slug!, invitationId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['workspace-invitations', slug] })
+      setCancelInviteConfirm(null)
+    }
+  })
+
+  const updateMemberMutation = useMutation({
+    mutationFn: ({ userId, role }: { userId: string; role: 'owner' | 'admin' | 'member' | 'viewer' }) =>
+      workspacesApi.updateMember(slug!, userId, { role }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['workspace-members', slug] })
+      setEditingMember(null)
+    }
+  })
+
+  const removeMemberMutation = useMutation({
+    mutationFn: (userId: string) => workspacesApi.removeMember(slug!, userId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['workspace-members', slug] })
+      setRemoveMemberConfirm(null)
     }
   })
 
@@ -105,33 +173,6 @@ export default function WorkspaceDetailPage() {
   const handleOpenKanban = async () => {
     if (!workspace || !user) return
 
-    // Check if team is suspended and needs to be started
-    if (teamStatus?.status === 'suspended') {
-      setIsStartingTeam(true)
-      try {
-        await teamsApi.start(workspace.slug)
-        // Poll for team to be running
-        const checkTeamReady = async (attempts = 0): Promise<boolean> => {
-          if (attempts > 30) return false // Max 60 seconds
-          const status = await teamsApi.getStatus(workspace.slug)
-          if (status.data.status === 'running') return true
-          await new Promise(resolve => setTimeout(resolve, 2000))
-          return checkTeamReady(attempts + 1)
-        }
-        const isReady = await checkTeamReady()
-        setIsStartingTeam(false)
-        if (!isReady) {
-          console.error('Team failed to start in time')
-          return
-        }
-        refetchTeamStatus()
-      } catch (err) {
-        console.error('Failed to start team:', err)
-        setIsStartingTeam(false)
-        return
-      }
-    }
-
     setNavigatingAway()
     try {
       const response = await authApi.getCrossDomainToken(workspace.slug, user.id)
@@ -151,6 +192,24 @@ export default function WorkspaceDetailPage() {
     }
     return colors[status] || 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300'
   }
+
+  const getRoleBadge = (role: string) => {
+    const colors: Record<string, string> = {
+      owner: 'bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400',
+      admin: 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400',
+      member: 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400',
+      viewer: 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300',
+    }
+    return colors[role] || 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300'
+  }
+
+  // Get current user's membership - ownership determined from members list (role='owner')
+  const members = membersData?.members || []
+  const pendingInvitations = invitationsData?.invitations || []
+  const currentUserMembership = members.find(m => m.user_id === user?.id)
+  const userRole = currentUserMembership?.role || null
+  const canManageMembers = userRole === 'owner' || userRole === 'admin'
+  const canCreateSandbox = userRole === 'owner' || userRole === 'admin'
 
   if (workspaceLoading) {
     return (
@@ -188,10 +247,15 @@ export default function WorkspaceDetailPage() {
             <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusBadge(workspace.status)}`}>
               {workspace.status}
             </span>
+            {userRole && (
+              <span className={`px-2 py-1 rounded-full text-xs font-medium ${getRoleBadge(userRole)}`}>
+                {userRole}
+              </span>
+            )}
           </div>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400 font-mono">{workspace.slug}</p>
         </div>
-        {workspace.owner_id === user?.id && (
+        {userRole === 'owner' && (
           <button
             onClick={() => setDeleteConfirm({ slug: workspace.slug, name: workspace.name, type: 'workspace' })}
             className="px-3 py-2 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg text-sm font-medium"
@@ -201,45 +265,70 @@ export default function WorkspaceDetailPage() {
         )}
       </div>
 
-      {/* Quick Links */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {/* Kanban Board */}
-        <button
-          onClick={handleOpenKanban}
-          disabled={isStartingTeam}
-          className="bg-white dark:bg-dark-800 rounded-xl shadow dark:shadow-dark-700/30 p-4 hover:shadow-lg transition-all flex items-center gap-4 disabled:opacity-75 disabled:cursor-wait"
-        >
-          <div className={`h-12 w-12 rounded-lg flex items-center justify-center ${
-            teamStatus?.status === 'suspended'
-              ? 'bg-yellow-100 dark:bg-yellow-900/30'
-              : 'bg-indigo-100 dark:bg-indigo-900/30'
-          }`}>
-            {isStartingTeam ? (
-              <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-indigo-600 dark:border-indigo-400"></div>
-            ) : (
-              <svg className={`w-6 h-6 ${
-                teamStatus?.status === 'suspended'
-                  ? 'text-yellow-600 dark:text-yellow-400'
-                  : 'text-indigo-600 dark:text-indigo-400'
-              }`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+      {/* Tab Navigation */}
+      <div className="border-b border-gray-200 dark:border-dark-700">
+        <nav className="-mb-px flex gap-6">
+          <button
+            onClick={() => setActiveTab('dashboard')}
+            className={`py-3 px-1 border-b-2 font-medium text-sm transition-colors ${
+              activeTab === 'dashboard'
+                ? 'border-primary-500 text-primary-600 dark:text-primary-400'
+                : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300 dark:hover:border-gray-600'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
               </svg>
-            )}
-          </div>
-          <div className="text-left">
-            <h3 className="font-semibold text-gray-900 dark:text-gray-100">Kanban Board</h3>
-            <p className="text-sm text-gray-500 dark:text-gray-400">
-              {isStartingTeam
-                ? 'Starting team containers...'
-                : teamStatus?.status === 'suspended'
-                  ? 'Click to start (suspended)'
-                  : workspace.kanban_subdomain.replace('https://', '')}
-            </p>
-          </div>
-          <svg className="w-5 h-5 text-gray-400 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-          </svg>
-        </button>
+              Dashboard
+            </div>
+          </button>
+          <button
+            onClick={() => setActiveTab('members')}
+            className={`py-3 px-1 border-b-2 font-medium text-sm transition-colors ${
+              activeTab === 'members'
+                ? 'border-primary-500 text-primary-600 dark:text-primary-400'
+                : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300 dark:hover:border-gray-600'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+              </svg>
+              Members
+              <span className="bg-gray-100 dark:bg-dark-700 text-gray-600 dark:text-gray-400 px-2 py-0.5 rounded-full text-xs">
+                {members.length}
+              </span>
+            </div>
+          </button>
+        </nav>
+      </div>
+
+      {/* Dashboard Tab Content */}
+      {activeTab === 'dashboard' && (
+        <>
+          {/* Quick Links */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {/* Kanban Board */}
+            <button
+              onClick={handleOpenKanban}
+              className="bg-white dark:bg-dark-800 rounded-xl shadow dark:shadow-dark-700/30 p-4 hover:shadow-lg transition-all flex items-center gap-4"
+            >
+              <div className="h-12 w-12 rounded-lg bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center">
+                <svg className="w-6 h-6 text-indigo-600 dark:text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                </svg>
+              </div>
+              <div className="text-left">
+                <h3 className="font-semibold text-gray-900 dark:text-gray-100">Kanban Board</h3>
+                <p className="text-sm text-gray-500 dark:text-gray-400">
+                  {workspace.kanban_subdomain.replace('https://', '')}
+                </p>
+              </div>
+              <svg className="w-5 h-5 text-gray-400 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+              </svg>
+            </button>
 
         {/* App (if exists) */}
         {workspace.app_subdomain && (
@@ -296,15 +385,17 @@ export default function WorkspaceDetailPage() {
               <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Sandboxes</h2>
               <p className="text-sm text-gray-500 dark:text-gray-400">Development environments with database clones</p>
             </div>
-            <button
-              onClick={() => setShowCreateSandbox(true)}
-              className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium flex items-center gap-2"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-              </svg>
-              New Sandbox
-            </button>
+            {canCreateSandbox && (
+              <button
+                onClick={() => setShowCreateSandbox(true)}
+                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium flex items-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                </svg>
+                New Sandbox
+              </button>
+            )}
           </div>
 
           {sandboxesLoading ? (
@@ -373,6 +464,414 @@ export default function WorkspaceDetailPage() {
               ))}
             </div>
           )}
+        </div>
+      )}
+        </>
+      )}
+
+      {/* Members Tab Content */}
+      {activeTab === 'members' && (
+        <>
+        {/* Pending Invitations Section */}
+        {pendingInvitations.length > 0 && (
+          <div className="bg-white dark:bg-dark-800 rounded-xl shadow dark:shadow-dark-700/30 overflow-hidden mb-4">
+            <div className="p-4 border-b border-gray-200 dark:border-dark-700">
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Pending Invitations</h2>
+              <p className="text-sm text-gray-500 dark:text-gray-400">
+                Users who have been invited but haven't accepted yet
+              </p>
+            </div>
+            <div className="divide-y divide-gray-200 dark:divide-dark-700">
+              {pendingInvitations.map((invitation: WorkspaceInvitation) => (
+                <div key={invitation.id} className="p-4 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-dark-700/50">
+                  <div className="flex items-center gap-4">
+                    <div className="h-10 w-10 rounded-full bg-yellow-100 dark:bg-yellow-900/30 flex items-center justify-center text-yellow-600 dark:text-yellow-400 font-medium">
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                      </svg>
+                    </div>
+                    <div>
+                      <h3 className="font-medium text-gray-900 dark:text-gray-100">{invitation.email}</h3>
+                      <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${getRoleBadge(invitation.role)}`}>
+                          {invitation.role}
+                        </span>
+                        <span>·</span>
+                        <span>Expires {new Date(invitation.expires_at).toLocaleDateString()}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(invitation.invite_url)
+                      }}
+                      className="text-primary-600 dark:text-primary-400 hover:text-primary-700 dark:hover:text-primary-300 text-sm font-medium flex items-center gap-1"
+                      title="Copy invitation link"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+                      </svg>
+                      Copy Link
+                    </button>
+                    {canManageMembers && (
+                      <button
+                        onClick={() => setCancelInviteConfirm(invitation)}
+                        className="text-gray-400 hover:text-red-500 p-1"
+                        title="Cancel invitation"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="bg-white dark:bg-dark-800 rounded-xl shadow dark:shadow-dark-700/30 overflow-hidden">
+          <div className="p-4 border-b border-gray-200 dark:border-dark-700 flex items-center justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Members</h2>
+              <p className="text-sm text-gray-500 dark:text-gray-400">
+                Team members with access to this workspace
+              </p>
+            </div>
+            {canManageMembers && (
+              <button
+                onClick={() => setShowInviteMember(true)}
+                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium flex items-center gap-2"
+              >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
+              </svg>
+              Invite Member
+            </button>
+          )}
+        </div>
+
+        {membersLoading ? (
+          <div className="p-8 flex justify-center">
+            <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary-600"></div>
+          </div>
+        ) : members.length === 0 ? (
+          <div className="p-8 text-center">
+            <svg className="w-12 h-12 text-gray-300 dark:text-gray-600 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+            </svg>
+            <p className="mt-2 text-gray-500 dark:text-gray-400">No members yet</p>
+          </div>
+        ) : (
+          <div className="divide-y divide-gray-200 dark:divide-dark-700">
+            {members.map((member: WorkspaceMember) => (
+              <div key={member.user_id} className="p-4 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-dark-700/50">
+                <div className="flex items-center gap-4">
+                  <div className="h-10 w-10 rounded-full bg-gray-200 dark:bg-gray-700 flex items-center justify-center text-gray-600 dark:text-gray-300 font-medium">
+                    {(member.name || member.email).charAt(0).toUpperCase()}
+                  </div>
+                  <div>
+                    <h3 className="font-medium text-gray-900 dark:text-gray-100">
+                      {member.name || member.email}
+                      {member.user_id === user?.id && (
+                        <span className="ml-2 text-xs text-gray-400">(you)</span>
+                      )}
+                    </h3>
+                    <p className="text-sm text-gray-500 dark:text-gray-400">{member.email}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  {editingMember === member.user_id ? (
+                    <select
+                      value={member.role}
+                      onChange={(e) => {
+                        updateMemberMutation.mutate({
+                          userId: member.user_id,
+                          role: e.target.value as 'owner' | 'admin' | 'member' | 'viewer'
+                        })
+                      }}
+                      className="px-2 py-1 border border-gray-300 dark:border-dark-600 bg-white dark:bg-dark-700 text-gray-900 dark:text-gray-100 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                      disabled={updateMemberMutation.isPending}
+                    >
+                      {userRole === 'owner' && <option value="owner">Owner</option>}
+                      <option value="admin">Admin</option>
+                      <option value="member">Member</option>
+                      <option value="viewer">Viewer</option>
+                    </select>
+                  ) : (
+                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${getRoleBadge(member.role)}`}>
+                      {member.role}
+                    </span>
+                  )}
+
+                  {/* Actions - owners can edit other owners, admins can only edit non-owners */}
+                  {((userRole === 'owner' && member.user_id !== user?.id) || (member.role !== 'owner' && canManageMembers)) && (
+                    <div className="flex items-center gap-1">
+                      {/* Edit role button */}
+                      {editingMember === member.user_id ? (
+                        <button
+                          onClick={() => setEditingMember(null)}
+                          className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-1"
+                          title="Cancel"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => setEditingMember(member.user_id)}
+                          className="text-gray-400 hover:text-primary-600 dark:hover:text-primary-400 p-1"
+                          title="Edit role"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                          </svg>
+                        </button>
+                      )}
+
+                      {/* Remove button */}
+                      <button
+                        onClick={() => setRemoveMemberConfirm(member)}
+                        className="text-gray-400 hover:text-red-500 p-1"
+                        title="Remove member"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        </div>
+        </>
+      )}
+
+      {/* Invite Member Modal */}
+      {showInviteMember && (
+        <div className="fixed inset-0 bg-black/50 dark:bg-black/70 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-dark-800 rounded-xl shadow-xl dark:shadow-dark-900/50 w-full max-w-md p-6">
+            {inviteSuccess ? (
+              <>
+                <div className="text-center mb-4">
+                  <div className="w-12 h-12 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center mx-auto mb-3">
+                    <svg className="w-6 h-6 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                    </svg>
+                  </div>
+                  <h2 className="text-lg font-bold text-gray-900 dark:text-gray-100">Invitation Sent!</h2>
+                  <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                    Share this link with <strong>{inviteSuccess.email}</strong>
+                  </p>
+                </div>
+
+                <div className="bg-gray-50 dark:bg-dark-700 rounded-lg p-3 mb-4">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={inviteSuccess.invite_url}
+                      className="flex-1 bg-transparent text-sm text-gray-700 dark:text-gray-300 outline-none overflow-hidden text-ellipsis"
+                    />
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(inviteSuccess.invite_url)
+                      }}
+                      className="px-3 py-1 bg-primary-600 text-white text-sm rounded hover:bg-primary-700"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                </div>
+
+                <div className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                  <p>The invitation will expire on {new Date(inviteSuccess.expires_at).toLocaleDateString()}</p>
+                </div>
+
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowInviteMember(false)
+                      setInviteSuccess(null)
+                    }}
+                    className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700"
+                  >
+                    Done
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h2 className="text-lg font-bold text-gray-900 dark:text-gray-100 mb-4">Invite Member</h2>
+
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault()
+                    if (!newMemberEmail.trim()) {
+                      setInviteError('Email is required')
+                      return
+                    }
+                    inviteMemberMutation.mutate({ email: newMemberEmail, role: newMemberRole })
+                  }}
+                  className="space-y-4"
+                >
+                  {inviteError && (
+                    <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 px-3 py-2 rounded-lg text-sm">
+                      {inviteError}
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                      Email Address
+                    </label>
+                    <input
+                      type="email"
+                      value={newMemberEmail}
+                      onChange={(e) => setNewMemberEmail(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 dark:border-dark-600 bg-white dark:bg-dark-700 text-gray-900 dark:text-gray-100 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                      placeholder="user@example.com"
+                      autoFocus
+                    />
+                    <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      They'll receive a link to join this workspace
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                      Role
+                    </label>
+                    <select
+                      value={newMemberRole}
+                      onChange={(e) => setNewMemberRole(e.target.value as 'owner' | 'admin' | 'member' | 'viewer')}
+                      className="w-full px-3 py-2 border border-gray-300 dark:border-dark-600 bg-white dark:bg-dark-700 text-gray-900 dark:text-gray-100 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                    >
+                      {userRole === 'owner' && <option value="owner">Owner - Full control over workspace</option>}
+                      <option value="admin">Admin - Can manage members and sandboxes</option>
+                      <option value="member">Member - Can view and create sandboxes</option>
+                      <option value="viewer">Viewer - Read-only access</option>
+                    </select>
+                  </div>
+
+                  <div className="flex justify-end gap-3 pt-4">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowInviteMember(false)
+                        setNewMemberEmail('')
+                        setNewMemberRole('member')
+                        setInviteError('')
+                      }}
+                      className="px-4 py-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-dark-700 rounded-lg"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={inviteMemberMutation.isPending}
+                      className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50"
+                    >
+                      {inviteMemberMutation.isPending ? 'Sending...' : 'Send Invitation'}
+                    </button>
+                  </div>
+                </form>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Cancel Invitation Confirmation Modal */}
+      {cancelInviteConfirm && (
+        <div className="fixed inset-0 bg-black/50 dark:bg-black/70 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-dark-800 rounded-lg shadow-xl dark:shadow-dark-900/50 w-full max-w-md p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center">
+                <svg className="w-6 h-6 text-red-600 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-lg font-bold text-gray-900 dark:text-gray-100">Cancel Invitation</h2>
+                <p className="text-sm text-gray-500 dark:text-gray-400">The link will no longer work</p>
+              </div>
+            </div>
+
+            <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4 mb-4">
+              <p className="text-sm text-red-800 dark:text-red-300">
+                Are you sure you want to cancel the invitation for <strong>{cancelInviteConfirm.email}</strong>?
+              </p>
+            </div>
+
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setCancelInviteConfirm(null)}
+                className="px-4 py-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-dark-700 rounded-lg"
+              >
+                Keep Invitation
+              </button>
+              <button
+                type="button"
+                onClick={() => cancelInviteMutation.mutate(cancelInviteConfirm.id)}
+                disabled={cancelInviteMutation.isPending}
+                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
+              >
+                {cancelInviteMutation.isPending ? 'Cancelling...' : 'Cancel Invitation'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Remove Member Confirmation Modal */}
+      {removeMemberConfirm && (
+        <div className="fixed inset-0 bg-black/50 dark:bg-black/70 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-dark-800 rounded-lg shadow-xl dark:shadow-dark-900/50 w-full max-w-md p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center">
+                <svg className="w-6 h-6 text-red-600 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-lg font-bold text-gray-900 dark:text-gray-100">Remove Member</h2>
+                <p className="text-sm text-gray-500 dark:text-gray-400">This will revoke their access</p>
+              </div>
+            </div>
+
+            <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4 mb-4">
+              <p className="text-sm text-red-800 dark:text-red-300">
+                Are you sure you want to remove <strong>{removeMemberConfirm.name || removeMemberConfirm.email}</strong> from this workspace?
+              </p>
+            </div>
+
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setRemoveMemberConfirm(null)}
+                className="px-4 py-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-dark-700 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => removeMemberMutation.mutate(removeMemberConfirm.user_id)}
+                disabled={removeMemberMutation.isPending}
+                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
+              >
+                {removeMemberMutation.isPending ? 'Removing...' : 'Remove'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

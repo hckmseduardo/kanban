@@ -41,7 +41,7 @@ class WorkspaceResponse(BaseModel):
     slug: str
     name: str
     description: Optional[str] = None
-    owner_id: str
+    user_role: Optional[str] = None  # Current user's role: owner, admin, member, viewer
 
     # Kanban team (set during provisioning)
     kanban_team_id: Optional[str] = None
