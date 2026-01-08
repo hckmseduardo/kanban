@@ -2,10 +2,12 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { workspacesApi, appTemplatesApi, AppTemplate } from '../services/api'
+import { useTaskProgressStore } from '../stores/taskProgressStore'
 
 export default function CreateWorkspacePage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const { startTask } = useTaskProgressStore()
   const [name, setName] = useState('')
   const [slug, setSlug] = useState('')
   const [description, setDescription] = useState('')
@@ -21,9 +23,20 @@ export default function CreateWorkspacePage() {
   const createWorkspace = useMutation({
     mutationFn: (data: { name: string; slug: string; description?: string; app_template_slug?: string }) =>
       workspacesApi.create(data),
-    onSuccess: () => {
-      // Invalidate the workspaces cache so the list refreshes
+    onSuccess: (response) => {
+      // Start tracking the provisioning task
+      const taskId = response.data.task_id
+      const workspaceSlug = response.data.workspace?.slug || slug
+      const workspaceId = response.data.workspace?.id
+
+      if (taskId) {
+        startTask(taskId, workspaceId, workspaceSlug, 'create_workspace')
+      }
+
+      // Invalidate the workspaces cache so the list refreshes immediately
       queryClient.invalidateQueries({ queryKey: ['workspaces'] })
+
+      // Navigate to workspaces list where user can see progress
       navigate('/')
     },
     onError: (err: any) => {

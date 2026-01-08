@@ -1,6 +1,7 @@
 import { Outlet, Link } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useAuthStore } from '../stores/authStore'
+import { useTaskProgressStore } from '../stores/taskProgressStore'
 import { useState, useRef, useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import ThemeToggle from './ThemeToggle'
@@ -16,6 +17,7 @@ interface Toast {
 export default function Layout() {
   const { t } = useTranslation()
   const { user, logout } = useAuthStore()
+  const { updateProgress, completeTask, failTask, cleanupOldTasks } = useTaskProgressStore()
   const queryClient = useQueryClient()
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
@@ -30,9 +32,39 @@ export default function Layout() {
     }, 5000)
   }
 
+  // Cleanup old completed/failed tasks periodically
+  useEffect(() => {
+    const interval = setInterval(cleanupOldTasks, 10000)
+    return () => clearInterval(interval)
+  }, [cleanupOldTasks])
+
   // WebSocket for real-time task updates (app-level)
   useTaskWebSocket({
-    onTaskCompleted: (_taskId, result) => {
+    onTaskUpdate: (update) => {
+      // Handle progress updates
+      if (update.type === 'task.progress' && update.task_id) {
+        const payload = (update as any).payload || {}
+        updateProgress(update.task_id, {
+          workspaceId: payload.workspace_id,
+          workspaceSlug: payload.workspace_slug,
+          sandboxId: payload.sandbox_id,
+          sandboxSlug: payload.sandbox_slug,
+          action: payload.action,
+          step: update.step || 0,
+          totalSteps: update.total_steps || 1,
+          stepName: update.step_name || 'Processing...',
+          percentage: update.percentage || 0,
+        })
+        // Also refresh workspaces list on progress updates to show the workspace card
+        if (payload.action === 'create_workspace') {
+          queryClient.invalidateQueries({ queryKey: ['workspaces'] })
+        }
+      }
+    },
+    onTaskCompleted: (taskId, result) => {
+      // Mark task as completed in store
+      completeTask(taskId, result)
+
       const action = (result as any)?.action
       const teamSlug = (result as any)?.team_slug
 
@@ -66,10 +98,14 @@ export default function Layout() {
       queryClient.invalidateQueries({ queryKey: ['user-teams'] })
       queryClient.invalidateQueries({ queryKey: ['teams'] })
     },
-    onTaskFailed: (_taskId, error) => {
+    onTaskFailed: (taskId, error) => {
+      // Mark task as failed in store
+      failTask(taskId, error)
+
       showToast('error', `Task failed: ${error || 'Unknown error'}`)
       queryClient.invalidateQueries({ queryKey: ['user-teams'] })
       queryClient.invalidateQueries({ queryKey: ['teams'] })
+      queryClient.invalidateQueries({ queryKey: ['workspaces'] })
     }
   })
 

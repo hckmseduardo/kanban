@@ -101,6 +101,12 @@ class DatabaseService:
         self._ensure_db()
         return self.db.table("sandboxes")
 
+    @property
+    def workspace_invitations(self):
+        """Workspace invitations table"""
+        self._ensure_db()
+        return self.db.table("workspace_invitations")
+
     # =========================================================================
     # User Operations
     # =========================================================================
@@ -143,11 +149,18 @@ class DatabaseService:
         """Create or update user from Entra ID data"""
         existing = self.get_user_by_entra_oid(entra_data["oid"])
 
+        # Get email from multiple possible fields (entra.authenticate returns 'email')
+        email = (
+            entra_data.get("email") or
+            entra_data.get("preferred_username") or
+            ""
+        ).lower()
+
         if existing:
             # Update existing user
             updates = {
                 "display_name": entra_data.get("name", existing["display_name"]),
-                "email": entra_data.get("preferred_username", existing["email"]).lower(),
+                "email": email or existing.get("email", ""),
                 "last_login_at": datetime.utcnow().isoformat()
             }
             return self.update_user(existing["id"], updates)
@@ -157,7 +170,7 @@ class DatabaseService:
             user_data = {
                 "id": str(uuid.uuid4()),
                 "entra_oid": entra_data["oid"],
-                "email": entra_data.get("preferred_username", "").lower(),
+                "email": email,
                 "display_name": entra_data.get("name", "Unknown"),
                 "avatar_url": None,
                 "identity_provider": entra_data.get("idp", "microsoft"),
@@ -295,6 +308,17 @@ class DatabaseService:
             (Membership.team_id == team_id) & (Membership.user_id == user_id)
         )
         logger.info(f"User {user_id} removed from team {team_id}")
+
+    def get_team_owner(self, team_id: str) -> Optional[dict]:
+        """Get the owner of a team from memberships"""
+        Membership = Query()
+        result = self.memberships.search(
+            (Membership.team_id == team_id) & (Membership.role == "owner")
+        )
+        if result:
+            # Return the first owner (there should only be one)
+            return self.get_user_by_id(result[0]["user_id"])
+        return None
 
     # =========================================================================
     # API Token Operations
@@ -525,21 +549,58 @@ class DatabaseService:
         return result[0] if result else None
 
     def get_user_workspaces(self, user_id: str) -> List[dict]:
-        """Get all workspaces for a user (as owner or member)
+        """Get all workspaces where user is a member (any role).
 
         Note: We refresh the database here because workspaces can be modified
         by the worker process running in a separate container.
+
+        Access is now determined solely by membership - owners are members
+        with role="owner". We also include workspaces in "provisioning" or
+        "deleting" status where the user is the creator, so they can see
+        progress immediately.
         """
         self.refresh()
+        Membership = Query()
         Workspace = Query()
-        # Get workspaces owned by user
-        owned = self.workspaces.search(Workspace.owner_id == user_id)
 
-        # Also check team memberships for shared workspaces
-        # For now, just return owned workspaces
-        # TODO: Add workspace membership support if needed
+        workspaces = []
+        seen_ids = set()
 
-        return owned
+        # Include workspaces being provisioned/deleted by this user
+        # These don't have a kanban_team_id yet so membership check won't find them
+        provisioning_workspaces = self.workspaces.search(
+            (Workspace.created_by == user_id) &
+            (Workspace.status.one_of(["provisioning", "deleting"]))
+        )
+        for ws in provisioning_workspaces:
+            if ws["id"] not in seen_ids:
+                workspaces.append(ws)
+                seen_ids.add(ws["id"])
+
+        # Get all team memberships for this user
+        memberships = self.memberships.search(Membership.user_id == user_id)
+
+        if memberships:
+            # Get team IDs
+            team_ids = [m["team_id"] for m in memberships]
+
+            # Find workspaces with these team IDs
+            for team_id in team_ids:
+                ws_list = self.workspaces.search(Workspace.kanban_team_id == team_id)
+                for ws in ws_list:
+                    if ws["id"] not in seen_ids:
+                        workspaces.append(ws)
+                        seen_ids.add(ws["id"])
+
+        return workspaces
+
+    def get_workspaces_by_team_member(self, user_id: str) -> List[dict]:
+        """Get workspaces where user is a team member.
+
+        This is now an alias for get_user_workspaces since all access
+        is determined by membership.
+        """
+        return self.get_user_workspaces(user_id)
 
     def create_workspace(self, workspace_data: dict) -> dict:
         """Create a new workspace"""
@@ -655,6 +716,120 @@ class DatabaseService:
         Sandbox = Query()
         self.sandboxes.remove(Sandbox.id == sandbox_id)
         logger.info(f"Sandbox deleted: {sandbox_id}")
+
+    # =========================================================================
+    # Workspace Invitation Operations
+    # =========================================================================
+
+    def create_workspace_invitation(
+        self,
+        workspace_id: str,
+        email: str,
+        role: str,
+        invited_by: str,
+        expires_days: int = 7
+    ) -> dict:
+        """Create a workspace invitation"""
+        import uuid
+        import secrets
+        from datetime import timedelta
+
+        # Generate unique invitation token
+        token = secrets.token_urlsafe(32)
+
+        invitation = {
+            "id": str(uuid.uuid4()),
+            "workspace_id": workspace_id,
+            "email": email.lower(),
+            "role": role,
+            "token": token,
+            "invited_by": invited_by,
+            "status": "pending",  # pending, accepted, cancelled, expired
+            "created_at": datetime.utcnow().isoformat(),
+            "expires_at": (datetime.utcnow() + timedelta(days=expires_days)).isoformat(),
+            "accepted_at": None,
+            "accepted_by": None,
+        }
+
+        self.workspace_invitations.insert(invitation)
+        logger.info(f"Workspace invitation created: {invitation['id']} for {email}")
+        return invitation
+
+    def get_workspace_invitation_by_id(self, invitation_id: str) -> Optional[dict]:
+        """Get invitation by ID"""
+        Invitation = Query()
+        result = self.workspace_invitations.search(Invitation.id == invitation_id)
+        return result[0] if result else None
+
+    def get_workspace_invitation_by_token(self, token: str) -> Optional[dict]:
+        """Get invitation by token"""
+        self.refresh()
+        Invitation = Query()
+        result = self.workspace_invitations.search(Invitation.token == token)
+        return result[0] if result else None
+
+    def get_workspace_invitations(
+        self,
+        workspace_id: str,
+        status: Optional[str] = None
+    ) -> List[dict]:
+        """Get all invitations for a workspace"""
+        self.refresh()
+        Invitation = Query()
+        if status:
+            return self.workspace_invitations.search(
+                (Invitation.workspace_id == workspace_id) &
+                (Invitation.status == status)
+            )
+        return self.workspace_invitations.search(
+            Invitation.workspace_id == workspace_id
+        )
+
+    def get_pending_invitation_for_email(
+        self,
+        workspace_id: str,
+        email: str
+    ) -> Optional[dict]:
+        """Check if there's already a pending invitation for this email"""
+        Invitation = Query()
+        result = self.workspace_invitations.search(
+            (Invitation.workspace_id == workspace_id) &
+            (Invitation.email == email.lower()) &
+            (Invitation.status == "pending")
+        )
+        return result[0] if result else None
+
+    def accept_workspace_invitation(
+        self,
+        invitation_id: str,
+        user_id: str
+    ) -> Optional[dict]:
+        """Accept a workspace invitation"""
+        Invitation = Query()
+        updates = {
+            "status": "accepted",
+            "accepted_at": datetime.utcnow().isoformat(),
+            "accepted_by": user_id,
+        }
+        self.workspace_invitations.update(updates, Invitation.id == invitation_id)
+        logger.info(f"Workspace invitation accepted: {invitation_id} by {user_id}")
+        return self.get_workspace_invitation_by_id(invitation_id)
+
+    def cancel_workspace_invitation(self, invitation_id: str) -> Optional[dict]:
+        """Cancel a workspace invitation"""
+        Invitation = Query()
+        updates = {
+            "status": "cancelled",
+        }
+        self.workspace_invitations.update(updates, Invitation.id == invitation_id)
+        logger.info(f"Workspace invitation cancelled: {invitation_id}")
+        return self.get_workspace_invitation_by_id(invitation_id)
+
+    def delete_workspace_invitation(self, invitation_id: str):
+        """Delete a workspace invitation"""
+        Invitation = Query()
+        self.workspace_invitations.remove(Invitation.id == invitation_id)
+        logger.info(f"Workspace invitation deleted: {invitation_id}")
 
 
 # Singleton instance

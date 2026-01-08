@@ -45,7 +45,7 @@ def seed_app_templates():
             "slug": "basic-app",
             "name": "Basic App",
             "description": "Full-stack React + FastAPI + PostgreSQL template with authentication, API endpoints, and modern UI components.",
-            "github_template_owner": "amazing-ai-tools",
+            "github_template_owner": "hckmseduardo",
             "github_template_repo": "basic-app",
             "active": True,
             "created_at": datetime.utcnow().isoformat(),

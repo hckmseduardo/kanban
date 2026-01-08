@@ -17,10 +17,10 @@ import redis.asyncio as redis
 from jinja2 import Environment, FileSystemLoader
 
 from app.services.database_cloner import database_cloner
-from app.services.agent_factory import agent_factory, generate_webhook_secret
 from app.services.github_service import github_service
 from app.services.certificate_service import certificate_service
 from app.services.azure_service import azure_service
+from app.services.keyvault_service import keyvault_service
 
 logging.basicConfig(
     level=logging.INFO,
@@ -111,9 +111,18 @@ class Orchestrator:
                 sig, lambda: asyncio.create_task(self.stop())
             )
 
+        # NOTE: Auto-start of workspaces on boot has been disabled.
+        # Workspaces are now started on-demand when users access them via the portal.
+        # The start_active_workspaces() method is kept for reference but not called.
+        # await self.start_active_workspaces()
+
         # Start idle team checker background task
         asyncio.create_task(self.check_idle_teams())
         logger.info(f"Idle team checker started (interval: {IDLE_CHECK_INTERVAL}s, threshold: {IDLE_THRESHOLD}s)")
+
+        # Start health check processor background task
+        asyncio.create_task(self.process_health_checks())
+        logger.info("Health check processor started")
 
         logger.info(f"Orchestrator listening on queues: {self.QUEUES}")
 
@@ -136,6 +145,127 @@ class Orchestrator:
         """Stop the orchestrator"""
         logger.info("Stopping orchestrator...")
         self.running = False
+
+    async def start_active_workspaces(self):
+        """Start containers for all active workspaces from database on orchestrator startup"""
+        logger.info("Starting active workspaces...")
+
+        # Read portal database to get active workspaces
+        portal_db_path = Path("/app/data/portal/portal.json")
+        if not portal_db_path.exists():
+            logger.warning("Portal database not found, skipping workspace startup")
+            return
+
+        try:
+            with open(portal_db_path, 'r') as f:
+                portal_data = json.load(f)
+
+            workspaces = portal_data.get("workspaces", {})
+            if not workspaces:
+                logger.info("No workspaces found in database")
+                return
+
+            started = 0
+            skipped = 0
+
+            for ws_key, ws in workspaces.items():
+                workspace_slug = ws.get("slug")
+                status = ws.get("status", "active")
+
+                if not workspace_slug:
+                    continue
+
+                # Only start active workspaces
+                if status != "active":
+                    logger.debug(f"[{workspace_slug}] Skipping - status: {status}")
+                    skipped += 1
+                    continue
+
+                # Check if workspace data directory exists
+                workspace_dir = Path(f"/app/data/workspaces/{workspace_slug}")
+                if not workspace_dir.exists():
+                    logger.warning(f"[{workspace_slug}] Data directory not found, skipping")
+                    skipped += 1
+                    continue
+
+                # Check if containers are already running
+                project_name = f"{workspace_slug}-kanban"
+                result = subprocess.run(
+                    ["docker", "ps", "--filter", f"name={project_name}", "--format", "{{.Names}}"],
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+
+                if result.stdout.strip():
+                    logger.debug(f"[{workspace_slug}] Containers already running")
+                    skipped += 1
+                    continue
+
+                # Start workspace containers
+                try:
+                    await self._start_workspace_kanban(workspace_slug, ws.get("id", workspace_slug))
+                    started += 1
+                    logger.info(f"[{workspace_slug}] Started workspace containers")
+
+                    # Also start app containers if compose file exists
+                    app_compose = Path(f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml")
+                    if app_compose.exists():
+                        await self._start_workspace_app(workspace_slug)
+                        logger.info(f"[{workspace_slug}] Started app containers")
+
+                except Exception as e:
+                    logger.error(f"[{workspace_slug}] Failed to start: {e}")
+
+            logger.info(f"Workspace startup complete: {started} started, {skipped} skipped")
+
+        except Exception as e:
+            logger.error(f"Failed to start active workspaces: {e}", exc_info=True)
+
+    async def _start_workspace_kanban(self, workspace_slug: str, workspace_id: str):
+        """Start kanban containers for a workspace"""
+        if not self.docker_available:
+            raise RuntimeError("Docker CLI not available")
+
+        project_name = f"{workspace_slug}-kanban"
+        compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
+        workspace_data_host_path = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}"
+
+        env = os.environ.copy()
+        env.update({
+            "TEAM_SLUG": workspace_slug,
+            "DOMAIN": DOMAIN,
+            "DATA_PATH": workspace_data_host_path,
+        })
+
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "up", "-d", "api", "web"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to start kanban containers: {result.stderr}")
+
+    async def _start_workspace_app(self, workspace_slug: str):
+        """Start app containers for a workspace"""
+        if not self.docker_available:
+            raise RuntimeError("Docker CLI not available")
+
+        compose_file = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml"
+        project_name = f"{workspace_slug}-app"
+
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "up", "-d"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+
+        if result.returncode != 0:
+            logger.warning(f"[{workspace_slug}] App containers failed to start: {result.stderr}")
 
     async def process_task(self, task_id: str):
         """Process a provisioning task"""
@@ -161,13 +291,15 @@ class Orchestrator:
                 await self.provision_workspace(task)
             elif task_type == "workspace.delete":
                 await self.delete_workspace(task)
+            elif task_type == "workspace.restart":
+                await self.restart_workspace(task)
+            elif task_type == "workspace.start":
+                await self.start_workspace(task)
             # App Factory - Sandbox tasks
             elif task_type == "sandbox.provision":
                 await self.provision_sandbox(task)
             elif task_type == "sandbox.delete":
                 await self.delete_sandbox(task)
-            elif task_type == "sandbox.agent.restart":
-                await self.restart_sandbox_agent(task)
             else:
                 logger.warning(f"Unknown task type: {task_type}")
 
@@ -306,7 +438,7 @@ class Orchestrator:
         logger.info(f"[{team_slug}] Starting containers as stack...")
 
         # Project name for docker compose stack
-        project_name = f"kanban-team-{team_slug}"
+        project_name = f"{team_slug}-kanban"
 
         # Host path for team data
         team_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{team_slug}"
@@ -317,10 +449,16 @@ class Orchestrator:
         # Environment variables for docker compose
         # These inherit from orchestrator's environment (which gets them from root .env via docker-compose.yml)
         env = os.environ.copy()
+
+        # Get cross-domain secret from Key Vault (production) or environment (development)
+        # This ensures team containers use the same secret as the portal API
+        cross_domain_secret = keyvault_service.get_cross_domain_secret()
+
         env.update({
             "TEAM_SLUG": team_slug,
             "DOMAIN": DOMAIN,
             "DATA_PATH": team_data_host_path,
+            "CROSS_DOMAIN_SECRET": cross_domain_secret,
         })
 
         # Stop and remove existing stack if it exists
@@ -355,8 +493,8 @@ class Orchestrator:
             return
 
         # Docker compose creates containers with -1 suffix
-        api_container_name = f"kanban-team-{team_slug}-api-1"
-        web_container_name = f"kanban-team-{team_slug}-web-1"
+        api_container_name = f"{team_slug}-kanban-api-1"
+        web_container_name = f"{team_slug}-kanban-web-1"
 
         # Wait for containers to be running
         max_retries = 10
@@ -435,7 +573,7 @@ class Orchestrator:
             logger.warning("Docker not available, skipping container stop")
             return
 
-        project_name = f"kanban-team-{team_slug}"
+        project_name = f"{team_slug}-kanban"
         compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
         team_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{team_slug}"
 
@@ -459,7 +597,7 @@ class Orchestrator:
             logger.info(f"[{team_slug}] Stack stopped")
         else:
             # Fallback: try stopping individual containers (legacy naming)
-            for container in [f"kanban-team-{team_slug}-api", f"kanban-team-{team_slug}-web"]:
+            for container in [f"{team_slug}-kanban-api", f"{team_slug}-kanban-web"]:
                 run_docker_cmd(["stop", container], check=False)
             logger.info(f"[{team_slug}] Containers stopped (fallback)")
 
@@ -469,7 +607,7 @@ class Orchestrator:
             logger.warning("Docker not available, skipping container removal")
             return
 
-        project_name = f"kanban-team-{team_slug}"
+        project_name = f"{team_slug}-kanban"
         compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
         team_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{team_slug}"
 
@@ -493,8 +631,8 @@ class Orchestrator:
             logger.info(f"[{team_slug}] Stack removed")
         else:
             # Fallback: try removing individual containers (legacy naming)
-            for container in [f"kanban-team-{team_slug}-api", f"kanban-team-{team_slug}-web",
-                              f"kanban-team-{team_slug}-api-1", f"kanban-team-{team_slug}-web-1"]:
+            for container in [f"{team_slug}-kanban-api", f"{team_slug}-kanban-web",
+                              f"{team_slug}-kanban-api-1", f"{team_slug}-kanban-web-1"]:
                 run_docker_cmd(["rm", "-f", container], check=False)
             logger.info(f"[{team_slug}] Containers removed (fallback)")
 
@@ -584,7 +722,7 @@ class Orchestrator:
             logger.warning("Docker not available, skipping container stop")
             return
 
-        project_name = f"kanban-team-{team_slug}"
+        project_name = f"{team_slug}-kanban"
         compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
         team_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{team_slug}"
 
@@ -613,7 +751,7 @@ class Orchestrator:
         if not self.docker_available:
             return
 
-        project_name = f"kanban-team-{team_slug}"
+        project_name = f"{team_slug}-kanban"
         compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
         team_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{team_slug}"
 
@@ -640,7 +778,7 @@ class Orchestrator:
         if not self.docker_available:
             raise RuntimeError("Docker CLI not available")
 
-        project_name = f"kanban-team-{team_slug}"
+        project_name = f"{team_slug}-kanban"
         compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
         team_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{team_slug}"
 
@@ -669,7 +807,7 @@ class Orchestrator:
         if not self.docker_available:
             raise RuntimeError("Docker CLI not available")
 
-        project_name = f"kanban-team-{team_slug}"
+        project_name = f"{team_slug}-kanban"
         compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
         team_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{team_slug}"
 
@@ -718,14 +856,22 @@ class Orchestrator:
 
         await self.redis.hset(f"task:{task_id}", "data", json.dumps(task))
 
-        # Publish progress
+        # Publish progress with payload info for frontend tracking
+        payload = task.get("payload", {})
         await self.redis.publish(f"tasks:{task['user_id']}", json.dumps({
             "type": "task.progress",
             "task_id": task_id,
             "step": current_step,
             "total_steps": total_steps,
             "step_name": step_name,
-            "percentage": percentage
+            "percentage": percentage,
+            "payload": {
+                "action": payload.get("action"),
+                "workspace_id": payload.get("workspace_id"),
+                "workspace_slug": payload.get("workspace_slug"),
+                "sandbox_id": payload.get("sandbox_id"),
+                "sandbox_slug": payload.get("sandbox_slug"),
+            }
         }))
 
     async def complete_task(self, task_id: str, result: dict):
@@ -815,6 +961,121 @@ class Orchestrator:
 
         logger.info("Idle team checker stopped")
 
+    async def process_health_checks(self):
+        """Background task to process workspace health check requests.
+
+        Listens on Redis list 'health_check:requests' for health check requests
+        and writes results to 'health_check:{request_id}:result' keys.
+        """
+        logger.info("Starting health check processor...")
+
+        while self.running:
+            try:
+                # Wait for a health check request with 1 second timeout
+                result = await self.redis.brpop("health_check:requests", timeout=1)
+
+                if result:
+                    _, request_data = result
+                    request = json.loads(request_data)
+                    request_id = request.get("request_id")
+                    workspace_slugs = request.get("workspace_slugs", [])
+
+                    logger.debug(f"Processing health check request {request_id} for {len(workspace_slugs)} workspaces")
+
+                    # Check health for each workspace
+                    health_results = {}
+                    for workspace_slug in workspace_slugs:
+                        health_results[workspace_slug] = self._check_workspace_container_health(workspace_slug)
+
+                    # Write result to Redis with 60 second expiry
+                    await self.redis.setex(
+                        f"health_check:{request_id}:result",
+                        60,
+                        json.dumps(health_results)
+                    )
+
+                    logger.debug(f"Health check {request_id} completed")
+
+            except Exception as e:
+                logger.error(f"Health check processor error: {e}", exc_info=True)
+                await asyncio.sleep(1)
+
+        logger.info("Health check processor stopped")
+
+    def _check_workspace_container_health(self, workspace_slug: str) -> dict:
+        """Check container health for a workspace (synchronous).
+
+        Returns dict with:
+        - kanban_running: bool
+        - app_running: bool | None (None if no app)
+        - sandboxes: list[{slug, running}]
+        - all_healthy: bool
+        """
+        if not self.docker_available:
+            return {
+                "kanban_running": False,
+                "app_running": None,
+                "sandboxes": [],
+                "all_healthy": False,
+                "error": "Docker not available"
+            }
+
+        # Check if this workspace has an app
+        app_compose = Path(f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml")
+        legacy_app_compose = Path(f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/app/docker-compose.yml")
+        has_app = app_compose.exists() or legacy_app_compose.exists()
+
+        # Check kanban containers - project name is "{slug}-kanban" so containers are {slug}-kanban-api-1
+        kanban_running = self._is_container_running(f"{workspace_slug}-kanban-api")
+
+        # Check app containers if workspace has app template
+        app_running = None
+        if has_app:
+            # App containers are named {slug}-api, {slug}-web, etc.
+            app_running = self._is_container_running(f"{workspace_slug}-api")
+
+        # Check sandbox containers
+        sandboxes = []
+        sandbox_slugs = self._get_workspace_sandboxes(workspace_slug)
+        for full_slug in sandbox_slugs:
+            sandbox_running = self._is_container_running(f"{full_slug}-app")
+            sandboxes.append({
+                "slug": full_slug.replace(f"{workspace_slug}-", ""),
+                "full_slug": full_slug,
+                "running": sandbox_running
+            })
+
+        # Determine if all healthy
+        all_healthy = kanban_running
+        if app_running is not None:
+            all_healthy = all_healthy and app_running
+        for sandbox in sandboxes:
+            all_healthy = all_healthy and sandbox["running"]
+
+        return {
+            "kanban_running": kanban_running,
+            "app_running": app_running,
+            "sandboxes": sandboxes,
+            "all_healthy": all_healthy
+        }
+
+    def _is_container_running(self, container_name_prefix: str) -> bool:
+        """Check if any container with the given prefix is running."""
+        try:
+            result = run_docker_cmd([
+                "ps", "--filter", f"name={container_name_prefix}",
+                "--format", "{{.Names}}"
+            ], check=False)
+
+            if result.returncode != 0:
+                return False
+
+            # Check if any matching container is running
+            return bool(result.stdout.strip())
+        except Exception as e:
+            logger.error(f"Error checking container {container_name_prefix}: {e}")
+            return False
+
     async def _get_running_teams(self) -> list[str]:
         """Get list of team slugs with running containers."""
         if not self.docker_available:
@@ -822,7 +1083,7 @@ class Orchestrator:
 
         try:
             result = run_docker_cmd([
-                "ps", "--filter", "name=kanban-team-",
+                "ps", "--filter", "name=-kanban-",
                 "--format", "{{.Names}}"
             ], check=False)
 
@@ -831,20 +1092,18 @@ class Orchestrator:
 
             teams = set()
             for line in result.stdout.strip().split('\n'):
-                if line and line.startswith('kanban-team-'):
+                if line and '-kanban-' in line:
                     # Extract team slug from container name
-                    # Format: kanban-team-{slug}-api-1 or kanban-team-{slug}-web-1
-                    # Remove prefix "kanban-team-" and suffix "-api-1" or "-web-1"
-                    name = line[len('kanban-team-'):]  # Remove prefix
-                    # Remove the service suffix (-api-1, -web-1)
-                    if name.endswith('-api-1'):
-                        slug = name[:-6]
-                    elif name.endswith('-web-1'):
-                        slug = name[:-6]
+                    # Format: {slug}-kanban-api-1 or {slug}-kanban-web-1
+                    # Remove suffix "-kanban-api-1" or "-kanban-web-1"
+                    if line.endswith('-kanban-api-1'):
+                        slug = line[:-13]
+                    elif line.endswith('-kanban-web-1'):
+                        slug = line[:-13]
                     else:
                         # Unknown format, try to extract slug
-                        parts = name.rsplit('-', 2)
-                        slug = '-'.join(parts[:-2]) if len(parts) >= 3 else parts[0]
+                        parts = line.split('-kanban-')
+                        slug = parts[0] if parts else None
 
                     if slug:
                         teams.add(slug)
@@ -866,7 +1125,7 @@ class Orchestrator:
 
         logger.info(f"[{team_slug}] Suspending team - removing containers...")
 
-        project_name = f"kanban-team-{team_slug}"
+        project_name = f"{team_slug}-kanban"
         compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
         team_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{team_slug}"
 
@@ -988,7 +1247,6 @@ class Orchestrator:
                 ("Issuing SSL certificate", self._workspace_issue_certificate),
                 ("Creating app database", self._workspace_create_database),
                 ("Deploying app containers", self._workspace_deploy_app),
-                ("Provisioning workspace agent", self._workspace_provision_agent),
             ])
 
         steps.extend([
@@ -1059,6 +1317,15 @@ class Orchestrator:
         logger.info(f"[{workspace_slug}] Creating GitHub repo: {github_org}/{new_repo_name} from {template_owner}/{template_repo}")
 
         try:
+            # First check if repo already exists (for retry scenarios)
+            existing_repo = await github_service.get_repository(github_org, new_repo_name)
+            if existing_repo:
+                logger.info(f"[{workspace_slug}] Repository already exists, using existing: {existing_repo.get('html_url')}")
+                self._current_payload["github_repo_url"] = existing_repo.get("html_url")
+                self._current_payload["github_repo_name"] = new_repo_name
+                self._current_payload["github_clone_url"] = existing_repo.get("clone_url")
+                return  # Skip creation, repo already exists
+
             repo_data = await github_service.create_repo_from_template(
                 template_owner=template_owner,
                 template_repo=template_repo,
@@ -1250,11 +1517,17 @@ class Orchestrator:
             logger.error(f"[{workspace_slug}] Failed to render workspace app template: {e}")
             raise
 
-        # Write compose file
-        compose_file = Path(f"/tmp/workspace-app-{workspace_slug}-compose.yml")
-        compose_file.write_text(compose_content)
+        # Write compose file to persistent location in workspace directory
+        # Using HOST_PROJECT_PATH for the compose file since docker compose uses host paths
+        compose_file_host = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml"
+        compose_file = Path(f"/app/data/workspaces/{workspace_slug}/docker-compose.app.yml")
 
-        project_name = f"kanban-app-{workspace_slug}"
+        # Ensure workspace directory exists
+        compose_file.parent.mkdir(parents=True, exist_ok=True)
+        compose_file.write_text(compose_content)
+        logger.info(f"[{workspace_slug}] Saved compose file to {compose_file_host}")
+
+        project_name = f"{workspace_slug}-app"
 
         try:
             # Create workspace data directory
@@ -1262,7 +1535,7 @@ class Orchestrator:
 
             # Stop and remove existing stack if it exists
             subprocess.run(
-                ["docker", "compose", "-f", str(compose_file), "-p", project_name, "down", "--remove-orphans"],
+                ["docker", "compose", "-f", compose_file_host, "-p", project_name, "down", "--remove-orphans"],
                 capture_output=True,
                 text=True,
                 check=False
@@ -1290,7 +1563,7 @@ class Orchestrator:
             # Build and start the stack
             logger.info(f"[{workspace_slug}] Building and starting app containers...")
             result = subprocess.run(
-                ["docker", "compose", "-f", str(compose_file), "-p", project_name, "up", "-d", "--build"],
+                ["docker", "compose", "-f", compose_file_host, "-p", project_name, "up", "-d", "--build"],
                 capture_output=True,
                 text=True,
                 check=False
@@ -1303,45 +1576,8 @@ class Orchestrator:
 
             logger.info(f"[{workspace_slug}] App containers deployed")
 
-        finally:
-            # Clean up compose file
-            if compose_file.exists():
-                compose_file.unlink()
-
-    async def _workspace_provision_agent(self, workspace_slug: str, workspace_id: str):
-        """Provision dedicated agent for the workspace"""
-        payload = self._current_payload
-        git_branch = "main"
-
-        logger.info(f"[{workspace_slug}] Provisioning workspace agent")
-
-        # Kanban API URL for the workspace
-        if PORT == "443":
-            kanban_api_url = f"https://{workspace_slug}.{DOMAIN}/api"
-        else:
-            kanban_api_url = f"https://{workspace_slug}.{DOMAIN}:{PORT}/api"
-
-        # Target project path on host
-        target_project_path = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/app"
-
-        # Generate webhook secret
-        webhook_secret = generate_webhook_secret()
-        self._current_payload["workspace_agent_webhook_secret"] = webhook_secret
-
-        try:
-            agent_info = await agent_factory.provision_agent(
-                agent_id=f"{workspace_slug}-main",
-                kanban_api_url=kanban_api_url,
-                target_project_path=target_project_path,
-                sandbox_branch=git_branch,
-                webhook_secret=webhook_secret,
-            )
-
-            self._current_payload["workspace_agent_info"] = agent_info
-            logger.info(f"[{workspace_slug}] Workspace agent provisioned: {agent_info['container_name']}")
-
         except Exception as e:
-            logger.error(f"[{workspace_slug}] Failed to provision workspace agent: {e}")
+            logger.error(f"[{workspace_slug}] App deployment failed: {e}")
             raise
 
     async def _workspace_health_check(self, workspace_slug: str, workspace_id: str):
@@ -1364,6 +1600,7 @@ class Orchestrator:
             "workspace_id": workspace_id,
             "workspace_slug": workspace_slug,
             "kanban_team_id": kanban_team_id,
+            "owner_id": self._current_payload.get("owner_id"),
             "status": "active"
         }
 
@@ -1387,6 +1624,449 @@ class Orchestrator:
         await self.redis.publish("workspace:status", json.dumps(status_payload))
         await asyncio.sleep(0.5)
 
+    async def restart_workspace(self, task: dict):
+        """Restart/rebuild workspace containers (kanban + app)"""
+        task_id = task["task_id"]
+        payload = task["payload"]
+        workspace_id = payload["workspace_id"]
+        workspace_slug = payload["workspace_slug"]
+        rebuild = payload.get("rebuild", False)
+        restart_app = payload.get("restart_app", True)
+
+        logger.info(f"Restarting workspace: {workspace_slug} (rebuild={rebuild}, restart_app={restart_app})")
+
+        # Store payload for step functions
+        self._current_payload = payload
+
+        # Build steps list based on options
+        steps = []
+
+        if rebuild:
+            steps.extend([
+                ("Stopping kanban containers", self._workspace_restart_stop_kanban),
+                ("Rebuilding kanban containers", self._workspace_restart_rebuild_kanban),
+                ("Starting kanban containers", self._workspace_restart_start_kanban),
+            ])
+        else:
+            steps.extend([
+                ("Stopping kanban containers", self._workspace_restart_stop_kanban),
+                ("Starting kanban containers", self._workspace_restart_start_kanban),
+            ])
+
+        if restart_app:
+            app_compose = Path(f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml")
+            if app_compose.exists():
+                if rebuild:
+                    steps.extend([
+                        ("Stopping app containers", self._workspace_restart_stop_app),
+                        ("Rebuilding app containers", self._workspace_restart_rebuild_app),
+                    ])
+                else:
+                    steps.extend([
+                        ("Restarting app containers", self._workspace_restart_app),
+                    ])
+
+        steps.append(("Running health check", self._workspace_health_check))
+
+        try:
+            for i, (step_name, step_func) in enumerate(steps, 1):
+                await self.update_progress(task_id, i, len(steps), step_name)
+                await step_func(workspace_slug, workspace_id)
+                logger.info(f"[{workspace_slug}] {step_name} - completed")
+
+            # Publish status update
+            await self.redis.publish("workspace:status", json.dumps({
+                "workspace_id": workspace_id,
+                "workspace_slug": workspace_slug,
+                "status": "active"
+            }))
+
+            await self.complete_task(task_id, {
+                "action": "restart_workspace",
+                "workspace_slug": workspace_slug,
+                "rebuild": rebuild,
+                "url": f"https://{workspace_slug}.{DOMAIN}"
+            })
+
+            logger.info(f"Workspace {workspace_slug} restarted successfully")
+
+        except Exception as e:
+            logger.error(f"Workspace restart failed: {e}")
+            await self.fail_task(task_id, str(e))
+            raise
+
+    async def start_workspace(self, task: dict):
+        """Start/rebuild workspace components (kanban, and optionally app/sandboxes)"""
+        task_id = task["task_id"]
+        payload = task["payload"]
+        workspace_id = payload["workspace_id"]
+        workspace_slug = payload["workspace_slug"]
+        kanban_only = payload.get("kanban_only", False)
+
+        if kanban_only:
+            logger.info(f"Starting workspace kanban only: {workspace_slug}")
+        else:
+            logger.info(f"Starting workspace: {workspace_slug}")
+
+        # Store payload for step functions
+        self._current_payload = payload
+
+        # Build steps list - always rebuild for fresh start
+        steps = [
+            ("Validating workspace", self._workspace_start_validate),
+            ("Rebuilding kanban containers", self._workspace_start_rebuild_kanban),
+        ]
+
+        # Only include app/sandbox steps if not kanban_only mode
+        if not kanban_only:
+            # Check if app exists (handle both new and legacy template structures)
+            app_compose = Path(f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml")
+            legacy_app_compose = Path(f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/app/docker-compose.yml")
+            if app_compose.exists() or legacy_app_compose.exists():
+                steps.append(("Rebuilding app containers", self._workspace_start_rebuild_app))
+
+            # Get sandboxes for this workspace
+            sandboxes = self._get_workspace_sandboxes(workspace_slug)
+            if sandboxes:
+                steps.append(("Rebuilding sandbox containers", self._workspace_start_rebuild_sandboxes))
+
+        steps.append(("Running health check", self._workspace_health_check))
+
+        try:
+            for i, (step_name, step_func) in enumerate(steps, 1):
+                await self.update_progress(task_id, i, len(steps), step_name)
+                await step_func(workspace_slug, workspace_id)
+                logger.info(f"[{workspace_slug}] {step_name} - completed")
+
+            # Publish status update
+            await self.redis.publish("workspace:status", json.dumps({
+                "workspace_id": workspace_id,
+                "workspace_slug": workspace_slug,
+                "status": "active"
+            }))
+
+            await self.complete_task(task_id, {
+                "action": "start_workspace",
+                "workspace_slug": workspace_slug,
+                "url": f"https://{workspace_slug}.{DOMAIN}"
+            })
+
+            logger.info(f"Workspace {workspace_slug} started successfully")
+
+        except Exception as e:
+            logger.error(f"Workspace start failed: {e}")
+            await self.fail_task(task_id, str(e))
+            raise
+
+    def _get_workspace_sandboxes(self, workspace_slug: str) -> list[str]:
+        """Get list of sandbox full_slugs for a workspace"""
+        sandboxes_dir = Path(f"{HOST_PROJECT_PATH}/data/sandboxes")
+        if not sandboxes_dir.exists():
+            return []
+
+        sandboxes = []
+        for sandbox_dir in sandboxes_dir.iterdir():
+            if sandbox_dir.is_dir() and sandbox_dir.name.startswith(f"{workspace_slug}-"):
+                # Check if compose file exists (indicates valid sandbox)
+                compose_file = sandbox_dir / "docker-compose.app.yml"
+                if compose_file.exists():
+                    sandboxes.append(sandbox_dir.name)
+
+        return sandboxes
+
+    async def _workspace_start_validate(self, workspace_slug: str, workspace_id: str):
+        """Validate workspace exists and can be started"""
+        workspace_dir = Path(f"/app/data/workspaces/{workspace_slug}")
+        if not workspace_dir.exists():
+            raise RuntimeError(f"Workspace directory not found: {workspace_dir}")
+        logger.info(f"[{workspace_slug}] Workspace validated")
+
+    async def _workspace_start_rebuild_kanban(self, workspace_slug: str, workspace_id: str):
+        """Rebuild and start kanban containers"""
+        if not self.docker_available:
+            raise RuntimeError("Docker CLI not available")
+
+        project_name = f"{workspace_slug}-kanban"
+        compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
+        workspace_data_host_path = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}"
+
+        # Get cross-domain secret from Key Vault (production) or environment (development)
+        cross_domain_secret = keyvault_service.get_cross_domain_secret()
+
+        env = os.environ.copy()
+        env.update({
+            "TEAM_SLUG": workspace_slug,
+            "DOMAIN": DOMAIN,
+            "DATA_PATH": workspace_data_host_path,
+            "CROSS_DOMAIN_SECRET": cross_domain_secret,
+        })
+
+        # Build and start containers
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "up", "-d", "--build", "api", "web"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to start kanban containers: {result.stderr}")
+
+        logger.info(f"[{workspace_slug}] Kanban containers rebuilt and started")
+
+    async def _workspace_start_rebuild_app(self, workspace_slug: str, workspace_id: str):
+        """Rebuild and start app containers (handles both new and legacy template structures)"""
+        if not self.docker_available:
+            raise RuntimeError("Docker CLI not available")
+
+        # Check for new structure first, then legacy
+        compose_file = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml"
+        legacy_compose_file = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/app/docker-compose.yml"
+        is_legacy = False
+
+        if not Path(compose_file).exists():
+            if Path(legacy_compose_file).exists():
+                compose_file = legacy_compose_file
+                is_legacy = True
+            else:
+                logger.warning(f"[{workspace_slug}] No app compose file found, skipping")
+                return
+
+        project_name = f"{workspace_slug}-app"
+
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "up", "-d", "--build"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+
+        if result.returncode != 0:
+            logger.warning(f"[{workspace_slug}] App containers failed to start: {result.stderr}")
+            return
+
+        logger.info(f"[{workspace_slug}] App containers rebuilt and started")
+
+        # For legacy apps, connect key containers to kanban-global network for Traefik routing
+        if is_legacy:
+            await self._connect_legacy_app_to_network(workspace_slug)
+
+    async def _connect_legacy_app_to_network(self, workspace_slug: str):
+        """Connect legacy app containers to kanban-global network for Traefik routing"""
+        containers_to_connect = [
+            f"{workspace_slug}-app-frontend",
+            f"{workspace_slug}-app-backend",
+        ]
+
+        for container in containers_to_connect:
+            result = subprocess.run(
+                ["docker", "network", "connect", NETWORK_NAME, container],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if result.returncode == 0:
+                logger.info(f"[{workspace_slug}] Connected {container} to {NETWORK_NAME}")
+            elif "already exists" in result.stderr.lower():
+                logger.debug(f"[{workspace_slug}] {container} already connected to {NETWORK_NAME}")
+            else:
+                logger.warning(f"[{workspace_slug}] Failed to connect {container} to {NETWORK_NAME}: {result.stderr}")
+
+    async def _workspace_start_rebuild_sandboxes(self, workspace_slug: str, workspace_id: str):
+        """Rebuild and start all sandbox containers for this workspace"""
+        if not self.docker_available:
+            raise RuntimeError("Docker CLI not available")
+
+        sandboxes = self._get_workspace_sandboxes(workspace_slug)
+        for full_slug in sandboxes:
+            compose_file = f"{HOST_PROJECT_PATH}/data/sandboxes/{full_slug}/docker-compose.app.yml"
+            project_name = f"{full_slug}-app"
+
+            result = subprocess.run(
+                ["docker", "compose", "-f", compose_file, "-p", project_name, "up", "-d", "--build"],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+
+            if result.returncode != 0:
+                logger.warning(f"[{full_slug}] Sandbox containers failed to start: {result.stderr}")
+            else:
+                logger.info(f"[{full_slug}] Sandbox containers rebuilt and started")
+
+    async def _workspace_restart_stop_kanban(self, workspace_slug: str, workspace_id: str):
+        """Stop workspace kanban containers"""
+        if not self.docker_available:
+            return
+
+        project_name = f"{workspace_slug}-kanban"
+        compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
+        workspace_data_host_path = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}"
+
+        env = os.environ.copy()
+        env.update({
+            "TEAM_SLUG": workspace_slug,
+            "DOMAIN": DOMAIN,
+            "DATA_PATH": workspace_data_host_path,
+        })
+
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "stop"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False
+        )
+
+        if result.returncode == 0:
+            logger.info(f"[{workspace_slug}] Kanban containers stopped")
+        else:
+            logger.warning(f"[{workspace_slug}] Stop warning: {result.stderr}")
+
+    async def _workspace_restart_rebuild_kanban(self, workspace_slug: str, workspace_id: str):
+        """Rebuild workspace kanban containers"""
+        if not self.docker_available:
+            raise RuntimeError("Docker CLI not available")
+
+        project_name = f"{workspace_slug}-kanban"
+        compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
+        workspace_data_host_path = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}"
+
+        # Get cross-domain secret from Key Vault (production) or environment (development)
+        cross_domain_secret = keyvault_service.get_cross_domain_secret()
+
+        env = os.environ.copy()
+        env.update({
+            "TEAM_SLUG": workspace_slug,
+            "DOMAIN": DOMAIN,
+            "DATA_PATH": workspace_data_host_path,
+            "CROSS_DOMAIN_SECRET": cross_domain_secret,
+        })
+
+        # Remove containers and rebuild
+        subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "down", "--rmi", "local"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False
+        )
+
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "build", "--no-cache"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False
+        )
+
+        if result.returncode != 0:
+            logger.warning(f"[{workspace_slug}] Rebuild warning: {result.stderr}")
+
+        logger.info(f"[{workspace_slug}] Kanban containers rebuilt")
+
+    async def _workspace_restart_start_kanban(self, workspace_slug: str, workspace_id: str):
+        """Start workspace kanban containers"""
+        if not self.docker_available:
+            raise RuntimeError("Docker CLI not available")
+
+        project_name = f"{workspace_slug}-kanban"
+        compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
+        workspace_data_host_path = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}"
+
+        # Get cross-domain secret from Key Vault (production) or environment (development)
+        cross_domain_secret = keyvault_service.get_cross_domain_secret()
+
+        env = os.environ.copy()
+        env.update({
+            "TEAM_SLUG": workspace_slug,
+            "DOMAIN": DOMAIN,
+            "DATA_PATH": workspace_data_host_path,
+            "CROSS_DOMAIN_SECRET": cross_domain_secret,
+        })
+
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "up", "-d", "api", "web"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to start kanban containers: {result.stderr}")
+
+        logger.info(f"[{workspace_slug}] Kanban containers started")
+
+    async def _workspace_restart_stop_app(self, workspace_slug: str, workspace_id: str):
+        """Stop workspace app containers"""
+        if not self.docker_available:
+            return
+
+        compose_file = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml"
+        project_name = f"{workspace_slug}-app"
+
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "stop"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+
+        if result.returncode == 0:
+            logger.info(f"[{workspace_slug}] App containers stopped")
+        else:
+            logger.warning(f"[{workspace_slug}] App stop warning: {result.stderr}")
+
+    async def _workspace_restart_rebuild_app(self, workspace_slug: str, workspace_id: str):
+        """Rebuild and start workspace app containers"""
+        if not self.docker_available:
+            raise RuntimeError("Docker CLI not available")
+
+        compose_file = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml"
+        project_name = f"{workspace_slug}-app"
+
+        # Down with image removal, then rebuild
+        subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "down", "--rmi", "local"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "up", "-d", "--build"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+
+        if result.returncode != 0:
+            logger.warning(f"[{workspace_slug}] App rebuild warning: {result.stderr}")
+
+        logger.info(f"[{workspace_slug}] App containers rebuilt and started")
+
+    async def _workspace_restart_app(self, workspace_slug: str, workspace_id: str):
+        """Restart workspace app containers (no rebuild)"""
+        if not self.docker_available:
+            return
+
+        compose_file = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml"
+        project_name = f"{workspace_slug}-app"
+
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "restart"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+
+        if result.returncode == 0:
+            logger.info(f"[{workspace_slug}] App containers restarted")
+        else:
+            logger.warning(f"[{workspace_slug}] App restart warning: {result.stderr}")
+
     async def delete_workspace(self, task: dict):
         """Delete a workspace and all its resources"""
         task_id = task["task_id"]
@@ -1402,7 +2082,6 @@ class Orchestrator:
         steps = [
             ("Deleting sandboxes", self._workspace_delete_sandboxes),
             ("Stopping app containers", self._workspace_stop_app),
-            ("Stopping workspace agent", self._workspace_delete_agent),
             ("Deleting GitHub repository", self._workspace_delete_github_repo),
             ("Deleting Azure app registration", self._workspace_delete_azure_app),
             ("Archiving workspace data", self._workspace_archive_data),
@@ -1456,7 +2135,6 @@ class Orchestrator:
 
             try:
                 # Stop and remove sandbox resources
-                await self._sandbox_stop_agent(full_slug, sandbox_id)
                 await self._sandbox_stop_containers(full_slug, sandbox_id)
                 await self._sandbox_remove_containers(full_slug, sandbox_id)
                 await self._sandbox_delete_branch(full_slug, sandbox_id)
@@ -1486,7 +2164,7 @@ class Orchestrator:
             logger.info(f"[{workspace_slug}] No app compose file found, skipping")
             return
 
-        project_name = f"kanban-app-{workspace_slug}"
+        project_name = f"{workspace_slug}-app"
         logger.info(f"[{workspace_slug}] Stopping app containers (project: {project_name})")
 
         # Stop and remove containers
@@ -1506,17 +2184,6 @@ class Orchestrator:
                 container_name = f"{workspace_slug}-{suffix}"
                 run_docker_cmd(["rm", "-f", container_name], check=False)
             logger.info(f"[{workspace_slug}] App containers removed (fallback)")
-
-    async def _workspace_delete_agent(self, workspace_slug: str, workspace_id: str):
-        """Delete workspace agent container"""
-        agent_id = f"{workspace_slug}-main"
-        logger.info(f"[{workspace_slug}] Stopping workspace agent: {agent_id}")
-
-        try:
-            await agent_factory.destroy_agent(agent_id)
-            logger.info(f"[{workspace_slug}] Workspace agent stopped")
-        except Exception as e:
-            logger.warning(f"[{workspace_slug}] Error stopping agent (may not exist): {e}")
 
     async def _workspace_delete_github_repo(self, workspace_slug: str, workspace_id: str):
         """Delete GitHub repository for the workspace app"""
@@ -1624,7 +2291,6 @@ class Orchestrator:
             ("Cloning workspace database", self._sandbox_clone_database),
             ("Creating sandbox directory", self._sandbox_create_directory),
             ("Deploying sandbox containers", self._sandbox_deploy_containers),
-            ("Provisioning sandbox agent", self._sandbox_provision_agent),
             ("Running health check", self._sandbox_health_check),
             ("Finalizing sandbox", self._sandbox_finalize),
         ]
@@ -1805,10 +2471,6 @@ class Orchestrator:
         # Generate secrets
         postgres_password = secrets.token_hex(16)
         app_secret_key = secrets.token_hex(32)
-        agent_webhook_secret = self._current_payload.get("agent_webhook_secret") or generate_webhook_secret()
-
-        # Store webhook secret in payload for agent provisioning
-        self._current_payload["agent_webhook_secret"] = agent_webhook_secret
 
         # Paths
         workspace_data_path = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}"
@@ -1832,7 +2494,6 @@ class Orchestrator:
                 database_name=database_name,
                 postgres_password=postgres_password,
                 app_secret_key=app_secret_key,
-                agent_webhook_secret=agent_webhook_secret,
                 data_path=sandbox_data_path,
                 app_source_path=app_source_path,
                 kanban_api_url=kanban_api_url,
@@ -1849,11 +2510,16 @@ class Orchestrator:
             logger.error(f"[{full_slug}] Failed to render sandbox template: {e}")
             raise
 
-        # Write compose file
-        compose_file = Path(f"/tmp/sandbox-{full_slug}-compose.yml")
-        compose_file.write_text(compose_content)
+        # Write compose file to persistent location in sandbox directory
+        compose_file_host = f"{HOST_PROJECT_PATH}/data/sandboxes/{full_slug}/docker-compose.app.yml"
+        compose_file = Path(f"/app/data/sandboxes/{full_slug}/docker-compose.app.yml")
 
-        project_name = f"kanban-sandbox-{full_slug}"
+        # Ensure sandbox directory exists
+        compose_file.parent.mkdir(parents=True, exist_ok=True)
+        compose_file.write_text(compose_content)
+        logger.info(f"[{full_slug}] Saved compose file to {compose_file_host}")
+
+        project_name = f"{full_slug}-app"
 
         try:
             # Create sandbox data directory
@@ -1861,7 +2527,7 @@ class Orchestrator:
 
             # Stop and remove existing stack if it exists
             subprocess.run(
-                ["docker", "compose", "-f", str(compose_file), "-p", project_name, "down", "--remove-orphans"],
+                ["docker", "compose", "-f", compose_file_host, "-p", project_name, "down", "--remove-orphans"],
                 capture_output=True,
                 text=True,
                 check=False
@@ -1888,7 +2554,7 @@ class Orchestrator:
 
             # Start the stack
             result = subprocess.run(
-                ["docker", "compose", "-f", str(compose_file), "-p", project_name, "up", "-d"],
+                ["docker", "compose", "-f", compose_file_host, "-p", project_name, "up", "-d"],
                 capture_output=True,
                 text=True,
                 check=True
@@ -1899,46 +2565,8 @@ class Orchestrator:
 
             logger.info(f"[{full_slug}] Sandbox containers deployed")
 
-        finally:
-            # Clean up compose file
-            if compose_file.exists():
-                compose_file.unlink()
-
-    async def _sandbox_provision_agent(self, full_slug: str, sandbox_id: str):
-        """Provision dedicated agent for sandbox"""
-        workspace_slug = self._current_payload["workspace_slug"]
-        sandbox_slug = self._current_payload["sandbox_slug"]
-        git_branch = f"sandbox/{full_slug}"
-
-        logger.info(f"[{full_slug}] Provisioning sandbox agent: kanban-agent-{full_slug}")
-
-        # Kanban API URL for the workspace
-        if PORT == "443":
-            kanban_api_url = f"https://{workspace_slug}.{DOMAIN}/api"
-        else:
-            kanban_api_url = f"https://{workspace_slug}.{DOMAIN}:{PORT}/api"
-
-        # Target project path on host
-        target_project_path = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/app"
-
-        # Generate webhook secret
-        webhook_secret = self._current_payload.get("agent_webhook_secret") or generate_webhook_secret()
-
-        try:
-            agent_info = await agent_factory.provision_agent(
-                agent_id=full_slug,
-                kanban_api_url=kanban_api_url,
-                target_project_path=target_project_path,
-                sandbox_branch=git_branch,
-                webhook_secret=webhook_secret,
-            )
-
-            # Store agent info in payload for later steps
-            self._current_payload["agent_info"] = agent_info
-            logger.info(f"[{full_slug}] Agent provisioned: {agent_info['container_name']}")
-
         except Exception as e:
-            logger.error(f"[{full_slug}] Failed to provision agent: {e}")
+            logger.error(f"[{full_slug}] Sandbox deployment failed: {e}")
             raise
 
     async def _sandbox_health_check(self, full_slug: str, sandbox_id: str):
@@ -1999,7 +2627,6 @@ class Orchestrator:
         logger.info(f"Deleting sandbox: {full_slug}")
 
         steps = [
-            ("Stopping sandbox agent", self._sandbox_stop_agent),
             ("Stopping sandbox containers", self._sandbox_stop_containers),
             ("Removing sandbox containers", self._sandbox_remove_containers),
             ("Deleting git branch", self._sandbox_delete_branch),
@@ -2033,14 +2660,6 @@ class Orchestrator:
             await self.fail_task(task_id, str(e))
             raise
 
-    async def _sandbox_stop_agent(self, full_slug: str, sandbox_id: str):
-        """Stop sandbox agent container"""
-        logger.info(f"[{full_slug}] Stopping agent")
-        try:
-            await agent_factory.destroy_agent(full_slug)
-        except Exception as e:
-            logger.warning(f"[{full_slug}] Error stopping agent (may not exist): {e}")
-
     async def _sandbox_stop_containers(self, full_slug: str, sandbox_id: str):
         """Stop sandbox containers"""
         if not self.docker_available:
@@ -2048,7 +2667,7 @@ class Orchestrator:
             return
 
         logger.info(f"[{full_slug}] Stopping containers")
-        project_name = f"kanban-sandbox-{full_slug}"
+        project_name = f"{full_slug}-app"
 
         # Stop individual containers if compose file not available
         for suffix in ["api", "web", "postgres", "redis"]:
@@ -2069,7 +2688,7 @@ class Orchestrator:
             run_docker_cmd(["rm", "-f", container_name], check=False)
 
         # Also try removing by compose project name
-        project_name = f"kanban-sandbox-{full_slug}"
+        project_name = f"{full_slug}-app"
         run_docker_cmd(["compose", "-p", project_name, "down", "--remove-orphans"], check=False)
 
     async def _sandbox_delete_branch(self, full_slug: str, sandbox_id: str):
@@ -2178,41 +2797,6 @@ class Orchestrator:
             except Exception as e2:
                 logger.error(f"[{full_slug}] Failed to delete sandbox data: {e2}")
                 # Don't raise - continue with deletion
-
-    async def restart_sandbox_agent(self, task: dict):
-        """Restart a sandbox agent"""
-        task_id = task["task_id"]
-        payload = task["payload"]
-        sandbox_id = payload["sandbox_id"]
-        full_slug = payload["full_slug"]
-        regenerate_secret = payload.get("regenerate_secret", False)
-
-        logger.info(f"Restarting sandbox agent: {full_slug} (regenerate_secret={regenerate_secret})")
-
-        steps = [
-            ("Stopping agent", self._sandbox_stop_agent),
-            ("Starting agent", self._sandbox_provision_agent),
-        ]
-
-        try:
-            for i, (step_name, step_func) in enumerate(steps, 1):
-                await self.update_progress(task_id, i, len(steps), step_name)
-                await step_func(full_slug, sandbox_id)
-                logger.info(f"[{full_slug}] {step_name} - completed")
-
-            await self.complete_task(task_id, {
-                "action": "restart_sandbox_agent",
-                "sandbox_id": sandbox_id,
-                "full_slug": full_slug,
-            })
-
-            logger.info(f"Sandbox agent {full_slug} restarted successfully")
-
-        except Exception as e:
-            logger.error(f"Sandbox agent restart failed: {e}")
-            await self.fail_task(task_id, str(e))
-            raise
-
 
 async def main():
     orchestrator = Orchestrator()

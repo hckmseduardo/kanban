@@ -147,6 +147,7 @@ class TaskService:
             queue_name=self.QUEUE_PROVISIONING,
             task_type="workspace.provision",
             payload={
+                "action": "create_workspace",
                 "workspace_id": workspace_id,
                 "workspace_slug": workspace_slug,
                 "owner_id": owner_id,
@@ -181,6 +182,7 @@ class TaskService:
         5. Clean up all resources
         """
         payload = {
+            "action": "delete_workspace",
             "workspace_id": workspace_id,
             "workspace_slug": workspace_slug,
             "sandboxes": sandboxes or [],
@@ -194,6 +196,71 @@ class TaskService:
             queue_name=self.QUEUE_PROVISIONING,
             task_type="workspace.delete",
             payload=payload,
+            user_id=user_id,
+            priority="high"
+        )
+
+    async def create_workspace_restart_task(
+        self,
+        workspace_id: str,
+        workspace_slug: str,
+        user_id: str,
+        rebuild: bool = False,
+        restart_app: bool = True,
+    ) -> str:
+        """Create task to restart/rebuild workspace containers.
+
+        This will:
+        1. Stop kanban containers
+        2. If rebuild=True, rebuild kanban images
+        3. Start kanban containers
+        4. If restart_app=True and app exists:
+           - If rebuild=True, rebuild app containers
+           - Otherwise just restart app containers
+        5. Run health check
+        """
+        return await redis_service.enqueue_task(
+            queue_name=self.QUEUE_PROVISIONING,
+            task_type="workspace.restart",
+            payload={
+                "workspace_id": workspace_id,
+                "workspace_slug": workspace_slug,
+                "rebuild": rebuild,
+                "restart_app": restart_app,
+            },
+            user_id=user_id,
+            priority="high"
+        )
+
+    async def create_workspace_start_task(
+        self,
+        workspace_id: str,
+        workspace_slug: str,
+        user_id: str,
+        kanban_only: bool = False,
+    ) -> str:
+        """Create task to start/rebuild workspace components.
+
+        This will:
+        1. Validate workspace
+        2. Rebuild and start kanban containers
+        3. If kanban_only=False (default):
+           - Rebuild and start app containers (if exists)
+           - Rebuild and start sandbox containers (if any)
+        4. Run health check
+
+        Args:
+            kanban_only: If True, only start kanban containers (faster for
+                        when user just wants to open the kanban board)
+        """
+        return await redis_service.enqueue_task(
+            queue_name=self.QUEUE_PROVISIONING,
+            task_type="workspace.start",
+            payload={
+                "workspace_id": workspace_id,
+                "workspace_slug": workspace_slug,
+                "kanban_only": kanban_only,
+            },
             user_id=user_id,
             priority="high"
         )

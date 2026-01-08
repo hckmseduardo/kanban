@@ -1,21 +1,40 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { workspacesApi, Workspace } from '../services/api'
+import { workspacesApi, Workspace, WorkspaceHealthBatch } from '../services/api'
 import { useAuthStore } from '../stores/authStore'
+import { useTaskProgressStore } from '../stores/taskProgressStore'
 
 export default function WorkspacesPage() {
   const { user } = useAuthStore()
   const queryClient = useQueryClient()
+  const { tasks, getTaskByWorkspaceSlug } = useTaskProgressStore()
   const [deleteConfirm, setDeleteConfirm] = useState<{ slug: string; name: string } | null>(null)
   const [deleteInput, setDeleteInput] = useState('')
 
   const { data, isLoading } = useQuery({
     queryKey: ['workspaces'],
     queryFn: () => workspacesApi.list().then(res => res.data),
-    staleTime: 5 * 60 * 1000,
-    refetchOnWindowFocus: false,
+    staleTime: 10 * 1000, // Short stale time for quick updates during provisioning
+    refetchOnWindowFocus: true,
   })
+
+  // Get health status for all workspaces
+  const { data: healthData } = useQuery({
+    queryKey: ['workspaces-health-batch'],
+    queryFn: () => workspacesApi.getHealthBatch().then(res => res.data),
+    enabled: (data?.workspaces?.length ?? 0) > 0,
+    staleTime: 30000, // Cache for 30 seconds
+    retry: 1,
+  })
+
+  // Helper to check if workspace containers are running
+  const isWorkspaceStopped = (workspace: Workspace): boolean => {
+    if (workspace.status !== 'active') return false
+    const health = healthData?.workspaces?.[workspace.slug]
+    if (!health) return false // Unknown - assume running
+    return !health.all_healthy
+  }
 
   const deleteMutation = useMutation({
     mutationFn: (slug: string) => workspacesApi.delete(slug),
@@ -26,7 +45,10 @@ export default function WorkspacesPage() {
     }
   })
 
-  const getStatusColor = (status: string) => {
+  const getStatusColor = (status: string, isStopped: boolean = false) => {
+    if (status === 'active' && isStopped) {
+      return 'bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 ring-1 ring-amber-200 dark:ring-amber-800'
+    }
     switch (status) {
       case 'active':
         return 'bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400 ring-1 ring-green-200 dark:ring-green-800'
@@ -41,7 +63,10 @@ export default function WorkspacesPage() {
     }
   }
 
-  const getStatusLabel = (status: string) => {
+  const getStatusLabel = (status: string, isStopped: boolean = false) => {
+    if (status === 'active' && isStopped) {
+      return 'Stopped'
+    }
     switch (status) {
       case 'active': return 'Active'
       case 'provisioning': return 'Setting up...'
@@ -51,7 +76,10 @@ export default function WorkspacesPage() {
     }
   }
 
-  const getTopBorderColor = (status: string) => {
+  const getTopBorderColor = (status: string, isStopped: boolean = false) => {
+    if (status === 'active' && isStopped) {
+      return 'bg-gradient-to-r from-amber-400 to-amber-500'
+    }
     switch (status) {
       case 'active': return 'bg-gradient-to-r from-primary-500 to-primary-600'
       case 'provisioning': return 'bg-gradient-to-r from-yellow-400 to-yellow-500'
@@ -93,13 +121,17 @@ export default function WorkspacesPage() {
             }`}
           >
             {/* Colored top border based on status */}
-            <div className={`h-1.5 ${getTopBorderColor(workspace.status)}`} />
+            <div className={`h-1.5 ${getTopBorderColor(workspace.status, isWorkspaceStopped(workspace))}`} />
             <div className="p-5 flex-1 flex flex-col">
               <div className="flex items-start gap-3">
                 {/* Workspace Avatar */}
                 <div className="flex-shrink-0">
                   <div className={`h-14 w-14 rounded-xl flex items-center justify-center transition-transform duration-200 ${
-                    workspace.status === 'active' ? 'bg-gradient-to-br from-primary-400 to-primary-600' : 'bg-gray-300 dark:bg-dark-600'
+                    workspace.status === 'active' && !isWorkspaceStopped(workspace)
+                      ? 'bg-gradient-to-br from-primary-400 to-primary-600'
+                      : workspace.status === 'active' && isWorkspaceStopped(workspace)
+                        ? 'bg-gradient-to-br from-amber-400 to-amber-600'
+                        : 'bg-gray-300 dark:bg-dark-600'
                   }`}>
                     <span className="text-white text-xl font-bold">
                       {workspace.name.charAt(0).toUpperCase()}
@@ -134,9 +166,41 @@ export default function WorkspacesPage() {
                 <p className="mt-3 text-sm text-gray-500 dark:text-gray-400 line-clamp-2">{workspace.description}</p>
               )}
 
+              {/* Progress indicator for provisioning workspaces */}
+              {(workspace.status === 'provisioning' || workspace.status === 'deleting') && (() => {
+                const taskProgress = getTaskByWorkspaceSlug(workspace.slug)
+                return (
+                  <div className="mt-3 space-y-2">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-gray-500 dark:text-gray-400 truncate max-w-[180px]">
+                        {taskProgress?.stepName || (workspace.status === 'provisioning' ? 'Starting provisioning...' : 'Deleting...')}
+                      </span>
+                      <span className="text-gray-400 dark:text-gray-500 ml-2">
+                        {taskProgress ? `${Math.round(taskProgress.percentage)}%` : '0%'}
+                      </span>
+                    </div>
+                    <div className="w-full bg-gray-200 dark:bg-dark-600 rounded-full h-1.5 overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all duration-500 ease-out ${
+                          workspace.status === 'deleting'
+                            ? 'bg-red-500'
+                            : 'bg-gradient-to-r from-yellow-400 to-yellow-500'
+                        }`}
+                        style={{ width: `${taskProgress?.percentage || 5}%` }}
+                      />
+                    </div>
+                    {taskProgress && taskProgress.totalSteps > 1 && (
+                      <p className="text-xs text-gray-400 dark:text-gray-500">
+                        Step {taskProgress.step} of {taskProgress.totalSteps}
+                      </p>
+                    )}
+                  </div>
+                )
+              })()}
+
               <div className="mt-4 flex items-center justify-between flex-1 items-end">
-                <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${getStatusColor(workspace.status)}`}>
-                  {getStatusLabel(workspace.status)}
+                <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${getStatusColor(workspace.status, isWorkspaceStopped(workspace))}`}>
+                  {getStatusLabel(workspace.status, isWorkspaceStopped(workspace))}
                 </span>
                 <div className="flex items-center gap-2">
                   {workspace.user_role === 'owner' && workspace.status !== 'deleted' && (

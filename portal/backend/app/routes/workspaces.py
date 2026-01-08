@@ -7,6 +7,7 @@ This means:
 - Access to workspace requires team membership
 """
 
+import json
 import logging
 import uuid
 from typing import Optional, Tuple
@@ -292,10 +293,12 @@ async def create_workspace(
 
     # Create workspace record
     # Note: owner is added as a member with role="owner" when workspace becomes active
+    # We store created_by so the workspace appears in their list immediately during provisioning
     workspace_data = {
         "slug": request.slug,
         "name": request.name,
         "description": request.description,
+        "created_by": auth.user["id"],  # Track who created the workspace
         "kanban_team_id": None,  # Will be set during provisioning
         "app_template_id": app_template["id"] if app_template else None,
         "github_org": request.github_org,
@@ -456,6 +459,305 @@ async def delete_workspace(
         "message": "Workspace deletion started",
         "task_id": task_id
     }
+
+
+class WorkspaceRestartRequest(BaseModel):
+    """Request to restart workspace containers"""
+    rebuild: bool = False  # If true, rebuild images from scratch
+    restart_app: bool = True  # If true, also restart app containers
+
+
+@router.post("/{slug}/restart")
+async def restart_workspace(
+    slug: str,
+    request: WorkspaceRestartRequest = WorkspaceRestartRequest(),
+    auth: AuthContext = Depends(require_scope("workspaces:write"))
+):
+    """
+    Restart/rebuild workspace containers.
+
+    This starts an async restart process that will:
+    1. Stop kanban containers
+    2. If rebuild=True, rebuild kanban images from scratch
+    3. Start kanban containers
+    4. If restart_app=True and app exists, restart/rebuild app containers
+    5. Run health check
+
+    Access: Owner or admin only
+
+    Authentication: JWT or Portal API token
+    Required scope: workspaces:write
+    """
+    workspace, membership = get_workspace_with_access(
+        slug, auth.user["id"], require_role="admin"
+    )
+
+    # Check workspace is active
+    if workspace.get("status") not in ["active", None]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot restart workspace with status '{workspace.get('status')}'"
+        )
+
+    # Create restart task
+    task_id = await task_service.create_workspace_restart_task(
+        workspace_id=workspace["id"],
+        workspace_slug=workspace["slug"],
+        user_id=auth.user["id"],
+        rebuild=request.rebuild,
+        restart_app=request.restart_app,
+    )
+
+    logger.info(
+        f"Workspace restart started: {slug} by {auth.user['id']} "
+        f"(rebuild={request.rebuild}, restart_app={request.restart_app})"
+    )
+
+    return {
+        "message": "Workspace restart started",
+        "task_id": task_id,
+        "rebuild": request.rebuild,
+        "restart_app": request.restart_app
+    }
+
+
+@router.post("/{slug}/start")
+async def start_workspace(
+    slug: str,
+    auth: AuthContext = Depends(require_scope("workspaces:write"))
+):
+    """
+    Start workspace containers (rebuild and start all components).
+
+    This starts an async process that will:
+    1. Validate workspace
+    2. Rebuild and start kanban containers
+    3. Rebuild and start app containers (if exists)
+    4. Rebuild and start sandbox containers (if any)
+    5. Run health check
+
+    Access: Owner or admin only
+
+    Authentication: JWT or Portal API token
+    Required scope: workspaces:write
+    """
+    workspace, membership = get_workspace_with_access(
+        slug, auth.user["id"], require_role="admin"
+    )
+
+    # Check workspace is active (not provisioning or deleted)
+    if workspace.get("status") not in ["active", None]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot start workspace with status '{workspace.get('status')}'"
+        )
+
+    # Create start task
+    task_id = await task_service.create_workspace_start_task(
+        workspace_id=workspace["id"],
+        workspace_slug=workspace["slug"],
+        user_id=auth.user["id"],
+    )
+
+    logger.info(f"Workspace start initiated: {slug} by {auth.user['id']}")
+
+    return {
+        "message": "Workspace start initiated",
+        "task_id": task_id
+    }
+
+
+@router.post("/{slug}/start-kanban")
+async def start_workspace_kanban(
+    slug: str,
+    auth: AuthContext = Depends(require_scope("workspaces:write"))
+):
+    """
+    Start only the kanban containers for this workspace.
+
+    This is a faster alternative to /start when the user only needs to
+    access the kanban board. It will NOT start app or sandbox containers.
+
+    This starts an async process that will:
+    1. Validate workspace
+    2. Rebuild and start kanban containers
+    3. Run health check (kanban only)
+
+    Access: Owner or admin only
+
+    Authentication: JWT or Portal API token
+    Required scope: workspaces:write
+    """
+    workspace, membership = get_workspace_with_access(
+        slug, auth.user["id"], require_role="admin"
+    )
+
+    # Check workspace is active (not provisioning or deleted)
+    if workspace.get("status") not in ["active", None]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot start workspace with status '{workspace.get('status')}'"
+        )
+
+    # Create start task with kanban_only flag
+    task_id = await task_service.create_workspace_start_task(
+        workspace_id=workspace["id"],
+        workspace_slug=workspace["slug"],
+        user_id=auth.user["id"],
+        kanban_only=True,
+    )
+
+    logger.info(f"Workspace kanban start initiated: {slug} by {auth.user['id']}")
+
+    return {
+        "message": "Kanban start initiated",
+        "task_id": task_id
+    }
+
+
+@router.get("/health/batch")
+async def get_workspaces_health_batch(
+    auth: AuthContext = Depends(require_scope("workspaces:read"))
+):
+    """
+    Get health status for all user's workspaces.
+
+    Returns the running status of containers for all workspaces the user has access to.
+
+    Authentication: JWT or Portal API token
+    Required scope: workspaces:read
+    """
+    from app.models.workspace import WorkspaceHealthResponse, WorkspaceHealthBatchResponse, SandboxHealthStatus
+    import uuid
+    import asyncio
+
+    # Get all workspaces for this user
+    workspaces = db_service.get_user_workspaces(auth.user["id"])
+    if not workspaces:
+        return WorkspaceHealthBatchResponse(workspaces={})
+
+    # Only check active workspaces
+    active_workspaces = [w for w in workspaces if w.get("status") == "active"]
+    if not active_workspaces:
+        return WorkspaceHealthBatchResponse(workspaces={})
+
+    # Request health check for all workspaces
+    request_id = str(uuid.uuid4())
+    workspace_slugs = [w["slug"] for w in active_workspaces]
+    health_request = {
+        "request_id": request_id,
+        "workspace_slugs": workspace_slugs
+    }
+
+    # Get Redis connection
+    from app.services.redis_service import redis_service
+
+    # Push health check request
+    await redis_service.client.lpush("health_check:requests", json.dumps(health_request))
+
+    # Wait for result (poll for up to 15 seconds for batch)
+    for _ in range(150):  # 150 * 0.1s = 15s timeout
+        result = await redis_service.client.get(f"health_check:{request_id}:result")
+        if result:
+            health_data = json.loads(result)
+
+            # Build response with workspace IDs
+            workspace_health = {}
+            for ws in active_workspaces:
+                ws_health = health_data.get(ws["slug"], {})
+                sandboxes = [
+                    SandboxHealthStatus(
+                        slug=s.get("slug", ""),
+                        full_slug=s.get("full_slug", ""),
+                        running=s.get("running", False)
+                    )
+                    for s in ws_health.get("sandboxes", [])
+                ]
+                workspace_health[ws["slug"]] = WorkspaceHealthResponse(
+                    workspace_id=ws["id"],
+                    workspace_slug=ws["slug"],
+                    kanban_running=ws_health.get("kanban_running", False),
+                    app_running=ws_health.get("app_running"),
+                    sandboxes=sandboxes,
+                    all_healthy=ws_health.get("all_healthy", False)
+                )
+
+            return WorkspaceHealthBatchResponse(workspaces=workspace_health)
+        await asyncio.sleep(0.1)
+
+    # Timeout - return unknown status
+    raise HTTPException(
+        status_code=504,
+        detail="Health check timeout - orchestrator may be unavailable"
+    )
+
+
+@router.get("/{slug}/health")
+async def get_workspace_health(
+    slug: str,
+    auth: AuthContext = Depends(require_scope("workspaces:read"))
+):
+    """
+    Get workspace container health status.
+
+    Returns the running status of kanban, app, and sandbox containers.
+
+    Access: Any team member
+
+    Authentication: JWT or Portal API token
+    Required scope: workspaces:read
+    """
+    from app.models.workspace import WorkspaceHealthResponse, SandboxHealthStatus
+    import uuid
+
+    workspace, _ = get_workspace_with_access(slug, auth.user["id"])
+
+    # Request health check from orchestrator via Redis
+    request_id = str(uuid.uuid4())
+    health_request = {
+        "request_id": request_id,
+        "workspace_slugs": [workspace["slug"]]
+    }
+
+    # Get Redis connection
+    from app.services.redis_service import redis_service
+
+    # Push health check request
+    await redis_service.client.lpush("health_check:requests", json.dumps(health_request))
+
+    # Wait for result (poll for up to 10 seconds)
+    import asyncio
+    for _ in range(100):  # 100 * 0.1s = 10s timeout
+        result = await redis_service.client.get(f"health_check:{request_id}:result")
+        if result:
+            health_data = json.loads(result)
+            workspace_health = health_data.get(workspace["slug"], {})
+
+            # Convert sandbox data to SandboxHealthStatus objects
+            sandboxes = [
+                SandboxHealthStatus(
+                    slug=s.get("slug", ""),
+                    full_slug=s.get("full_slug", ""),
+                    running=s.get("running", False)
+                )
+                for s in workspace_health.get("sandboxes", [])
+            ]
+
+            return WorkspaceHealthResponse(
+                workspace_id=workspace["id"],
+                workspace_slug=workspace["slug"],
+                kanban_running=workspace_health.get("kanban_running", False),
+                app_running=workspace_health.get("app_running"),
+                sandboxes=sandboxes,
+                all_healthy=workspace_health.get("all_healthy", False)
+            )
+        await asyncio.sleep(0.1)
+
+    # Timeout - return unknown status
+    raise HTTPException(
+        status_code=504,
+        detail="Health check timeout - orchestrator may be unavailable"
+    )
 
 
 # ============================================================================
