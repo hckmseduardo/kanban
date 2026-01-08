@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.routes import auth, users, teams, tasks, portal_api, team_api, app_templates, workspaces, sandboxes
+from app.routes import auth, users, teams, tasks, portal_api, team_api, app_templates, workspaces, sandboxes, agents
 from app.services.redis_service import redis_service
 from app.services.task_service import task_service
 
@@ -119,6 +119,9 @@ app.include_router(
     prefix="/workspaces/{workspace_slug}/sandboxes",
     tags=["Sandboxes"]
 )
+
+# Agent routes (webhook for card events)
+app.include_router(agents.router, prefix="/agents", tags=["Agents"])
 
 
 # Health check endpoints

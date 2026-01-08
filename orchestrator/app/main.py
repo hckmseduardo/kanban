@@ -21,6 +21,7 @@ from app.services.github_service import github_service
 from app.services.certificate_service import certificate_service
 from app.services.azure_service import azure_service
 from app.services.keyvault_service import keyvault_service
+from app.services.claude_code_runner import claude_runner
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,6 +38,16 @@ HOST_IP = os.getenv("HOST_IP", "127.0.1")
 HOST_PROJECT_PATH = os.getenv("HOST_PROJECT_PATH", "/Volumes/dados/projects/kanban")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 ENTRA_CIAM_AUTHORITY = os.getenv("ENTRA_CIAM_AUTHORITY", "")
+
+# Try to load CROSS_DOMAIN_SECRET from Key Vault first, fall back to env var
+CROSS_DOMAIN_SECRET = os.getenv("CROSS_DOMAIN_SECRET", "")
+try:
+    _kv_cross_domain_secret = keyvault_service.get_secret("cross-domain-secret")
+    if _kv_cross_domain_secret:
+        CROSS_DOMAIN_SECRET = _kv_cross_domain_secret
+        logger.info("Loaded CROSS_DOMAIN_SECRET from Key Vault")
+except Exception as e:
+    logger.warning(f"Could not load CROSS_DOMAIN_SECRET from Key Vault: {e}")
 
 TEAMS_DIR = Path("/app/data/teams")
 # Use HOST_PROJECT_PATH for workspaces so docker compose build contexts resolve correctly
@@ -74,6 +85,8 @@ class Orchestrator:
     QUEUES = [
         "queue:provisioning:high",
         "queue:provisioning:normal",
+        "queue:agents:high",
+        "queue:agents:normal",
     ]
 
     def __init__(self):
@@ -300,6 +313,9 @@ class Orchestrator:
                 await self.provision_sandbox(task)
             elif task_type == "sandbox.delete":
                 await self.delete_sandbox(task)
+            # Agent tasks (on-demand AI processing)
+            elif task_type == "agent.process_card":
+                await self.process_agent_task(task)
             else:
                 logger.warning(f"Unknown task type: {task_type}")
 
@@ -1237,6 +1253,7 @@ class Orchestrator:
         steps = [
             ("Validating workspace configuration", self._workspace_validate),
             ("Creating kanban team", self._workspace_create_team),
+            ("Creating default boards", self._workspace_create_default_boards),
         ]
 
         if app_template_id:
@@ -1247,6 +1264,7 @@ class Orchestrator:
                 ("Issuing SSL certificate", self._workspace_issue_certificate),
                 ("Creating app database", self._workspace_create_database),
                 ("Deploying app containers", self._workspace_deploy_app),
+                ("Creating foundation sandbox", self._workspace_create_foundation_sandbox),
             ])
 
         steps.extend([
@@ -1305,6 +1323,130 @@ class Orchestrator:
         await self._start_containers(workspace_slug, workspace_id)
 
         logger.info(f"[{workspace_slug}] Kanban team created")
+
+    async def _workspace_create_default_boards(self, workspace_slug: str, workspace_id: str):
+        """Create default boards from templates in the kanban team"""
+        import httpx
+
+        # Build kanban API URL
+        if PORT == "443":
+            kanban_api_url = f"https://{workspace_slug}.{DOMAIN}/api"
+        else:
+            kanban_api_url = f"https://{workspace_slug}.{DOMAIN}:{PORT}/api"
+
+        logger.info(f"[{workspace_slug}] Creating default boards at {kanban_api_url}")
+
+        # Default board templates to create
+        default_boards = [
+            ("ideas-pipeline", "Ideas Pipeline"),
+            ("feature-request", "Feature Request"),
+            ("bug-tracking", "Bug Tracking"),
+        ]
+
+        ideas_board_id = None
+
+        # Headers for internal service authentication
+        headers = {
+            "X-Service-Secret": CROSS_DOMAIN_SECRET
+        }
+
+        # Wait for kanban API to be ready (containers just started)
+        async with httpx.AsyncClient(timeout=30.0, verify=False, headers=headers) as client:
+            # Health check with retries
+            for attempt in range(10):
+                try:
+                    response = await client.get(f"{kanban_api_url}/health")
+                    if response.status_code == 200:
+                        logger.info(f"[{workspace_slug}] Kanban API is ready")
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(2)
+            else:
+                logger.warning(f"[{workspace_slug}] Kanban API not responding, skipping board creation")
+                return
+
+            # Create boards from templates
+            for template_id, board_name in default_boards:
+                try:
+                    response = await client.post(
+                        f"{kanban_api_url}/templates/{template_id}/apply",
+                        params={"board_name": board_name},
+                    )
+
+                    if response.status_code < 400:
+                        board_data = response.json()
+                        logger.info(f"[{workspace_slug}] Created board '{board_name}' (id: {board_data.get('id')})")
+
+                        # Save Ideas Pipeline board ID for creating initial card
+                        if template_id == "ideas-pipeline":
+                            ideas_board_id = board_data.get("id")
+                    else:
+                        logger.warning(
+                            f"[{workspace_slug}] Failed to create board '{board_name}': "
+                            f"{response.status_code} - {response.text}"
+                        )
+
+                except Exception as e:
+                    logger.warning(f"[{workspace_slug}] Error creating board '{board_name}': {e}")
+                    # Continue with other boards even if one fails
+
+            # Create initial card in Ideas Pipeline board
+            if ideas_board_id:
+                try:
+                    # Get the first column of the board (should be "New Ideas" or similar)
+                    columns_response = await client.get(f"{kanban_api_url}/boards/{ideas_board_id}/columns")
+                    if columns_response.status_code == 200:
+                        columns = columns_response.json()
+                        if columns:
+                            first_column_id = columns[0].get("id")
+
+                            # Create the initial card
+                            card_data = {
+                                "title": "Welcome! Start here with your first idea",
+                                "description": """## How to use the Ideas Pipeline
+
+This board helps you explore and develop ideas from concept to implementation-ready.
+
+### Getting Started
+
+1. **Describe your idea** - Edit this card and explain what you want to build
+2. **Be specific** - Include details about the problem you're solving and how
+3. **Move to next step** - When ready, drag this card to the next column
+
+### The AI agents will help you:
+- **Idea Triage**: Analyze feasibility and potential
+- **Product Owner**: Define requirements and user stories
+- **UX Designer**: Create user flows and wireframes
+- **Architect**: Design the technical solution
+
+### Example idea format:
+
+**Problem**: Users struggle to track their expenses across multiple accounts
+
+**Solution**: A mobile app that automatically categorizes transactions and shows spending insights
+
+**Target users**: Young professionals aged 25-40
+
+---
+
+*Delete this card once you understand the process, or edit it with your first real idea!*""",
+                            }
+
+                            card_response = await client.post(
+                                f"{kanban_api_url}/boards/{ideas_board_id}/columns/{first_column_id}/cards",
+                                json=card_data,
+                            )
+
+                            if card_response.status_code < 400:
+                                logger.info(f"[{workspace_slug}] Created welcome card in Ideas Pipeline")
+                            else:
+                                logger.warning(f"[{workspace_slug}] Failed to create welcome card: {card_response.text}")
+
+                except Exception as e:
+                    logger.warning(f"[{workspace_slug}] Error creating welcome card: {e}")
+
+        logger.info(f"[{workspace_slug}] Default boards created")
 
     async def _workspace_create_github_repo(self, workspace_slug: str, workspace_id: str):
         """Create GitHub repository from app template"""
@@ -1579,6 +1721,50 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"[{workspace_slug}] App deployment failed: {e}")
             raise
+
+    async def _workspace_create_foundation_sandbox(self, workspace_slug: str, workspace_id: str):
+        """Create a foundation sandbox for the workspace via portal API"""
+        import httpx
+
+        sandbox_slug = "foundation"
+        full_slug = f"{workspace_slug}-{sandbox_slug}"
+
+        logger.info(f"[{workspace_slug}] Creating foundation sandbox: {full_slug}")
+
+        # Call portal API to create sandbox (this queues the provisioning task)
+        portal_api_url = "http://kanban-portal-api:8000"
+        headers = {
+            "X-Service-Secret": CROSS_DOMAIN_SECRET,
+            "Content-Type": "application/json"
+        }
+
+        sandbox_request = {
+            "slug": sandbox_slug,
+            "name": "Foundation",
+            "description": "Main development sandbox",
+            "source_branch": "main"
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{portal_api_url}/workspaces/{workspace_slug}/sandboxes",
+                    json=sandbox_request,
+                    headers=headers
+                )
+
+                if response.status_code < 400:
+                    sandbox_data = response.json()
+                    logger.info(f"[{workspace_slug}] Created foundation sandbox via portal API: {sandbox_data.get('id')}")
+                else:
+                    logger.warning(
+                        f"[{workspace_slug}] Failed to create foundation sandbox: "
+                        f"{response.status_code} - {response.text}"
+                    )
+
+        except Exception as e:
+            logger.warning(f"[{workspace_slug}] Failed to create foundation sandbox (non-fatal): {e}")
+            # Don't fail workspace provisioning if sandbox creation fails
 
     async def _workspace_health_check(self, workspace_slug: str, workspace_id: str):
         """Health check for workspace components"""
@@ -2797,6 +2983,279 @@ class Orchestrator:
             except Exception as e2:
                 logger.error(f"[{full_slug}] Failed to delete sandbox data: {e2}")
                 # Don't raise - continue with deletion
+
+    # =========================================================================
+    # Agent Task Processing (On-demand AI)
+    # =========================================================================
+
+    async def process_agent_task(self, task: dict):
+        """Process an AI agent task using Claude Code subprocess.
+
+        This method:
+        1. Prepares the sandbox context (git branch, working directory)
+        2. Builds the agent prompt from card data
+        3. Spawns Claude Code subprocess
+        4. Streams progress to card comments
+        5. Updates card on completion
+        """
+        task_id = task["task_id"]
+        payload = task["payload"]
+        card_id = payload["card_id"]
+        card_title = payload["card_title"]
+        card_description = payload["card_description"]
+        column_name = payload["column_name"]
+        agent_type = payload["agent_type"]
+        sandbox_id = payload["sandbox_id"]
+        workspace_slug = payload["workspace_slug"]
+        git_branch = payload["git_branch"]
+        kanban_api_url = payload["kanban_api_url"]
+        target_project_path = payload["target_project_path"]
+
+        logger.info(
+            f"Processing agent task: card={card_id}, agent={agent_type}, "
+            f"sandbox={sandbox_id}"
+        )
+
+        steps = [
+            ("Preparing sandbox context", self._agent_prepare_context),
+            ("Running AI agent", self._agent_run_claude),
+            ("Processing results", self._agent_process_results),
+            ("Updating card", self._agent_update_card),
+        ]
+
+        # Store payload for step functions
+        self._current_payload = payload
+        self._agent_result = None
+
+        try:
+            for i, (step_name, step_func) in enumerate(steps, 1):
+                await self.update_progress(task_id, i, len(steps), step_name)
+                await step_func(card_id, sandbox_id)
+                logger.info(f"[{card_id}] {step_name} - completed")
+
+            await self.complete_task(task_id, {
+                "action": "process_card",
+                "card_id": card_id,
+                "agent_type": agent_type,
+                "success": self._agent_result.success if self._agent_result else False,
+                "files_modified": self._agent_result.files_modified if self._agent_result else [],
+            })
+
+            logger.info(f"Agent task completed: card={card_id}")
+
+        except Exception as e:
+            logger.error(f"Agent task failed: {e}")
+            await self.fail_task(task_id, str(e))
+            raise
+
+    async def _agent_prepare_context(self, card_id: str, sandbox_id: str):
+        """Prepare the sandbox context for agent execution."""
+        payload = self._current_payload
+        git_branch = payload["git_branch"]
+        target_project_path = payload["target_project_path"]
+
+        # Ensure target directory exists
+        target_path = Path(target_project_path)
+        if not target_path.exists():
+            logger.warning(f"Target path does not exist: {target_project_path}")
+            # For sandboxes, the path should be under the workspace repo
+            workspace_slug = payload["workspace_slug"]
+            base_repo_path = Path(HOST_PROJECT_PATH) / "data" / "repos" / workspace_slug
+            if base_repo_path.exists():
+                # Use workspace repo as fallback
+                payload["target_project_path"] = str(base_repo_path)
+                logger.info(f"Using workspace repo path: {base_repo_path}")
+            else:
+                raise RuntimeError(f"No valid project path found for {sandbox_id}")
+
+        # Checkout the correct branch
+        target_path = Path(payload["target_project_path"])
+        if target_path.exists() and (target_path / ".git").exists():
+            try:
+                result = subprocess.run(
+                    ["git", "checkout", git_branch],
+                    cwd=str(target_path),
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode != 0:
+                    # Branch might not exist yet, try creating it
+                    result = subprocess.run(
+                        ["git", "checkout", "-b", git_branch],
+                        cwd=str(target_path),
+                        capture_output=True,
+                        text=True
+                    )
+                logger.info(f"Checked out branch: {git_branch}")
+            except Exception as e:
+                logger.warning(f"Could not checkout branch {git_branch}: {e}")
+
+    async def _agent_run_claude(self, card_id: str, sandbox_id: str):
+        """Run Claude Code subprocess for the agent task."""
+        payload = self._current_payload
+        card_title = payload["card_title"]
+        card_description = payload["card_description"]
+        column_name = payload["column_name"]
+        agent_type = payload["agent_type"]
+        target_project_path = payload["target_project_path"]
+
+        # Build the prompt for Claude Code
+        prompt = self._build_agent_prompt(
+            agent_type=agent_type,
+            card_title=card_title,
+            card_description=card_description,
+            column_name=column_name,
+        )
+
+        # Progress callback for streaming updates
+        async def on_progress(message: str, percentage: int):
+            # Could stream to card comments here
+            logger.debug(f"Agent progress ({percentage}%): {message[:100]}")
+
+        # Run Claude Code
+        self._agent_result = await claude_runner.run(
+            prompt=prompt,
+            working_dir=target_project_path,
+            agent_type=agent_type,
+        )
+
+        if not self._agent_result.success:
+            logger.error(f"Claude Code failed: {self._agent_result.error}")
+
+    async def _agent_process_results(self, card_id: str, sandbox_id: str):
+        """Process results from Claude Code execution."""
+        if not self._agent_result:
+            return
+
+        result = self._agent_result
+        payload = self._current_payload
+        target_project_path = payload["target_project_path"]
+        git_branch = payload["git_branch"]
+
+        # If files were modified, commit them
+        if result.success and result.files_modified:
+            target_path = Path(target_project_path)
+            try:
+                # Stage changes
+                subprocess.run(
+                    ["git", "add", "-A"],
+                    cwd=str(target_path),
+                    capture_output=True
+                )
+
+                # Commit
+                commit_msg = f"Agent: {payload['agent_type']} processed card {card_id[:8]}"
+                subprocess.run(
+                    ["git", "commit", "-m", commit_msg],
+                    cwd=str(target_path),
+                    capture_output=True
+                )
+
+                logger.info(f"Committed changes: {len(result.files_modified)} files")
+            except Exception as e:
+                logger.warning(f"Could not commit changes: {e}")
+
+    async def _agent_update_card(self, card_id: str, sandbox_id: str):
+        """Update the kanban card with agent results."""
+        if not self._agent_result:
+            return
+
+        result = self._agent_result
+        payload = self._current_payload
+        kanban_api_url = payload["kanban_api_url"]
+
+        # Build comment content
+        if result.success:
+            comment = f"## Agent Completed\n\n"
+            comment += f"**Agent:** {payload['agent_type']}\n"
+            comment += f"**Duration:** {result.duration_seconds:.1f}s\n"
+            if result.files_modified:
+                comment += f"\n**Files Modified:**\n"
+                for f in result.files_modified[:10]:  # Limit to 10
+                    comment += f"- `{f}`\n"
+        else:
+            comment = f"## Agent Failed\n\n"
+            comment += f"**Agent:** {payload['agent_type']}\n"
+            comment += f"**Error:** {result.error}\n"
+            comment += f"\nPlease review and retry."
+
+        # Post comment to card (would need httpx here)
+        # For now, just log it
+        logger.info(f"Card update for {card_id}: {comment[:200]}...")
+
+    def _build_agent_prompt(
+        self,
+        agent_type: str,
+        card_title: str,
+        card_description: str,
+        column_name: str,
+    ) -> str:
+        """Build the prompt for Claude Code based on agent type."""
+        # Agent-specific instructions
+        agent_instructions = {
+            "developer": """You are an expert software developer. Your task is to implement the feature or fix described in the card.
+
+Instructions:
+1. Read the existing codebase to understand patterns and conventions
+2. Implement the changes described in the card
+3. Write clean, maintainable code following project conventions
+4. Add or update tests as needed
+5. Ensure the code compiles/runs without errors""",
+
+            "architect": """You are a software architect. Your task is to design the technical solution for this card.
+
+Instructions:
+1. Analyze the requirements in the card
+2. Explore the existing codebase architecture
+3. Design a technical approach
+4. Document the design decisions
+5. Break down into implementation tasks if needed""",
+
+            "reviewer": """You are a code reviewer. Your task is to review the implementation for this card.
+
+Instructions:
+1. Review the code changes for quality and correctness
+2. Check for bugs, security issues, and performance problems
+3. Verify tests are adequate
+4. Provide constructive feedback""",
+
+            "qa": """You are a QA engineer. Your task is to test the implementation for this card.
+
+Instructions:
+1. Review the requirements in the card
+2. Run existing tests
+3. Identify test gaps
+4. Write additional tests if needed
+5. Report any issues found""",
+
+            "product_owner": """You are a product owner. Your task is to refine the requirements for this card.
+
+Instructions:
+1. Review the card description
+2. Clarify any ambiguous requirements
+3. Add acceptance criteria
+4. Ensure the card is ready for development""",
+        }
+
+        instructions = agent_instructions.get(
+            agent_type,
+            "Process this card according to your role."
+        )
+
+        prompt = f"""# Task: {card_title}
+
+## Column: {column_name}
+
+## Description:
+{card_description}
+
+## Instructions:
+{instructions}
+
+Please complete this task. Update files as needed and explain what you did."""
+
+        return prompt
+
 
 async def main():
     orchestrator = Orchestrator()

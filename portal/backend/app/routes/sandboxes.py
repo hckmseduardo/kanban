@@ -1,7 +1,15 @@
-"""Sandbox management routes"""
+"""Sandbox management routes
+
+Sandbox permissions are based on workspace team membership:
+- List/View sandboxes: Any workspace member (viewer+)
+- Create sandbox: Admin or owner
+- Update sandbox: Admin or owner
+- Delete sandbox: Sandbox owner, workspace admin, or workspace owner
+- Restart agent: Admin or owner
+"""
 
 import logging
-from typing import Optional
+from typing import Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -17,8 +25,44 @@ from app.models.sandbox import (
 )
 from app.services.database_service import db_service
 from app.services.task_service import task_service
+from app.routes.workspaces import check_workspace_access
 
 logger = logging.getLogger(__name__)
+
+
+def get_workspace_with_role(
+    workspace_slug: str,
+    user_id: str,
+    require_role: Optional[str] = None
+) -> Tuple[dict, dict]:
+    """
+    Get workspace and verify user access with optional role requirement.
+
+    Args:
+        workspace_slug: Workspace slug
+        user_id: User ID
+        require_role: Optional minimum role required (owner, admin, member, viewer)
+
+    Returns:
+        Tuple of (workspace, membership)
+
+    Raises:
+        HTTPException if not found or insufficient access
+    """
+    workspace = db_service.get_workspace_by_slug(workspace_slug)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    has_access, membership = check_workspace_access(workspace, user_id, require_role)
+    if not has_access:
+        if membership and require_role:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Requires {require_role} role or higher"
+            )
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    return workspace, membership
 
 router = APIRouter()
 
@@ -76,17 +120,13 @@ async def list_sandboxes(
     """
     List sandboxes for a workspace.
 
+    Access: Any workspace member (viewer+)
+
     Authentication: JWT or Portal API token
     Required scope: sandboxes:read
     """
-    # Get and validate workspace
-    workspace = db_service.get_workspace_by_slug(workspace_slug)
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-
-    # Check access
-    if workspace["owner_id"] != auth.user["id"]:
-        raise HTTPException(status_code=403, detail="Access denied")
+    # Get workspace and verify access (any member can view)
+    workspace, _ = get_workspace_with_role(workspace_slug, auth.user["id"])
 
     # Check if workspace has an app (sandboxes only for app workspaces)
     if not workspace.get("app_template_id"):
@@ -112,17 +152,13 @@ async def get_sandbox(
     """
     Get sandbox details.
 
+    Access: Any workspace member (viewer+)
+
     Authentication: JWT or Portal API token
     Required scope: sandboxes:read
     """
-    # Get and validate workspace
-    workspace = db_service.get_workspace_by_slug(workspace_slug)
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-
-    # Check access
-    if workspace["owner_id"] != auth.user["id"]:
-        raise HTTPException(status_code=403, detail="Access denied")
+    # Get workspace and verify access (any member can view)
+    workspace, _ = get_workspace_with_role(workspace_slug, auth.user["id"])
 
     # Get sandbox
     sandbox = db_service.get_sandbox_by_workspace_and_slug(workspace["id"], sandbox_slug)
@@ -147,17 +183,21 @@ async def create_sandbox(
     3. Deploy sandbox containers
     4. Provision a dedicated agent
 
-    Authentication: JWT or Portal API token
+    Access: Admin or owner only (or internal service)
+
+    Authentication: JWT, Portal API token, or X-Service-Secret
     Required scope: sandboxes:write
     """
-    # Get and validate workspace
-    workspace = db_service.get_workspace_by_slug(workspace_slug)
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-
-    # Check access
-    if workspace["owner_id"] != auth.user["id"]:
-        raise HTTPException(status_code=403, detail="Access denied")
+    # For internal service auth, skip role check but get workspace
+    if auth.auth_type == "service":
+        workspace = db_service.get_workspace_by_slug(workspace_slug)
+        if not workspace:
+            raise HTTPException(status_code=404, detail="Workspace not found")
+    else:
+        # Get workspace and verify access (admin+ required to create)
+        workspace, _ = get_workspace_with_role(
+            workspace_slug, auth.user["id"], require_role="admin"
+        )
 
     # Check if workspace has an app
     if not workspace.get("app_template_id"):
@@ -237,17 +277,13 @@ async def get_sandbox_status(
     """
     Get sandbox provisioning status.
 
+    Access: Any workspace member (viewer+)
+
     Authentication: JWT or Portal API token
     Required scope: sandboxes:read
     """
-    # Get and validate workspace
-    workspace = db_service.get_workspace_by_slug(workspace_slug)
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-
-    # Check access
-    if workspace["owner_id"] != auth.user["id"]:
-        raise HTTPException(status_code=403, detail="Access denied")
+    # Get workspace and verify access (any member can view status)
+    workspace, _ = get_workspace_with_role(workspace_slug, auth.user["id"])
 
     # Get sandbox
     sandbox = db_service.get_sandbox_by_workspace_and_slug(workspace["id"], sandbox_slug)
@@ -282,17 +318,15 @@ async def update_sandbox(
     """
     Update sandbox details.
 
+    Access: Admin or owner only
+
     Authentication: JWT or Portal API token
     Required scope: sandboxes:write
     """
-    # Get and validate workspace
-    workspace = db_service.get_workspace_by_slug(workspace_slug)
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-
-    # Check access
-    if workspace["owner_id"] != auth.user["id"]:
-        raise HTTPException(status_code=403, detail="Access denied")
+    # Get workspace and verify access (admin+ required to update)
+    workspace, _ = get_workspace_with_role(
+        workspace_slug, auth.user["id"], require_role="admin"
+    )
 
     # Get sandbox
     sandbox = db_service.get_sandbox_by_workspace_and_slug(workspace["id"], sandbox_slug)
@@ -329,22 +363,35 @@ async def delete_sandbox(
     3. Delete database
     4. Clean up agent
 
+    Access: Sandbox owner, workspace admin, or workspace owner
+
     Authentication: JWT or Portal API token
     Required scope: sandboxes:write
     """
-    # Get and validate workspace
-    workspace = db_service.get_workspace_by_slug(workspace_slug)
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-
-    # Check access
-    if workspace["owner_id"] != auth.user["id"]:
-        raise HTTPException(status_code=403, detail="Access denied")
+    # Get workspace and verify basic access first
+    workspace, membership = get_workspace_with_role(workspace_slug, auth.user["id"])
 
     # Get sandbox
     sandbox = db_service.get_sandbox_by_workspace_and_slug(workspace["id"], sandbox_slug)
     if not sandbox:
         raise HTTPException(status_code=404, detail="Sandbox not found")
+
+    # Check delete permission:
+    # - Workspace owner can delete any sandbox
+    # - Workspace admin can delete any sandbox
+    # - Sandbox owner can delete their own sandbox
+    user_role = membership["role"] if membership else None
+    is_sandbox_owner = sandbox["owner_id"] == auth.user["id"]
+    can_delete = (
+        user_role in ("owner", "admin") or
+        is_sandbox_owner
+    )
+
+    if not can_delete:
+        raise HTTPException(
+            status_code=403,
+            detail="Only sandbox owner, workspace admin, or workspace owner can delete sandboxes"
+        )
 
     # Create deletion task
     task_id = await task_service.create_sandbox_delete_task(
@@ -369,56 +416,44 @@ async def delete_sandbox(
     }
 
 
-@router.post("/{sandbox_slug}/agent/restart", response_model=SandboxAgentRestartResponse)
-async def restart_sandbox_agent(
+@router.post("/{sandbox_slug}/agent/regenerate-secret", response_model=SandboxAgentRestartResponse)
+async def regenerate_agent_secret(
     workspace_slug: str,
     sandbox_slug: str,
-    regenerate_secret: bool = False,
     auth: AuthContext = Depends(require_scope("sandboxes:write"))
 ):
     """
-    Restart the sandbox agent.
+    Regenerate the sandbox agent webhook secret.
 
-    Optionally regenerate the webhook secret.
+    With on-demand agents, there's no container to restart. This endpoint
+    only regenerates the webhook secret used to authenticate card events.
+
+    Access: Admin or owner only
 
     Authentication: JWT or Portal API token
     Required scope: sandboxes:write
     """
-    # Get and validate workspace
-    workspace = db_service.get_workspace_by_slug(workspace_slug)
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-
-    # Check access
-    if workspace["owner_id"] != auth.user["id"]:
-        raise HTTPException(status_code=403, detail="Access denied")
+    # Get workspace and verify access (admin+ required)
+    workspace, _ = get_workspace_with_role(
+        workspace_slug, auth.user["id"], require_role="admin"
+    )
 
     # Get sandbox
     sandbox = db_service.get_sandbox_by_workspace_and_slug(workspace["id"], sandbox_slug)
     if not sandbox:
         raise HTTPException(status_code=404, detail="Sandbox not found")
 
-    # Regenerate secret if requested
-    new_secret = None
-    if regenerate_secret:
-        new_secret = db_service.regenerate_sandbox_webhook_secret(sandbox["id"])
-
-    # Create restart task
-    await task_service.create_sandbox_agent_restart_task(
-        sandbox_id=sandbox["id"],
-        full_slug=sandbox["full_slug"],
-        user_id=auth.user["id"],
-        regenerate_secret=regenerate_secret,
-    )
+    # Regenerate webhook secret
+    new_secret = db_service.regenerate_sandbox_webhook_secret(sandbox["id"])
 
     logger.info(
-        f"Sandbox agent restart requested: {sandbox['full_slug']} "
-        f"(regenerate_secret={regenerate_secret}) by {auth.user["id"]}"
+        f"Sandbox agent secret regenerated: {sandbox['full_slug']} "
+        f"by {auth.user['id']}"
     )
 
     return SandboxAgentRestartResponse(
         sandbox_id=sandbox["id"],
-        agent_container_name=sandbox["agent_container_name"],
+        agent_container_name=None,  # No container with on-demand agents
         new_webhook_secret=new_secret,
-        message="Agent restart initiated" + (" with new webhook secret" if new_secret else "")
+        message="Webhook secret regenerated"
     )

@@ -16,6 +16,7 @@ class TaskService:
     QUEUE_CERTIFICATES = "certificates"
     QUEUE_DNS = "dns"
     QUEUE_NOTIFICATIONS = "notifications"
+    QUEUE_AGENTS = "agents"  # On-demand AI agent tasks
 
     async def create_team_provision_task(
         self,
@@ -371,6 +372,69 @@ class TaskService:
             priority="normal"
         )
 
+    # =========================================================================
+    # Agent Tasks (On-demand AI processing)
+    # =========================================================================
+
+    async def create_agent_task(
+        self,
+        card_id: str,
+        card_title: str,
+        card_description: str,
+        column_name: str,
+        agent_type: str,
+        sandbox_id: str,
+        workspace_slug: str,
+        git_branch: str,
+        kanban_api_url: str,
+        target_project_path: str,
+        user_id: str,
+        board_id: str = None,
+        labels: list = None,
+        priority: str = "normal",
+    ) -> str:
+        """Create task for on-demand AI agent to process a card.
+
+        This spawns a Claude Code subprocess to process the card
+        based on the agent type (determined by column).
+
+        Args:
+            card_id: The card to process
+            card_title: Card title for context
+            card_description: Card description with requirements
+            column_name: Current column (determines agent type)
+            agent_type: Agent persona to use (developer, architect, etc.)
+            sandbox_id: Sandbox identifier for isolation
+            workspace_slug: Workspace this card belongs to
+            git_branch: Git branch to work on
+            kanban_api_url: API URL for card updates
+            target_project_path: Path to project directory
+            user_id: User who triggered the agent
+            board_id: Optional board ID
+            labels: Optional card labels
+            priority: Task priority (high/normal)
+        """
+        return await redis_service.enqueue_task(
+            queue_name=self.QUEUE_AGENTS,
+            task_type="agent.process_card",
+            payload={
+                "card_id": card_id,
+                "card_title": card_title,
+                "card_description": card_description,
+                "column_name": column_name,
+                "agent_type": agent_type,
+                "sandbox_id": sandbox_id,
+                "workspace_slug": workspace_slug,
+                "git_branch": git_branch,
+                "kanban_api_url": kanban_api_url,
+                "target_project_path": target_project_path,
+                "board_id": board_id,
+                "labels": labels or [],
+            },
+            user_id=user_id,
+            priority=priority
+        )
+
     async def get_task(self, task_id: str) -> Optional[dict]:
         """Get task by ID"""
         return await redis_service.get_task(task_id)
@@ -425,6 +489,8 @@ class TaskService:
             return self.QUEUE_CERTIFICATES
         elif task_type.startswith("dns."):
             return self.QUEUE_DNS
+        elif task_type.startswith("agent."):
+            return self.QUEUE_AGENTS
         else:
             return self.QUEUE_NOTIFICATIONS
 

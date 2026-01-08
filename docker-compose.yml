@@ -179,11 +179,17 @@ services:
     restart: unless-stopped
     environment:
       - REDIS_URL=redis://redis:6379
+      - CROSS_DOMAIN_SECRET=${CROSS_DOMAIN_SECRET:-dev-cross-domain-secret}
       - DOMAIN=${DOMAIN:-localhost}
       - PORT=${PORT:-4443}
       - CERT_MODE=${CERT_MODE:-development}
       - HOST_IP=${HOST_IP:-127.0.0.1}
       - HOST_PROJECT_PATH=${HOST_PROJECT_PATH:-/Volumes/dados/projects/kanban}
+      # Azure Key Vault integration (production mode)
+      - AZURE_KEY_VAULT_URL=${AZURE_KEY_VAULT_URL}
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET}
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID}
       # Email configuration (passed through to team containers)
       - EMAIL_PROVIDER=${EMAIL_PROVIDER:-office365}
       - SMTP_HOST=${SMTP_HOST:-smtp.office365.com}
@@ -202,8 +208,10 @@ services:
     volumes:
       - ./orchestrator/app:/app/app
       - ./data/teams:/app/data/teams
+      - ./data/portal:/app/data/portal:ro  # Read portal database for startup
       # Mount workspaces at the HOST_PROJECT_PATH so docker compose build contexts resolve correctly
       - ${HOST_PROJECT_PATH}/data/workspaces:${HOST_PROJECT_PATH}/data/workspaces
+      - ./data/workspaces:/app/data/workspaces  # Also mount at /app for reading
       - ./kanban-team:/app/kanban-team:ro
       - ./traefik/certs:/app/certs
       - ./traefik/dynamic:/app/traefik-dynamic
@@ -228,6 +236,11 @@ services:
       - CERT_MODE=${CERT_MODE:-development}
       - DOMAIN=${DOMAIN:-localhost}
       - CERTBOT_EMAIL=${CERTBOT_EMAIL:-admin@localhost}
+      # Azure Key Vault credentials for fetching secrets
+      - AZURE_KEY_VAULT_URL=${AZURE_KEY_VAULT_URL:-}
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID:-}
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET:-}
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID:-}
     volumes:
       - ./traefik/certs:/etc/letsencrypt
       - ./certbot/webroot:/var/www/certbot
@@ -261,62 +274,10 @@ services:
     profiles:
       - dns  # Only start with: docker compose --profile dns up
 
-# ===========================================================================
-  # Kanban Agents - AI-powered task automation
-  # ===========================================================================
-  kanban-agents:
-    build:
-      context: ./kanban-agents
-      dockerfile: Dockerfile
-    container_name: kanban-project-agents
-    restart: unless-stopped
-    expose:
-      - "8001"
-    volumes:
-      # Mount the kanban project as the target
-      - .:/app/target-project:rw
-      # Mount kanban-agents config
-      - ./kanban-agents/config:/app/config:ro
-      # Mount Claude CLI credentials (rw needed for project cache)
-      - ${HOME}/.claude:/root/.claude:rw
-      # Mount SSH key for host command execution
-      - ${HOME}/.ssh/docker_to_mac:/root/.ssh/id_ed25519:ro
-    environment:
-      # Kanban API settings
-      - KANBAN_API_URL=https://kanban-team.kanban.amazing-ai.tools/api
-      - KANBAN_WEBHOOK_SECRET=${KANBAN_AGENTS_WEBHOOK_SECRET:-}
-      # LLM settings (ollama, anthropic, openai, claude-cli)
-      - LLM_PROVIDER=${LLM_PROVIDER:-anthropic}
-      - LLM_MODEL=${LLM_MODEL:-claude-sonnet-4-20250514}
-      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-4096}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      # API keys
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      # Target project path inside container
-      - TARGET_PROJECT_PATH=/app/target-project
-      # SSH settings for host command execution
-      - SSH_ENABLED=${SSH_ENABLED:-true}
-      - SSH_HOST=${SSH_HOST:-host.docker.internal}
-      - SSH_PORT=${SSH_PORT:-22}
-      - SSH_USER=${SSH_USER:-hckmseduardo}
-      - SSH_KEY_PATH=/root/.ssh/id_ed25519
-      - SSH_HOST_PROJECT_PATH=${SSH_HOST_PROJECT_PATH:-/Volumes/dados/projects/kanban}
-      # Server settings
-      - HOST=0.0.0.0
-      - PORT=8001
-      - DEBUG=${DEBUG:-false}
-    networks:
-      - kanban-global
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    depends_on:
-      redis:
-        condition: service_healthy
+# =============================================================================
+  # NOTE: AI agents are now on-demand via Claude Code subprocess
+  # No dedicated agent container - see orchestrator/app/main.py
+  # =============================================================================
 
 # =============================================================================
 # Networks

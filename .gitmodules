@@ -1,6 +1,3 @@
 [submodule "kanban-team"]
 	path = kanban-team
 	url = https://github.com/hckmseduardo/kanban-team.git
-[submodule "kanban-agents"]
-	path = kanban-agents
-	url = https://github.com/hckmseduardo/kanban-agents.git

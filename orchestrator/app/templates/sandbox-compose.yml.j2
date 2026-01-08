@@ -123,9 +123,9 @@ services:
       - "kanban.sandbox={{ sandbox_slug }}"
       - "kanban.full-slug={{ full_slug }}"
 
-  # Dedicated sandbox agent - provisioned separately by agent_factory
-  # The agent is provisioned after sandbox containers are running
-  # See _sandbox_provision_agent in orchestrator
+  # AI agents are spawned on-demand when cards are moved
+  # No dedicated agent container - uses Claude Code subprocess via orchestrator
+  # See process_agent_task in orchestrator/app/main.py
 
 networks:
   {{ network_name }}:
