@@ -72,7 +72,7 @@ class RedisService:
                 "step_name": "Queued",
                 "percentage": 0
             },
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.utcnow().isoformat() + "Z",
             "started_at": None,
             "completed_at": None
         }
@@ -128,7 +128,7 @@ class RedisService:
         }
 
         if current_step == 1 and not task.get("started_at"):
-            task["started_at"] = datetime.utcnow().isoformat()
+            task["started_at"] = datetime.utcnow().isoformat() + "Z"
 
         await self.client.hset(f"task:{task_id}", mapping={
             "data": json.dumps(task)
@@ -152,7 +152,7 @@ class RedisService:
             return
 
         task["status"] = "completed"
-        task["completed_at"] = datetime.utcnow().isoformat()
+        task["completed_at"] = datetime.utcnow().isoformat() + "Z"
         task["result"] = result
         task["progress"]["percentage"] = 100
         task["progress"]["step_name"] = "Completed"
@@ -178,7 +178,7 @@ class RedisService:
             return
 
         task["status"] = "failed"
-        task["completed_at"] = datetime.utcnow().isoformat()
+        task["completed_at"] = datetime.utcnow().isoformat() + "Z"
         task["error"] = error
 
         await self.client.hset(f"task:{task_id}", mapping={

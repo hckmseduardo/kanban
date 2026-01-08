@@ -6,11 +6,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, List
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from app.auth.jwt import verify_token
 from app.services.database_service import db_service
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -73,14 +74,31 @@ def _verify_portal_api_token(token: str) -> Optional[dict]:
 
 
 async def get_auth_context(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    x_service_secret: Optional[str] = Header(None, alias="X-Service-Secret")
 ) -> AuthContext:
     """
-    Get unified authentication context from either JWT or Portal API token.
+    Get unified authentication context from JWT, Portal API token, or service secret.
 
     JWT tokens: User gets implicit full access ["*"]
     API tokens: User gets explicit scopes from token, acting as token creator
+    Service secret: Internal services get full access ["*"]
     """
+    # Check for internal service authentication first
+    if x_service_secret and settings.cross_domain_secret and x_service_secret == settings.cross_domain_secret:
+        logger.info("Internal service authenticated via X-Service-Secret")
+        # Create a synthetic service user for internal calls
+        return AuthContext(
+            user={
+                "id": "service:internal",
+                "email": "internal@service.local",
+                "display_name": "Internal Service",
+                "is_active": True,
+            },
+            auth_type="service",
+            scopes=["*"],  # Full access for internal services
+        )
+
     if not credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

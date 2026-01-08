@@ -22,8 +22,50 @@ error() { echo -e "${RED}[ERROR]${NC} $1"; }
 # Configuration from environment
 CERT_MODE="${CERT_MODE:-development}"
 DOMAIN="${DOMAIN:-localhost}"
-EMAIL="${CERTBOT_EMAIL:-admin@localhost}"
 STAGING="${LETSENCRYPT_STAGING:-false}"
+
+# =============================================================================
+# Fetch CERTBOT_EMAIL from Azure Key Vault if credentials are available
+# =============================================================================
+fetch_keyvault_secret() {
+    local secret_name="$1"
+    local vault_url="$2"
+
+    # Get access token from Azure AD
+    local token_response=$(curl -s -X POST \
+        "https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "client_id=${AZURE_CLIENT_ID}" \
+        -d "client_secret=${AZURE_CLIENT_SECRET}" \
+        -d "scope=https://vault.azure.net/.default" \
+        -d "grant_type=client_credentials")
+
+    local access_token=$(echo "$token_response" | jq -r '.access_token')
+
+    if [ -z "$access_token" ] || [ "$access_token" = "null" ]; then
+        return 1
+    fi
+
+    # Fetch secret from Key Vault
+    local secret_response=$(curl -s \
+        "${vault_url}secrets/${secret_name}?api-version=7.4" \
+        -H "Authorization: Bearer ${access_token}")
+
+    echo "$secret_response" | jq -r '.value'
+}
+
+# Try to fetch CERTBOT_EMAIL from Key Vault
+EMAIL="${CERTBOT_EMAIL:-admin@localhost}"
+if [ -n "$AZURE_KEY_VAULT_URL" ] && [ -n "$AZURE_CLIENT_ID" ] && [ -n "$AZURE_CLIENT_SECRET" ] && [ -n "$AZURE_TENANT_ID" ]; then
+    info "Fetching certbot-email from Azure Key Vault..."
+    KV_EMAIL=$(fetch_keyvault_secret "certbot-email" "$AZURE_KEY_VAULT_URL")
+    if [ -n "$KV_EMAIL" ] && [ "$KV_EMAIL" != "null" ]; then
+        EMAIL="$KV_EMAIL"
+        success "Loaded certbot-email from Key Vault"
+    else
+        warn "Could not fetch certbot-email from Key Vault, using default"
+    fi
+fi
 
 echo ""
 echo -e "${BLUE}╔═══════════════════════════════════════════════════════════════╗${NC}"

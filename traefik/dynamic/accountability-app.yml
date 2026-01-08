@@ -1,0 +1,47 @@
+# Dynamic routing for accountability app (legacy workspace)
+http:
+  routers:
+    accountability-app-frontend:
+      rule: "Host(`accountability.app.kanban.amazing-ai.tools`)"
+      entryPoints:
+        - websecure
+      service: accountability-app-frontend
+      tls:
+        certResolver: letsencrypt
+
+    accountability-app-api:
+      rule: "Host(`accountability.app.kanban.amazing-ai.tools`) && PathPrefix(`/api`)"
+      entryPoints:
+        - websecure
+      service: accountability-app-backend
+      middlewares:
+        - accountability-api-strip
+      tls:
+        certResolver: letsencrypt
+      priority: 10
+
+    accountability-app-auth:
+      rule: "Host(`accountability.app.kanban.amazing-ai.tools`) && PathPrefix(`/auth`)"
+      entryPoints:
+        - websecure
+      service: accountability-app-backend
+      tls:
+        certResolver: letsencrypt
+      priority: 10
+
+  middlewares:
+    accountability-api-strip:
+      stripPrefix:
+        prefixes:
+          - "/api"
+
+  services:
+    accountability-app-frontend:
+      loadBalancer:
+        servers:
+          - url: "http://accountability-app-frontend:5173"
+
+    accountability-app-backend:
+      loadBalancer:
+        servers:
+          - url: "http://accountability-app-backend:8000"

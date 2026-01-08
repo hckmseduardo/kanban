@@ -1,7 +1,7 @@
 FROM certbot/certbot:latest
 
 # Install additional tools
-RUN apk add --no-cache bash openssl curl redis dcron
+RUN apk add --no-cache bash openssl curl redis dcron jq
 
 # Copy scripts
 COPY scripts/ /scripts/

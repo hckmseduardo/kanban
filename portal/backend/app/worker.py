@@ -224,6 +224,20 @@ class TaskWorker:
                                     from datetime import datetime, timezone
                                     updates["provisioned_at"] = datetime.now(timezone.utc).isoformat()
 
+                                    # Add owner as a member when workspace becomes active
+                                    owner_id = data.get("owner_id")
+                                    if owner_id and kanban_team_id:
+                                        # Check if owner is already a member
+                                        existing = db_service.get_membership(kanban_team_id, owner_id)
+                                        if not existing:
+                                            db_service.add_team_member(
+                                                team_id=kanban_team_id,
+                                                user_id=owner_id,
+                                                role="owner",
+                                                invited_by=None
+                                            )
+                                            logger.info(f"Added owner as member for workspace {workspace_slug}")
+
                                 if status == "deleted":
                                     db_service.delete_workspace(workspace_id)
                                     logger.info(f"Workspace {workspace_slug} removed from database")

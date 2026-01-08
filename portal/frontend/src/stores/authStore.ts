@@ -12,7 +12,7 @@ interface AuthState {
   user: User | null
   isAuthenticated: boolean
   isLoading: boolean
-  login: () => void
+  login: (returnTo?: string) => void
   logout: () => void
   checkAuth: () => Promise<void>
 }
@@ -22,11 +22,15 @@ export const useAuthStore = create<AuthState>((set) => ({
   isAuthenticated: false,
   isLoading: true,
 
-  login: () => {
+  login: (returnTo?: string) => {
     // Redirect to Entra ID login
     const apiUrl = import.meta.env.VITE_API_URL || 'https://api.localhost:4443'
-    console.log('[AuthStore] login - redirecting to:', `${apiUrl}/auth/login`)
-    window.location.href = `${apiUrl}/auth/login`
+    let loginUrl = `${apiUrl}/auth/login`
+    if (returnTo) {
+      loginUrl += `?returnTo=${encodeURIComponent(returnTo)}`
+    }
+    console.log('[AuthStore] login - redirecting to:', loginUrl)
+    window.location.href = loginUrl
   },
 
   logout: async () => {

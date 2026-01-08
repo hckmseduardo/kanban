@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { workspacesApi, sandboxesApi, Workspace, Sandbox, WorkspaceMember, WorkspaceInvitation, setNavigatingAway, authApi } from '../services/api'
+import { workspacesApi, sandboxesApi, Workspace, Sandbox, WorkspaceMember, WorkspaceInvitation, WorkspaceHealth, setNavigatingAway, authApi } from '../services/api'
 import { useAuthStore } from '../stores/authStore'
 
 export default function WorkspaceDetailPage() {
@@ -18,6 +18,11 @@ export default function WorkspaceDetailPage() {
 
   const [deleteConfirm, setDeleteConfirm] = useState<{ slug: string; name: string; type: 'workspace' | 'sandbox' } | null>(null)
   const [deleteInput, setDeleteInput] = useState('')
+
+  // Restart workspace state
+  const [showRestartModal, setShowRestartModal] = useState(false)
+  const [restartRebuild, setRestartRebuild] = useState(false)
+  const [restartApp, setRestartApp] = useState(true)
 
   // Tab state
   const [activeTab, setActiveTab] = useState<'dashboard' | 'members'>('dashboard')
@@ -66,6 +71,26 @@ export default function WorkspaceDetailPage() {
     refetchInterval: workspace?.status === 'provisioning' ? 3000 : false,
   })
 
+  // Get workspace health (container running status)
+  const { data: workspaceHealth, isLoading: healthLoading, refetch: refetchHealth } = useQuery({
+    queryKey: ['workspace-health', slug],
+    queryFn: () => workspacesApi.getHealth(slug!).then(res => res.data),
+    enabled: !!slug && workspace?.status === 'active',
+    staleTime: 30000, // Cache for 30 seconds
+    retry: 1, // Only retry once on failure
+  })
+
+  // Start workspace mutation
+  const startWorkspaceMutation = useMutation({
+    mutationFn: () => workspacesApi.start(slug!),
+    onSuccess: () => {
+      // Invalidate health to trigger re-check after start completes
+      setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ['workspace-health', slug] })
+      }, 5000) // Wait 5 seconds before re-checking health
+    }
+  })
+
   const createSandboxMutation = useMutation({
     mutationFn: (data: { name: string; slug: string; source_branch?: string }) =>
       sandboxesApi.create(slug!, data),
@@ -95,6 +120,17 @@ export default function WorkspaceDetailPage() {
     mutationFn: () => workspacesApi.delete(slug!),
     onSuccess: () => {
       navigate('/workspaces')
+    }
+  })
+
+  const restartWorkspaceMutation = useMutation({
+    mutationFn: (options: { rebuild?: boolean; restart_app?: boolean }) =>
+      workspacesApi.restart(slug!, options),
+    onSuccess: () => {
+      setShowRestartModal(false)
+      setRestartRebuild(false)
+      setRestartApp(true)
+      queryClient.invalidateQueries({ queryKey: ['workspace', slug] })
     }
   })
 
@@ -170,6 +206,46 @@ export default function WorkspaceDetailPage() {
     })
   }
 
+  // State for kanban starting flow
+  const [isStartingKanban, setIsStartingKanban] = useState(false)
+
+  // Start kanban only mutation (uses dedicated kanban-only endpoint for faster startup)
+  const startKanbanMutation = useMutation({
+    mutationFn: () => workspacesApi.startKanban(slug!),
+    onMutate: () => {
+      setIsStartingKanban(true)
+    },
+    onSuccess: () => {
+      // Poll health until kanban is running, then open
+      const pollHealth = async (attempts = 0) => {
+        if (attempts > 30) { // Max 30 attempts (about 30 seconds)
+          setIsStartingKanban(false)
+          return
+        }
+
+        try {
+          const healthRes = await workspacesApi.getHealth(slug!)
+          if (healthRes.data.kanban_running) {
+            setIsStartingKanban(false)
+            queryClient.invalidateQueries({ queryKey: ['workspace-health', slug] })
+            // Now open the kanban
+            handleOpenKanban()
+          } else {
+            setTimeout(() => pollHealth(attempts + 1), 1000)
+          }
+        } catch {
+          setTimeout(() => pollHealth(attempts + 1), 1000)
+        }
+      }
+
+      // Start polling after a short delay
+      setTimeout(() => pollHealth(), 3000)
+    },
+    onError: () => {
+      setIsStartingKanban(false)
+    }
+  })
+
   const handleOpenKanban = async () => {
     if (!workspace || !user) return
 
@@ -180,6 +256,21 @@ export default function WorkspaceDetailPage() {
       window.location.href = `${workspace.kanban_subdomain}?sso_token=${token}`
     } catch {
       window.location.href = workspace.kanban_subdomain
+    }
+  }
+
+  const handleKanbanClick = () => {
+    if (!workspace || !user) return
+
+    // Check if kanban is stopped
+    const kanbanStopped = workspaceHealth && !workspaceHealth.kanban_running
+
+    if (kanbanStopped) {
+      // Start the kanban first
+      startKanbanMutation.mutate()
+    } else {
+      // Kanban is running, open directly
+      handleOpenKanban()
     }
   }
 
@@ -255,13 +346,26 @@ export default function WorkspaceDetailPage() {
           </div>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400 font-mono">{workspace.slug}</p>
         </div>
-        {userRole === 'owner' && (
-          <button
-            onClick={() => setDeleteConfirm({ slug: workspace.slug, name: workspace.name, type: 'workspace' })}
-            className="px-3 py-2 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg text-sm font-medium"
-          >
-            Delete Workspace
-          </button>
+        {(userRole === 'owner' || userRole === 'admin') && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowRestartModal(true)}
+              className="px-3 py-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-dark-700 rounded-lg text-sm font-medium flex items-center gap-2"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              Restart
+            </button>
+            {userRole === 'owner' && (
+              <button
+                onClick={() => setDeleteConfirm({ slug: workspace.slug, name: workspace.name, type: 'workspace' })}
+                className="px-3 py-2 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg text-sm font-medium"
+              >
+                Delete
+              </button>
+            )}
+          </div>
         )}
       </div>
 
@@ -307,28 +411,148 @@ export default function WorkspaceDetailPage() {
       {/* Dashboard Tab Content */}
       {activeTab === 'dashboard' && (
         <>
+          {/* Workspace Stopped Banner */}
+          {workspace.status === 'active' && !healthLoading && workspaceHealth && !workspaceHealth.all_healthy && (
+            <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl p-4">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0">
+                  <svg className="w-6 h-6 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <h3 className="text-sm font-semibold text-amber-800 dark:text-amber-200">
+                    Workspace Containers Stopped
+                  </h3>
+                  <p className="mt-1 text-sm text-amber-700 dark:text-amber-300">
+                    {!workspaceHealth.kanban_running && 'Kanban containers are not running. '}
+                    {workspaceHealth.app_running === false && 'App containers are not running. '}
+                    {workspaceHealth.sandboxes.some(s => !s.running) && 'Some sandbox containers are not running. '}
+                    Click "Start Workspace" to rebuild and start all components.
+                  </p>
+                  <div className="mt-3 flex items-center gap-3">
+                    {(userRole === 'owner' || userRole === 'admin') && (
+                      <button
+                        onClick={() => startWorkspaceMutation.mutate()}
+                        disabled={startWorkspaceMutation.isPending}
+                        className="px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 text-sm font-medium flex items-center gap-2 disabled:opacity-50"
+                      >
+                        {startWorkspaceMutation.isPending ? (
+                          <>
+                            <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            Starting...
+                          </>
+                        ) : (
+                          <>
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                            Start Workspace
+                          </>
+                        )}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => refetchHealth()}
+                      className="px-3 py-2 text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/30 rounded-lg text-sm font-medium"
+                    >
+                      Check Again
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Health Check Loading State */}
+          {workspace.status === 'active' && healthLoading && (
+            <div className="bg-gray-50 dark:bg-dark-700/50 border border-gray-200 dark:border-dark-600 rounded-xl p-4">
+              <div className="flex items-center gap-3">
+                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-primary-600"></div>
+                <span className="text-sm text-gray-600 dark:text-gray-400">Checking workspace status...</span>
+              </div>
+            </div>
+          )}
+
           {/* Quick Links */}
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {/* Kanban Board */}
-            <button
-              onClick={handleOpenKanban}
-              className="bg-white dark:bg-dark-800 rounded-xl shadow dark:shadow-dark-700/30 p-4 hover:shadow-lg transition-all flex items-center gap-4"
-            >
-              <div className="h-12 w-12 rounded-lg bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center">
-                <svg className="w-6 h-6 text-indigo-600 dark:text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                </svg>
-              </div>
-              <div className="text-left">
-                <h3 className="font-semibold text-gray-900 dark:text-gray-100">Kanban Board</h3>
-                <p className="text-sm text-gray-500 dark:text-gray-400">
-                  {workspace.kanban_subdomain.replace('https://', '')}
-                </p>
-              </div>
-              <svg className="w-5 h-5 text-gray-400 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-              </svg>
-            </button>
+            {(() => {
+              const kanbanStopped = workspace.status === 'active' && workspaceHealth && !workspaceHealth.kanban_running
+              const isStarting = isStartingKanban || startKanbanMutation.isPending
+
+              return (
+                <button
+                  onClick={handleKanbanClick}
+                  disabled={isStarting}
+                  className={`bg-white dark:bg-dark-800 rounded-xl shadow dark:shadow-dark-700/30 p-4 hover:shadow-lg transition-all flex items-center gap-4 ${
+                    isStarting ? 'opacity-75 cursor-wait' : ''
+                  }`}
+                >
+                  <div className={`h-12 w-12 rounded-lg flex items-center justify-center ${
+                    isStarting
+                      ? 'bg-blue-100 dark:bg-blue-900/30'
+                      : kanbanStopped
+                        ? 'bg-amber-100 dark:bg-amber-900/30'
+                        : 'bg-indigo-100 dark:bg-indigo-900/30'
+                  }`}>
+                    {isStarting ? (
+                      <svg className="w-6 h-6 text-blue-600 dark:text-blue-400 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                    ) : kanbanStopped ? (
+                      <svg className="w-6 h-6 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-6 h-6 text-indigo-600 dark:text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                      </svg>
+                    )}
+                  </div>
+                  <div className="text-left flex-1">
+                    <div className="flex items-center gap-2">
+                      <h3 className="font-semibold text-gray-900 dark:text-gray-100">Kanban Board</h3>
+                      {kanbanStopped && !isStarting && (
+                        <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400">
+                          Stopped
+                        </span>
+                      )}
+                      {isStarting && (
+                        <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400">
+                          Starting...
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-sm text-gray-500 dark:text-gray-400">
+                      {isStarting
+                        ? 'Starting kanban containers...'
+                        : kanbanStopped
+                          ? 'Click to start and open'
+                          : workspace.kanban_subdomain.replace('https://', '')}
+                    </p>
+                  </div>
+                  {isStarting ? (
+                    <div className="w-5 h-5" /> /* Spacer */
+                  ) : kanbanStopped ? (
+                    <svg className="w-5 h-5 text-amber-500 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  ) : (
+                    <svg className="w-5 h-5 text-gray-400 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                    </svg>
+                  )}
+                </button>
+              )
+            })()}
 
         {/* App (if exists) */}
         {workspace.app_subdomain && (
@@ -957,6 +1181,86 @@ export default function WorkspaceDetailPage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Restart Workspace Modal */}
+      {showRestartModal && (
+        <div className="fixed inset-0 bg-black/50 dark:bg-black/70 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-dark-800 rounded-xl shadow-xl dark:shadow-dark-900/50 w-full max-w-md p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center">
+                <svg className="w-6 h-6 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-lg font-bold text-gray-900 dark:text-gray-100">Restart Workspace</h2>
+                <p className="text-sm text-gray-500 dark:text-gray-400">Restart workspace containers</p>
+              </div>
+            </div>
+
+            <div className="space-y-4 mb-6">
+              <div className="flex items-start gap-3">
+                <input
+                  type="checkbox"
+                  id="rebuild"
+                  checked={restartRebuild}
+                  onChange={(e) => setRestartRebuild(e.target.checked)}
+                  className="mt-1 h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
+                />
+                <label htmlFor="rebuild" className="text-sm">
+                  <span className="font-medium text-gray-900 dark:text-gray-100">Rebuild containers</span>
+                  <p className="text-gray-500 dark:text-gray-400">
+                    Rebuild images from scratch (slower, but ensures latest code)
+                  </p>
+                </label>
+              </div>
+
+              {workspace?.app_subdomain && (
+                <div className="flex items-start gap-3">
+                  <input
+                    type="checkbox"
+                    id="restart_app"
+                    checked={restartApp}
+                    onChange={(e) => setRestartApp(e.target.checked)}
+                    className="mt-1 h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
+                  />
+                  <label htmlFor="restart_app" className="text-sm">
+                    <span className="font-medium text-gray-900 dark:text-gray-100">Include app containers</span>
+                    <p className="text-gray-500 dark:text-gray-400">
+                      Also restart/rebuild the application containers
+                    </p>
+                  </label>
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowRestartModal(false)
+                  setRestartRebuild(false)
+                  setRestartApp(true)
+                }}
+                className="px-4 py-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-dark-700 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => restartWorkspaceMutation.mutate({
+                  rebuild: restartRebuild,
+                  restart_app: restartApp
+                })}
+                disabled={restartWorkspaceMutation.isPending}
+                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50"
+              >
+                {restartWorkspaceMutation.isPending ? 'Restarting...' : 'Restart'}
+              </button>
+            </div>
           </div>
         </div>
       )}

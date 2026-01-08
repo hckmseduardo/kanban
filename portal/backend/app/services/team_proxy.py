@@ -38,8 +38,8 @@ class TeamProxyService:
     def _get_team_api_url(self, team_slug: str) -> str:
         """Get the internal API URL for a team"""
         # In production, use Docker internal networking
-        # Format: http://kanban-team-{slug}-api-1:8000
-        return f"http://kanban-team-{team_slug}-api-1:8000"
+        # Format: http://{slug}-kanban-api-1:8000
+        return f"http://{team_slug}-kanban-api-1:8000"
 
     async def request(
         self,

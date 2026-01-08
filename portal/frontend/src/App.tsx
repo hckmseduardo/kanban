@@ -12,6 +12,7 @@ import SettingsPage from './pages/SettingsPage'
 import WorkspacesPage from './pages/WorkspacesPage'
 import CreateWorkspacePage from './pages/CreateWorkspacePage'
 import WorkspaceDetailPage from './pages/WorkspaceDetailPage'
+import AcceptInvitePage from './pages/AcceptInvitePage'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuthStore()
@@ -35,14 +36,17 @@ function App() {
   const { checkAuth } = useAuthStore()
 
   useEffect(() => {
-    // Check for token in URL (from OAuth callback)
+    // Check for auth_token in URL (from OAuth callback)
+    // We use 'auth_token' to avoid conflict with 'token' param used for invitations
     const params = new URLSearchParams(window.location.search)
-    const token = params.get('token')
+    const authToken = params.get('auth_token')
 
-    if (token) {
-      localStorage.setItem('token', token)
-      // Clean URL
-      window.history.replaceState({}, '', window.location.pathname)
+    if (authToken) {
+      localStorage.setItem('token', authToken)
+      // Clean auth_token from URL but preserve other params (like invitation token)
+      params.delete('auth_token')
+      const newSearch = params.toString()
+      window.history.replaceState({}, '', window.location.pathname + (newSearch ? `?${newSearch}` : ''))
     }
 
     checkAuth()
@@ -51,6 +55,7 @@ function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/accept-invite" element={<AcceptInvitePage />} />
 
       <Route
         path="/"

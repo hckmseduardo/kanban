@@ -77,3 +77,25 @@ class WorkspaceStatusResponse(BaseModel):
     progress: Optional[int] = None
     current_step: Optional[str] = None
     error: Optional[str] = None
+
+
+class SandboxHealthStatus(BaseModel):
+    """Health status for a sandbox"""
+    slug: str
+    full_slug: str
+    running: bool
+
+
+class WorkspaceHealthResponse(BaseModel):
+    """Response model for workspace container health"""
+    workspace_id: str
+    workspace_slug: str
+    kanban_running: bool
+    app_running: Optional[bool] = None  # None if no app
+    sandboxes: list[SandboxHealthStatus] = []
+    all_healthy: bool
+
+
+class WorkspaceHealthBatchResponse(BaseModel):
+    """Response model for batch workspace health check"""
+    workspaces: dict[str, WorkspaceHealthResponse]

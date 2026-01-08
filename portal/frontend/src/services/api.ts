@@ -262,6 +262,26 @@ export interface InvitationInfo {
   expires_at: string
 }
 
+// Workspace Health Types
+export interface SandboxHealthStatus {
+  slug: string
+  full_slug: string
+  running: boolean
+}
+
+export interface WorkspaceHealth {
+  workspace_id: string
+  workspace_slug: string
+  kanban_running: boolean
+  app_running: boolean | null
+  sandboxes: SandboxHealthStatus[]
+  all_healthy: boolean
+}
+
+export interface WorkspaceHealthBatch {
+  workspaces: Record<string, WorkspaceHealth>
+}
+
 // App Templates API
 export const appTemplatesApi = {
   list: () => api.get<{ templates: AppTemplate[]; total: number }>('/app-templates'),
@@ -276,7 +296,18 @@ export const workspacesApi = {
     api.post<{ message: string; workspace: Workspace; task_id: string }>('/workspaces', data),
   delete: (slug: string) =>
     api.delete<{ message: string; task_id: string }>(`/workspaces/${slug}`),
+  restart: (slug: string, options?: { rebuild?: boolean; restart_app?: boolean }) =>
+    api.post<{ message: string; task_id: string; rebuild: boolean; restart_app: boolean }>(
+      `/workspaces/${slug}/restart`,
+      options || {}
+    ),
+  start: (slug: string) =>
+    api.post<{ message: string; task_id: string }>(`/workspaces/${slug}/start`),
+  startKanban: (slug: string) =>
+    api.post<{ message: string; task_id: string }>(`/workspaces/${slug}/start-kanban`),
   getStatus: (slug: string) => api.get(`/workspaces/${slug}/status`),
+  getHealth: (slug: string) => api.get<WorkspaceHealth>(`/workspaces/${slug}/health`),
+  getHealthBatch: () => api.get<WorkspaceHealthBatch>('/workspaces/health/batch'),
   // Member management
   getMembers: (slug: string) =>
     api.get<{ members: WorkspaceMember[]; total: number }>(`/workspaces/${slug}/members`),

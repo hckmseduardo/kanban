@@ -1394,15 +1394,17 @@ class Orchestrator:
             # Create initial card in Ideas Pipeline board
             if ideas_board_id:
                 try:
-                    # Get the first column of the board (should be "New Ideas" or similar)
-                    columns_response = await client.get(f"{kanban_api_url}/boards/{ideas_board_id}/columns")
-                    if columns_response.status_code == 200:
-                        columns = columns_response.json()
+                    # Get the board with columns (columns are included in the response)
+                    board_response = await client.get(f"{kanban_api_url}/boards/{ideas_board_id}")
+                    if board_response.status_code == 200:
+                        board_data = board_response.json()
+                        columns = board_data.get("columns", [])
                         if columns:
                             first_column_id = columns[0].get("id")
 
-                            # Create the initial card
+                            # Create the initial card via POST /cards
                             card_data = {
+                                "column_id": first_column_id,
                                 "title": "Welcome! Start here with your first idea",
                                 "description": """## How to use the Ideas Pipeline
 
@@ -1434,7 +1436,7 @@ This board helps you explore and develop ideas from concept to implementation-re
                             }
 
                             card_response = await client.post(
-                                f"{kanban_api_url}/boards/{ideas_board_id}/columns/{first_column_id}/cards",
+                                f"{kanban_api_url}/cards",
                                 json=card_data,
                             )
 

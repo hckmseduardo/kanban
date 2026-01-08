@@ -60,6 +60,16 @@ class Settings(BaseSettings):
     github_default_org: str = "amazing-ai-tools"
     github_template_repo: str = "basic-app"
 
+    # Email (for invitations)
+    email_provider: str = "sendgrid"  # "sendgrid" or "office365"
+    email_from_email: Optional[str] = None
+    email_from_name: str = "Kanban Portal"
+    sendgrid_api_key: Optional[str] = None
+    smtp_host: str = "smtp.office365.com"
+    smtp_port: int = 587
+    smtp_username: Optional[str] = None
+    smtp_password: Optional[str] = None
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
@@ -85,6 +95,11 @@ class KeyVaultService:
         "test-user-password": "test_user_password",
         # GitHub for App Factory
         "github-token": "github_token",
+        # Email for invitations
+        "sendgrid-api-key": "sendgrid_api_key",
+        "email-from-email": "email_from_email",
+        "smtp-username": "smtp_username",
+        "smtp-password": "smtp_password",
     }
 
     def __init__(self, vault_url: str):

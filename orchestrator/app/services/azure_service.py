@@ -108,6 +108,7 @@ class AzureService:
         method: str,
         endpoint: str,
         json_data: dict = None,
+        _retry: bool = True,
     ) -> dict:
         """Make a request to Microsoft Graph API."""
         token = await self._get_access_token()
@@ -134,6 +135,12 @@ class AzureService:
                 response = await client.delete(url, headers=headers, timeout=30.0)
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
+
+            # Handle token expiration - clear cache and retry once
+            if response.status_code == 401 and _retry:
+                logger.warning("Azure token expired, refreshing...")
+                self._access_token = None
+                return await self._graph_request(method, endpoint, json_data, _retry=False)
 
             return {
                 "status_code": response.status_code,
@@ -214,9 +221,9 @@ class AzureService:
 
         logger.info(f"Created Azure app registration: {display_name} ({app_id}), object_id: {object_id}")
 
-        # Wait for app to propagate in Azure AD
+        # Wait for app to propagate in Azure AD (Azure can take several seconds)
         import asyncio
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
 
         # Create a service principal for the app
         sp_result = await self._graph_request(
@@ -230,9 +237,12 @@ class AzureService:
                 f"Failed to create service principal: {sp_result['data']}"
             )
 
-        # Add a client secret with retry logic
+        # Wait for service principal to propagate before adding password
+        await asyncio.sleep(3)
+
+        # Add a client secret with retry logic (Azure propagation can take 10+ seconds)
         secret_result = None
-        for attempt in range(3):
+        for attempt in range(5):
             secret_result = await self._graph_request(
                 "POST",
                 f"/applications/{object_id}/addPassword",
@@ -245,8 +255,8 @@ class AzureService:
             )
             if secret_result["status_code"] == 200:
                 break
-            logger.warning(f"addPassword attempt {attempt + 1} failed, retrying...")
-            await asyncio.sleep(2)
+            logger.warning(f"addPassword attempt {attempt + 1} failed, retrying in 3s...")
+            await asyncio.sleep(3)
 
         if secret_result["status_code"] != 200:
             error = secret_result["data"].get("error", {}).get("message", "Unknown")

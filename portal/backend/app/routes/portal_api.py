@@ -184,14 +184,25 @@ async def validate_portal_token(
     if not user:
         return {"valid": False, "detail": "Token creator not found"}
 
-    # If team_slug provided, verify membership
+    # If team_slug provided, verify workspace membership
+    # Note: team_slug is actually the workspace slug in most contexts
     member_role = None
     if team_slug:
-        team = db_service.get_team_by_slug(team_slug)
-        if team:
-            membership = db_service.get_membership(team["id"], user["id"])
+        # First try to find workspace by slug
+        workspace = db_service.get_workspace_by_slug(team_slug)
+        if workspace:
+            # Check workspace membership
+            membership = db_service.get_membership(workspace["id"], user["id"])
             if membership:
                 member_role = membership.get("role")
+
+        # Fallback to team lookup for backwards compatibility
+        if not member_role:
+            team = db_service.get_team_by_slug(team_slug)
+            if team:
+                membership = db_service.get_membership(team["id"], user["id"])
+                if membership:
+                    member_role = membership.get("role")
 
     # Update last used
     db_service.update_portal_api_token_last_used(token_data["id"])
