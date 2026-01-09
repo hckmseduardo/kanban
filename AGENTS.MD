@@ -28,10 +28,28 @@ SSH_CLAUDE_PATH=/usr/local/bin/claude-loggedin  # Path to Claude CLI wrapper
 
 See [orchestrator.md](docs/architecture/orchestrator.md#claude-code-runner-service) for full setup instructions.
 
+## After Modifying kanban-team Code
+
+When you modify code in the `kanban-team` submodule, you MUST rebuild the Docker images for changes to take effect:
+
+```bash
+# After frontend changes (kanban-team/frontend/src/**)
+./scripts/rebuild-images.sh --frontend --restart
+
+# After backend changes (kanban-team/backend/**)
+./scripts/rebuild-images.sh --backend --restart
+
+# After both frontend and backend changes
+./scripts/rebuild-images.sh --all --restart
+```
+
+**Important:** The `rebuild-workspace.sh` script does NOT rebuild images - it only restarts containers. Always use `rebuild-images.sh` after code changes.
+
 ## Skills
 
 Skills are documented in the `agent-skills/` folder. Each skill has its own `.md` file with usage instructions.
 
 | Skill | Description | Documentation |
 |-------|-------------|---------------|
-| `/rebuild-workspace` | Rebuild and restart workspace containers via orchestrator | [rebuild-workspace.md](agent-skills/rebuild-workspace.md) |
+| `/rebuild-images` | Rebuild kanban-team Docker images after code changes | [rebuild-images.md](agent-skills/rebuild-images.md) |
+| `/rebuild-workspace` | Restart workspace containers (does NOT rebuild images) | [rebuild-workspace.md](agent-skills/rebuild-workspace.md) |
