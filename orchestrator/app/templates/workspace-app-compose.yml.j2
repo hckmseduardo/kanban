@@ -58,6 +58,7 @@ services:
       - "kanban.type=workspace-api"
       - "kanban.workspace={{ workspace_slug }}"
       - "traefik.enable=true"
+      - "traefik.project=kanban"
       # Strip /api prefix middleware (use -app- suffix to avoid conflict with kanban-team routers)
       - "traefik.http.middlewares.{{ workspace_slug }}-app-api-strip.stripprefix.prefixes=/api"
       # HTTPS router
@@ -91,6 +92,7 @@ services:
       - "kanban.type=workspace-web"
       - "kanban.workspace={{ workspace_slug }}"
       - "traefik.enable=true"
+      - "traefik.project=kanban"
       # HTTPS router (use -app- suffix to avoid conflict with kanban-team routers)
       - "traefik.http.routers.{{ workspace_slug }}-app-web.rule=Host(`{{ workspace_slug }}.app.{{ domain | replace('kanban.', '') }}`)"
       - "traefik.http.routers.{{ workspace_slug }}-app-web.entrypoints=websecure"

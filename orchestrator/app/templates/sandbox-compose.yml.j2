@@ -62,6 +62,7 @@ services:
       - "kanban.full-slug={{ full_slug }}"
       - "kanban.branch={{ git_branch }}"
       - "traefik.enable=true"
+      - "traefik.project=kanban"
       # Strip /api prefix middleware
       - "traefik.http.middlewares.{{ full_slug }}-api-strip.stripprefix.prefixes=/api"
       # HTTPS router
@@ -97,6 +98,7 @@ services:
       - "kanban.full-slug={{ full_slug }}"
       - "kanban.branch={{ git_branch }}"
       - "traefik.enable=true"
+      - "traefik.project=kanban"
       # HTTPS router
       - "traefik.http.routers.{{ full_slug }}-web.rule=Host(`{{ full_slug }}.sandbox.{{ domain | replace('kanban.', '') }}`)"
       - "traefik.http.routers.{{ full_slug }}-web.entrypoints=websecure"

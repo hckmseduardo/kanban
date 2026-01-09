@@ -144,7 +144,58 @@ async def route_task(task: dict):
 
 ### Claude Code Runner Service
 
-Spawns Claude Code CLI subprocess for on-demand AI agent tasks.
+Executes Claude Code CLI on the host machine via SSH for on-demand AI agent tasks.
+This allows using the Claude Pro subscription for reduced costs instead of API calls.
+
+#### SSH Configuration
+
+The orchestrator runs inside Docker and connects to the host machine via SSH to execute
+Claude Code. This requires the following environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SSH_USER` | Username on the host machine | **Required** |
+| `SSH_HOST` | Host to SSH into | `host.docker.internal` |
+| `SSH_CLAUDE_PATH` | Path to Claude CLI on host | `~/.local/bin/claude` |
+
+**Example `.env` configuration:**
+```bash
+# SSH Configuration for Claude Code (AI Enhancement)
+SSH_USER=myusername
+SSH_HOST=host.docker.internal
+SSH_CLAUDE_PATH=/usr/local/bin/claude-loggedin
+```
+
+#### Authentication Wrapper
+
+If Claude CLI requires authentication (login), you may need to create a wrapper script
+that runs Claude with the correct environment. For example:
+
+```bash
+#!/bin/bash
+# /usr/local/bin/claude-loggedin
+# Wrapper to run Claude with proper authentication context
+
+export HOME=/Users/myusername
+export CLAUDE_CONFIG_DIR=$HOME/.claude
+exec /Users/myusername/.local/bin/claude "$@"
+```
+
+Make the wrapper executable and set `SSH_CLAUDE_PATH` to point to it.
+
+#### Prerequisites
+
+1. **SSH access from Docker to host**: The orchestrator mounts `~/.ssh:/root/.ssh:ro`
+   to access SSH keys. Ensure passwordless SSH works:
+   ```bash
+   ssh myusername@host.docker.internal echo "SSH works"
+   ```
+
+2. **Claude CLI installed on host**: Install via `npm install -g @anthropic-ai/claude-code`
+
+3. **Claude CLI authenticated**: Run `claude login` on the host to authenticate
+
+#### API
 
 ```python
 class ClaudeCodeRunner:
@@ -153,25 +204,37 @@ class ClaudeCodeRunner:
         prompt: str,
         working_dir: str,
         agent_type: str = "developer",
+        tool_profile: str = None,
         allowed_tools: list = None,
         timeout: int = None
     ) -> AgentResult:
         """
-        Spawns Claude Code CLI subprocess for agent task.
+        Executes Claude Code CLI on host via SSH.
 
         Steps:
-        1. Build command with prompt and tools
-        2. Spawn subprocess in sandbox directory
+        1. Build SSH command with prompt and tools
+        2. Execute via SSH to host machine
         3. Stream output for progress updates
         4. Return result with success/error status
         """
 
+    def get_tools_for_profile(self, tool_profile: str) -> list:
+        """Get allowed tools for a tool profile (readonly, developer, full-access)."""
+
     def get_tools_for_agent(self, agent_type: str) -> list:
-        """Get allowed tools for an agent type."""
+        """Legacy: Get allowed tools for an agent type."""
 
     def get_timeout_for_agent(self, agent_type: str) -> int:
         """Get timeout in seconds for an agent type."""
 ```
+
+#### Tool Profiles
+
+| Profile | Tools | Use Case |
+|---------|-------|----------|
+| `readonly` | Read, Glob, Grep | Analysis, enhancement suggestions |
+| `developer` | Read, Write, Edit, Glob, Grep, Bash | Code modifications |
+| `full-access` | All tools + Task, WebFetch | Complex multi-step tasks |
 
 Note: AI agents are now on-demand via Claude Code subprocess.
 No dedicated agent containers - see [On-Demand Agents](./kanban-agents.md).
@@ -515,8 +578,10 @@ AZURE_TENANT_ID=<tenant-id>
 DOMAIN=kanban.amazing-ai.tools
 PORTAL_API_URL=https://kanban.amazing-ai.tools/api
 
-# LLM
-LLM_PROVIDER=anthropic
+# SSH - Claude Code execution on host (required for AI enhancement)
+SSH_USER=myusername              # Required: username on host machine
+SSH_HOST=host.docker.internal    # Docker's way to reach host
+SSH_CLAUDE_PATH=/usr/local/bin/claude-loggedin  # Path to Claude CLI (or wrapper)
 ```
 
 ## Error Handling

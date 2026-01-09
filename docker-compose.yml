@@ -30,6 +30,7 @@ services:
       - proxy-network
     labels:
       - "traefik.enable=true"
+      - "traefik.project=kanban"
     depends_on:
       - redis
 
@@ -89,6 +90,7 @@ services:
       - kanban-global
     labels:
       - "traefik.enable=true"
+      - "traefik.project=kanban"
       # HTTPS router
       - "traefik.http.routers.portal-api.rule=Host(`${DOMAIN:-localhost}`) && PathPrefix(`/api`)"
       - "traefik.http.routers.portal-api.entrypoints=websecure"
@@ -122,6 +124,7 @@ services:
       - kanban-global
     labels:
       - "traefik.enable=true"
+      - "traefik.project=kanban"
       # HTTPS router
       - "traefik.http.routers.portal-web.rule=Host(`${DOMAIN:-localhost}`) && !PathPrefix(`/api`)"
       - "traefik.http.routers.portal-web.entrypoints=websecure"

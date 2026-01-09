@@ -33,6 +33,9 @@ providers:
     exposedByDefault: false
     network: kanban-global
     watch: true
+    # Only watch containers with traefik.project=kanban label
+    # This prevents conflicts with other stacks (gtfs-editor, etc)
+    constraints: "Label(`traefik.project`, `kanban`)"
 
   file:
     directory: /etc/traefik/dynamic
