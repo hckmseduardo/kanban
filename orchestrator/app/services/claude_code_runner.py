@@ -187,11 +187,11 @@ class ClaudeCodeRunner:
             escaped_system = system_prompt.replace("'", "'\\''")
             remote_cmd_parts.extend(["--system-prompt", f"'{escaped_system}'"])
 
-        # Add working directory if it's a valid host path
-        if working_dir and not working_dir.startswith("/app"):
-            remote_cmd_parts.extend(["--cwd", working_dir])
-
         remote_cmd = " ".join(remote_cmd_parts)
+
+        # If working directory specified, cd into it first
+        if working_dir and not working_dir.startswith("/app"):
+            remote_cmd = f"cd '{working_dir}' && {remote_cmd}"
 
         # Build SSH command
         ssh_cmd = self._build_ssh_command(remote_cmd)

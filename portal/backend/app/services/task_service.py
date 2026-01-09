@@ -392,6 +392,7 @@ class TaskService:
         board_id: str = None,
         labels: list = None,
         priority: str = "normal",
+        github_repo_url: str = None,
     ) -> str:
         """Create task for on-demand AI agent to process a card.
 
@@ -436,6 +437,7 @@ class TaskService:
                 "target_project_path": target_project_path,
                 "board_id": board_id,
                 "labels": labels or [],
+                "github_repo_url": github_repo_url,
             },
             user_id=user_id,
             priority=priority

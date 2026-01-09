@@ -2651,7 +2651,7 @@ This board helps you explore and develop ideas from concept to implementation-re
             pass
 
     async def _sandbox_create_directory(self, full_slug: str, sandbox_id: str):
-        """Create sandbox directory structure."""
+        """Create sandbox directory structure and clone repository."""
         # Sandbox data is stored at {HOST_PROJECT_PATH}/data/sandboxes/{full_slug}
         # This directory is mounted in docker-compose.yml, so we can use Python file operations
         sandbox_data_path = f"{HOST_PROJECT_PATH}/data/sandboxes/{full_slug}"
@@ -2661,6 +2661,35 @@ This board helps you explore and develop ideas from concept to implementation-re
         os.makedirs(f"{sandbox_data_path}/redis", exist_ok=True)
 
         logger.info(f"[{full_slug}] Directory structure created at {sandbox_data_path}")
+
+        # Clone repository with the sandbox branch
+        workspace_slug = self._current_payload["workspace_slug"]
+        github_org = self._current_payload.get("github_org", "hckmseduardo")
+        github_repo = self._current_payload.get("github_repo_name", f"{workspace_slug}-app")
+        git_branch = f"sandbox/{full_slug}"
+
+        github_repo_url = f"https://github.com/{github_org}/{github_repo}.git"
+        github_token = os.environ.get("GITHUB_TOKEN")
+
+        # Build authenticated clone URL
+        clone_url = github_repo_url
+        if github_token and "github.com" in github_repo_url:
+            clone_url = github_repo_url.replace("https://github.com", f"https://{github_token}@github.com")
+
+        repo_path = f"{sandbox_data_path}/repo"
+        os.makedirs(repo_path, exist_ok=True)
+
+        logger.info(f"[{full_slug}] Cloning repository with branch {git_branch}")
+        result = subprocess.run(
+            ["git", "clone", "--branch", git_branch, clone_url, "."],
+            cwd=repo_path,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to clone repository: {result.stderr}")
+
+        logger.info(f"[{full_slug}] Repository cloned successfully to {repo_path}")
 
     async def _sandbox_deploy_containers(self, full_slug: str, sandbox_id: str):
         """Deploy sandbox containers using the sandbox-compose template"""
@@ -3083,43 +3112,54 @@ This board helps you explore and develop ideas from concept to implementation-re
         """Prepare the sandbox context for agent execution."""
         payload = self._current_payload
         git_branch = payload["git_branch"]
-        target_project_path = payload["target_project_path"]
 
-        # Ensure target directory exists
-        target_path = Path(target_project_path)
-        if not target_path.exists():
-            logger.warning(f"Target path does not exist: {target_project_path}")
-            # For sandboxes, the path should be under the workspace repo
-            workspace_slug = payload["workspace_slug"]
-            base_repo_path = Path(HOST_PROJECT_PATH) / "data" / "repos" / workspace_slug
-            if base_repo_path.exists():
-                # Use workspace repo as fallback
-                payload["target_project_path"] = str(base_repo_path)
-                logger.info(f"Using workspace repo path: {base_repo_path}")
-            else:
-                raise RuntimeError(f"No valid project path found for {sandbox_id}")
+        # Repo path is in sandbox data folder (cloned during sandbox provisioning)
+        # Format: /data/sandboxes/{full_slug}/repo/
+        sandbox_data_path = Path(HOST_PROJECT_PATH) / "data" / "sandboxes" / sandbox_id
+        repo_path = sandbox_data_path / "repo"
 
-        # Checkout the correct branch
-        target_path = Path(payload["target_project_path"])
-        if target_path.exists() and (target_path / ".git").exists():
-            try:
-                result = subprocess.run(
-                    ["git", "checkout", git_branch],
-                    cwd=str(target_path),
-                    capture_output=True,
-                    text=True
-                )
-                if result.returncode != 0:
-                    # Branch might not exist yet, try creating it
-                    result = subprocess.run(
-                        ["git", "checkout", "-b", git_branch],
-                        cwd=str(target_path),
-                        capture_output=True,
-                        text=True
-                    )
-                logger.info(f"Checked out branch: {git_branch}")
-            except Exception as e:
-                logger.warning(f"Could not checkout branch {git_branch}: {e}")
+        # Repo should already exist from sandbox provisioning
+        if not repo_path.exists() or not (repo_path / ".git").exists():
+            raise RuntimeError(f"Repository not found at {repo_path}. Sandbox may not have been provisioned correctly.")
+
+        # Use the repo path
+        payload["target_project_path"] = str(repo_path)
+
+        # Fetch latest changes from remote
+        logger.info(f"Fetching latest changes from remote for {sandbox_id}")
+        result = subprocess.run(
+            ["git", "fetch", "--all"],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            logger.warning(f"Failed to fetch: {result.stderr}")
+
+        # Ensure we're on the correct branch and pull latest
+        logger.info(f"Checking out branch {git_branch}")
+        result = subprocess.run(
+            ["git", "checkout", git_branch],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            logger.warning(f"Failed to checkout {git_branch}: {result.stderr}")
+
+        # Pull latest changes for the branch
+        logger.info(f"Pulling latest changes for branch {git_branch}")
+        result = subprocess.run(
+            ["git", "pull", "origin", git_branch],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            # Pull might fail if branch doesn't exist on remote yet, that's ok
+            logger.debug(f"Pull result: {result.stderr}")
+        else:
+            logger.info(f"Pulled latest changes for {git_branch}")
 
     async def _agent_run_claude(self, card_id: str, sandbox_id: str):
         """Run Claude Code subprocess for the agent task."""
@@ -3192,8 +3232,20 @@ This board helps you explore and develop ideas from concept to implementation-re
                 )
 
                 logger.info(f"Committed changes: {len(result.files_modified)} files")
+
+                # Push to remote
+                github_token = os.environ.get("GITHUB_TOKEN")
+                if github_token:
+                    # Set up credentials for push
+                    subprocess.run(
+                        ["git", "push", "origin", git_branch],
+                        cwd=str(target_path),
+                        capture_output=True,
+                        env={**os.environ, "GIT_ASKPASS": "echo", "GIT_TERMINAL_PROMPT": "0"}
+                    )
+                    logger.info(f"Pushed changes to {git_branch}")
             except Exception as e:
-                logger.warning(f"Could not commit changes: {e}")
+                logger.warning(f"Could not commit/push changes: {e}")
 
     async def _agent_update_card(self, card_id: str, sandbox_id: str):
         """Update the kanban card with agent results."""
@@ -3202,30 +3254,136 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         result = self._agent_result
         payload = self._current_payload
-        kanban_api_url = payload["kanban_api_url"]
+        workspace_slug = payload["workspace_slug"]
+        # Use internal Docker network URL for service-to-service calls
+        kanban_api_url = f"http://{workspace_slug}-kanban-api-1:8000"
+        git_branch = payload["git_branch"]
 
         # Build comment content
         agent_config = payload.get("agent_config", {})
         agent_name = agent_config.get("agent_name", "agent")
         display_name = agent_config.get("display_name", agent_name)
+        column_success = agent_config.get("column_success")
+        column_failure = agent_config.get("column_failure")
 
         if result.success:
-            comment = f"## Agent Completed\n\n"
-            comment += f"**Agent:** {display_name}\n"
+            comment = f"## Agent: {display_name}\n\n"
+            comment += f"**Status:** Completed\n"
             comment += f"**Duration:** {result.duration_seconds:.1f}s\n"
+            comment += f"**Branch:** `{git_branch}`\n"
             if result.files_modified:
                 comment += f"\n**Files Modified:**\n"
-                for f in result.files_modified[:10]:  # Limit to 10
+                for f in result.files_modified[:10]:
                     comment += f"- `{f}`\n"
+            if result.output:
+                # Include summary of what was done
+                output_summary = result.output[:1000] if len(result.output) > 1000 else result.output
+                comment += f"\n**Summary:**\n{output_summary}\n"
         else:
-            comment = f"## Agent Failed\n\n"
-            comment += f"**Agent:** {display_name}\n"
+            comment = f"## Agent: {display_name}\n\n"
+            comment += f"**Status:** Failed\n"
             comment += f"**Error:** {result.error}\n"
             comment += f"\nPlease review and retry."
 
-        # Post comment to card (would need httpx here)
-        # For now, just log it
         logger.info(f"Card update for {card_id}: {comment[:200]}...")
+
+        # Actually POST the comment to the kanban API
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                # Add comment to card (API expects 'text' field)
+                response = await client.post(
+                    f"{kanban_api_url}/cards/{card_id}/comments",
+                    headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")},
+                    json={"text": comment, "author_name": f"Agent: {display_name}"}
+                )
+                if response.status_code not in [200, 201]:
+                    logger.warning(f"Failed to add comment: {response.status_code} - {response.text}")
+
+                # Get current card to update description
+                card_response = await client.get(
+                    f"{kanban_api_url}/cards/{card_id}",
+                    headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")}
+                )
+
+                if card_response.status_code == 200 and result.success and result.output:
+                    card_data = card_response.json()
+                    current_description = card_data.get("description", "") or ""
+
+                    # Build agent output section
+                    agent_section = f"\n\n---\n\n## Agent: {display_name}\n\n"
+                    # Truncate output if too long
+                    output_text = result.output[:2000] if len(result.output) > 2000 else result.output
+                    agent_section += output_text
+
+                    # Check if this agent's section already exists and remove it
+                    section_marker = f"## Agent: {display_name}"
+                    if section_marker in current_description:
+                        # Find this agent's section and remove just it (not other agent sections after)
+                        import re
+                        # Pattern matches from this agent's marker to the next agent marker or end
+                        # The ---\n\n before the section is also part of the section to remove
+                        pattern = r'(\n*---\n*)?## Agent: ' + re.escape(display_name) + r'.*?(?=\n---\n\n## Agent:|$)'
+                        current_description = re.sub(pattern, '', current_description, flags=re.DOTALL)
+                        current_description = current_description.rstrip()
+
+                    new_description = current_description + agent_section
+
+                    # Update card with new description
+                    desc_response = await client.patch(
+                        f"{kanban_api_url}/cards/{card_id}",
+                        headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")},
+                        json={"description": new_description}
+                    )
+                    if desc_response.status_code == 200:
+                        logger.info(f"Updated card description with agent output")
+                    else:
+                        logger.warning(f"Failed to update description: {desc_response.status_code}")
+
+                # If successful and column_success is set, move the card
+                if result.success and column_success:
+                    # First get the column ID by name
+                    board_id = payload.get("board_id")
+                    if board_id:
+                        board_resp = await client.get(
+                            f"{kanban_api_url}/boards/{board_id}",
+                            headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")}
+                        )
+                        if board_resp.status_code == 200:
+                            board_data = board_resp.json()
+                            for col in board_data.get("columns", []):
+                                if col.get("name") == column_success:
+                                    move_resp = await client.post(
+                                        f"{kanban_api_url}/cards/{card_id}/move",
+                                        headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")},
+                                        params={"column_id": col["id"], "position": 0}
+                                    )
+                                    if move_resp.status_code == 200:
+                                        logger.info(f"Moved card to column: {column_success}")
+                                    break
+
+                # If failed and column_failure is set, move the card there
+                elif not result.success and column_failure:
+                    board_id = payload.get("board_id")
+                    if board_id:
+                        board_resp = await client.get(
+                            f"{kanban_api_url}/boards/{board_id}",
+                            headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")}
+                        )
+                        if board_resp.status_code == 200:
+                            board_data = board_resp.json()
+                            for col in board_data.get("columns", []):
+                                if col.get("name") == column_failure:
+                                    move_resp = await client.post(
+                                        f"{kanban_api_url}/cards/{card_id}/move",
+                                        headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")},
+                                        params={"column_id": col["id"], "position": 0}
+                                    )
+                                    if move_resp.status_code == 200:
+                                        logger.info(f"Moved card to column: {column_failure}")
+                                    break
+
+        except Exception as e:
+            logger.error(f"Error updating card via API: {e}")
 
     def _build_agent_prompt(
         self,

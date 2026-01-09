@@ -37,7 +37,8 @@ async def get_agent_config_for_column(
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 f"{kanban_api_url}/agents/resolve",
-                params={"column_name": column_name, "board_id": board_id}
+                params={"column_name": column_name, "board_id": board_id},
+                headers={"X-Service-Secret": settings.cross_domain_secret}
             )
 
             if response.status_code == 404:
@@ -180,6 +181,7 @@ async def receive_card_event(
             board_id=board_id,
             labels=card.get("labels", []),
             priority="high" if "urgent" in [l.lower() for l in card.get("labels", [])] else "normal",
+            github_repo_url=workspace.get("github_repo_url"),
         )
 
         logger.info(
