@@ -11,7 +11,7 @@ Sandbox permissions are based on workspace team membership:
 import logging
 from typing import Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header
 
 from app.auth.unified import AuthContext, require_scope
 from app.config import settings
@@ -457,3 +457,139 @@ async def regenerate_agent_secret(
         new_webhook_secret=new_secret,
         message="Webhook secret regenerated"
     )
+
+
+# ============================================================================
+# Internal endpoints for service-to-service communication
+# ============================================================================
+
+@router.get("/internal/list", response_model=SandboxListResponse)
+async def list_sandboxes_internal(
+    workspace_slug: str,
+    x_service_secret: str = Header(None, alias="X-Service-Secret")
+):
+    """
+    Internal endpoint for service-to-service sandbox list access.
+
+    This endpoint is called by team backends to get workspace sandboxes
+    without user authentication, using service-to-service secret.
+
+    Authentication: X-Service-Secret header with cross-domain secret
+    """
+    # Verify service secret
+    if x_service_secret != settings.cross_domain_secret:
+        raise HTTPException(status_code=403, detail="Invalid service secret")
+
+    # Get workspace by slug
+    workspace = db_service.get_workspace_by_slug(workspace_slug)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    # Check if workspace has an app (sandboxes only for app workspaces)
+    if not workspace.get("app_template_id"):
+        # Return empty list for workspaces without apps
+        return SandboxListResponse(sandboxes=[], total=0)
+
+    sandboxes = db_service.get_sandboxes_by_workspace(workspace["id"])
+
+    return SandboxListResponse(
+        sandboxes=[_sandbox_to_response(s) for s in sandboxes],
+        total=len(sandboxes)
+    )
+
+
+@router.post("/internal/create", response_model=dict)
+async def create_sandbox_internal(
+    workspace_slug: str,
+    request: SandboxCreateRequest,
+    x_service_secret: str = Header(None, alias="X-Service-Secret"),
+    x_user_id: str = Header(None, alias="X-User-Id")
+):
+    """
+    Internal endpoint for service-to-service sandbox creation.
+
+    This endpoint is called by team backends to create sandboxes
+    on behalf of a user, using service-to-service secret.
+
+    Authentication: X-Service-Secret header with cross-domain secret
+    X-User-Id header identifies the user creating the sandbox
+    """
+    # Verify service secret
+    if x_service_secret != settings.cross_domain_secret:
+        raise HTTPException(status_code=403, detail="Invalid service secret")
+
+    if not x_user_id:
+        raise HTTPException(status_code=400, detail="X-User-Id header required")
+
+    # Get workspace by slug
+    workspace = db_service.get_workspace_by_slug(workspace_slug)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    # Check if workspace has an app
+    if not workspace.get("app_template_id"):
+        raise HTTPException(
+            status_code=400,
+            detail="Sandboxes are only available for workspaces with an app"
+        )
+
+    # Check if workspace is active
+    if workspace["status"] != "active":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot create sandbox: workspace is {workspace['status']}"
+        )
+
+    # Check if slug is available
+    full_slug = f"{workspace['slug']}-{request.slug}"
+    existing = db_service.get_sandbox_by_full_slug(full_slug)
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Sandbox with slug '{request.slug}' already exists in this workspace"
+        )
+
+    # Create sandbox record
+    sandbox_data = {
+        "workspace_id": workspace["id"],
+        "slug": request.slug,
+        "full_slug": full_slug,
+        "name": request.name,
+        "description": request.description,
+        "owner_id": x_user_id,
+        "git_branch": f"sandbox/{full_slug}",
+        "source_branch": request.source_branch,
+        "database_name": full_slug.replace("-", "_"),
+        "agent_container_name": f"kanban-agent-{full_slug}",
+    }
+
+    sandbox = db_service.create_sandbox(sandbox_data)
+
+    # Create provisioning task
+    task_id = await task_service.create_sandbox_provision_task(
+        sandbox_id=sandbox["id"],
+        workspace_id=workspace["id"],
+        workspace_slug=workspace["slug"],
+        sandbox_slug=sandbox["slug"],
+        full_slug=sandbox["full_slug"],
+        source_branch=request.source_branch,
+        owner_id=x_user_id,
+        github_org=workspace.get("github_org"),
+        github_repo_name=workspace.get("github_repo_name"),
+        azure_tenant_id=workspace.get("azure_tenant_id"),
+        azure_app_id=workspace.get("azure_app_id"),
+        azure_client_secret=workspace.get("azure_client_secret"),
+        azure_object_id=workspace.get("azure_object_id"),
+    )
+
+    logger.info(
+        f"Sandbox creation started (internal): {full_slug} "
+        f"(from branch: {request.source_branch}) "
+        f"by user {x_user_id}"
+    )
+
+    return {
+        "message": "Sandbox creation started",
+        "sandbox": _sandbox_to_response(sandbox, include_secret=True),
+        "task_id": task_id
+    }

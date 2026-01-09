@@ -7,7 +7,7 @@ http:
         - websecure
       service: accountability-app-frontend
       tls:
-        certResolver: letsencrypt
+        certResolver: kanban-letsencrypt
 
     accountability-app-api:
       rule: "Host(`accountability.app.kanban.amazing-ai.tools`) && PathPrefix(`/api`)"
@@ -17,7 +17,7 @@ http:
       middlewares:
         - accountability-api-strip
       tls:
-        certResolver: letsencrypt
+        certResolver: kanban-letsencrypt
       priority: 10
 
     accountability-app-auth:
@@ -26,7 +26,7 @@ http:
         - websecure
       service: accountability-app-backend
       tls:
-        certResolver: letsencrypt
+        certResolver: kanban-letsencrypt
       priority: 10
 
   middlewares:

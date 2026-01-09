@@ -93,7 +93,7 @@ services:
       - "traefik.http.routers.portal-api.rule=Host(`${DOMAIN:-localhost}`) && PathPrefix(`/api`)"
       - "traefik.http.routers.portal-api.entrypoints=websecure"
       - "traefik.http.routers.portal-api.tls=true"
-      - "traefik.http.routers.portal-api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.portal-api.tls.certresolver=kanban-letsencrypt"
       - "traefik.http.routers.portal-api.middlewares=portal-api-strip"
       - "traefik.http.middlewares.portal-api-strip.stripprefix.prefixes=/api"
       - "traefik.http.services.portal-api.loadbalancer.server.port=8000"
@@ -126,7 +126,7 @@ services:
       - "traefik.http.routers.portal-web.rule=Host(`${DOMAIN:-localhost}`) && !PathPrefix(`/api`)"
       - "traefik.http.routers.portal-web.entrypoints=websecure"
       - "traefik.http.routers.portal-web.tls=true"
-      - "traefik.http.routers.portal-web.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.portal-web.tls.certresolver=kanban-letsencrypt"
       - "traefik.http.services.portal-web.loadbalancer.server.port=80"
       # HTTP router (redirect to HTTPS)
       - "traefik.http.routers.portal-web-http.rule=Host(`${DOMAIN:-localhost}`) && !PathPrefix(`/api`)"
@@ -205,6 +205,12 @@ services:
       - AZURE_APP_FACTORY_CLIENT_ID=${AZURE_APP_FACTORY_CLIENT_ID:-}
       - AZURE_APP_FACTORY_CLIENT_SECRET=${AZURE_APP_FACTORY_CLIENT_SECRET:-}
       - ENTRA_CIAM_AUTHORITY=${ENTRA_CIAM_AUTHORITY:-}
+      # Anthropic API key for AI tasks
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # SSH config for running Claude CLI on host (uses Pro subscription)
+      - SSH_HOST=${SSH_HOST:-host.docker.internal}
+      - SSH_USER=${SSH_USER:-}
+      - SSH_CLAUDE_PATH=${SSH_CLAUDE_PATH:-~/.local/bin/claude}
     volumes:
       - ./orchestrator/app:/app/app
       - ./data/teams:/app/data/teams
@@ -212,11 +218,15 @@ services:
       # Mount workspaces at the HOST_PROJECT_PATH so docker compose build contexts resolve correctly
       - ${HOST_PROJECT_PATH}/data/workspaces:${HOST_PROJECT_PATH}/data/workspaces
       - ./data/workspaces:/app/data/workspaces  # Also mount at /app for reading
+      # Mount sandboxes at the HOST_PROJECT_PATH so docker compose can read sandbox compose files
+      - ${HOST_PROJECT_PATH}/data/sandboxes:${HOST_PROJECT_PATH}/data/sandboxes
       - ./kanban-team:/app/kanban-team:ro
       - ./traefik/certs:/app/certs
       - ./traefik/dynamic:/app/traefik-dynamic
       - ./coredns/zones:/app/dns-zones
       - /var/run/docker.sock:/var/run/docker.sock
+      # SSH keys for executing Claude CLI on host
+      - ~/.ssh:/root/.ssh:ro
     networks:
       - kanban-global
     depends_on:

@@ -68,7 +68,7 @@ services:
       - "traefik.http.routers.{{ full_slug }}-api.rule=Host(`{{ full_slug }}.sandbox.{{ domain | replace('kanban.', '') }}`) && PathPrefix(`/api`)"
       - "traefik.http.routers.{{ full_slug }}-api.entrypoints=websecure"
       - "traefik.http.routers.{{ full_slug }}-api.tls=true"
-      - "traefik.http.routers.{{ full_slug }}-api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.{{ full_slug }}-api.tls.certresolver=kanban-letsencrypt"
       - "traefik.http.routers.{{ full_slug }}-api.middlewares={{ full_slug }}-api-strip"
       - "traefik.http.services.{{ full_slug }}-api.loadbalancer.server.port=8000"
       # HTTP router (redirect to HTTPS)
@@ -101,7 +101,7 @@ services:
       - "traefik.http.routers.{{ full_slug }}-web.rule=Host(`{{ full_slug }}.sandbox.{{ domain | replace('kanban.', '') }}`)"
       - "traefik.http.routers.{{ full_slug }}-web.entrypoints=websecure"
       - "traefik.http.routers.{{ full_slug }}-web.tls=true"
-      - "traefik.http.routers.{{ full_slug }}-web.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.{{ full_slug }}-web.tls.certresolver=kanban-letsencrypt"
       - "traefik.http.services.{{ full_slug }}-web.loadbalancer.server.port=5173"
       # HTTP router (redirect to HTTPS, but exclude ACME challenge path)
       - "traefik.http.routers.{{ full_slug }}-web-http.rule=Host(`{{ full_slug }}.sandbox.{{ domain | replace('kanban.', '') }}`) && !PathPrefix(`/.well-known/acme-challenge`)"

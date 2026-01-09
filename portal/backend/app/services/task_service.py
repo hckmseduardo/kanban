@@ -382,7 +382,7 @@ class TaskService:
         card_title: str,
         card_description: str,
         column_name: str,
-        agent_type: str,
+        agent_config: dict,
         sandbox_id: str,
         workspace_slug: str,
         git_branch: str,
@@ -396,14 +396,20 @@ class TaskService:
         """Create task for on-demand AI agent to process a card.
 
         This spawns a Claude Code subprocess to process the card
-        based on the agent type (determined by column).
+        using the agent configuration from kanban-team.
 
         Args:
             card_id: The card to process
             card_title: Card title for context
             card_description: Card description with requirements
-            column_name: Current column (determines agent type)
-            agent_type: Agent persona to use (developer, architect, etc.)
+            column_name: Current column name
+            agent_config: Full agent configuration from kanban-team including:
+                - agent_name: Agent type (developer, architect, etc.)
+                - persona: System prompt for the agent
+                - tool_profile: Claude Code tools to allow (readonly, developer, full-access)
+                - timeout: Maximum execution time in seconds
+                - column_success: Column to move card on success
+                - column_failure: Column to move card on failure
             sandbox_id: Sandbox identifier for isolation
             workspace_slug: Workspace this card belongs to
             git_branch: Git branch to work on
@@ -422,7 +428,7 @@ class TaskService:
                 "card_title": card_title,
                 "card_description": card_description,
                 "column_name": column_name,
-                "agent_type": agent_type,
+                "agent_config": agent_config,
                 "sandbox_id": sandbox_id,
                 "workspace_slug": workspace_slug,
                 "git_branch": git_branch,
@@ -430,6 +436,64 @@ class TaskService:
                 "target_project_path": target_project_path,
                 "board_id": board_id,
                 "labels": labels or [],
+            },
+            user_id=user_id,
+            priority=priority
+        )
+
+    async def create_enhance_description_task(
+        self,
+        card_id: str,
+        card_title: str,
+        card_description: str,
+        workspace_slug: str,
+        kanban_api_url: str,
+        user_id: str,
+        options: dict = None,
+        mode: str = "append",
+        apply_labels: bool = True,
+        add_checklist: bool = True,
+        priority: str = "high",
+    ) -> str:
+        """Create task for AI to enhance a card's description.
+
+        This spawns a Claude Code subprocess to analyze the card and generate:
+        - Refined description
+        - Acceptance criteria (as checklist items)
+        - Complexity estimate
+        - Suggested labels
+
+        Args:
+            card_id: The card to enhance
+            card_title: Card title for context
+            card_description: Current card description
+            workspace_slug: Workspace this card belongs to
+            kanban_api_url: API URL for card updates
+            user_id: User who triggered the enhancement
+            options: Enhancement options (acceptance_criteria, complexity_estimate, etc.)
+            mode: "append" or "replace" for description update
+            apply_labels: Whether to apply suggested labels
+            add_checklist: Whether to add criteria to checklist
+            priority: Task priority (high/normal)
+        """
+        return await redis_service.enqueue_task(
+            queue_name=self.QUEUE_AGENTS,
+            task_type="agent.enhance_description",
+            payload={
+                "card_id": card_id,
+                "card_title": card_title,
+                "card_description": card_description,
+                "workspace_slug": workspace_slug,
+                "kanban_api_url": kanban_api_url,
+                "options": options or {
+                    "acceptance_criteria": True,
+                    "complexity_estimate": True,
+                    "suggest_labels": True,
+                    "refine_description": True,
+                },
+                "mode": mode,
+                "apply_labels": apply_labels,
+                "add_checklist": add_checklist,
             },
             user_id=user_id,
             priority=priority

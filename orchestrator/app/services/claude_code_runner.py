@@ -1,7 +1,7 @@
 """Claude Code subprocess runner for on-demand AI agents.
 
-This service spawns Claude Code CLI processes to handle card tasks,
-streaming output for real-time progress updates.
+This service executes Claude Code CLI on the host machine via SSH,
+allowing use of the Pro subscription for reduced costs.
 """
 
 import asyncio
@@ -11,9 +11,14 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional, AsyncIterator
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+# SSH configuration for executing Claude CLI on host
+SSH_HOST = os.getenv("SSH_HOST", "host.docker.internal")
+SSH_USER = os.getenv("SSH_USER", "")
+SSH_CLAUDE_PATH = os.getenv("SSH_CLAUDE_PATH", "~/.local/bin/claude")
 
 
 @dataclass
@@ -34,19 +39,20 @@ class AgentResult:
 
 
 class ClaudeCodeRunner:
-    """Runs Claude Code CLI as subprocess for agent tasks.
+    """Runs Claude Code CLI on host via SSH for agent tasks.
 
-    Uses Pro subscription via ~/.claude credentials.
-    Runs in sandbox directory with restricted access.
-    Streams output for real-time card updates.
+    Uses Pro subscription via host's ~/.claude credentials.
+    Executes commands via SSH to the host machine.
     """
 
-    # Default allowed tools per agent type
-    DEFAULT_TOOLS = [
-        "Read", "Write", "Edit", "Glob", "Grep", "Bash"
-    ]
+    # Tool profiles for simplified configuration
+    TOOL_PROFILES = {
+        "readonly": ["Read", "Glob", "Grep"],
+        "developer": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+        "full-access": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Task", "WebFetch"],
+    }
 
-    # Agent-specific tool configurations
+    # Legacy: Agent-specific tool configurations
     AGENT_TOOLS = {
         "developer": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Task"],
         "architect": ["Read", "Glob", "Grep", "Bash", "Task"],
@@ -58,12 +64,13 @@ class ClaudeCodeRunner:
         "support_analyst": ["Read", "Glob", "Grep", "Bash"],
     }
 
-    # Default timeouts per agent type (seconds)
+    DEFAULT_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]
+
     AGENT_TIMEOUTS = {
-        "developer": 900,  # 15 minutes for complex implementations
-        "architect": 600,  # 10 minutes for design
-        "reviewer": 300,   # 5 minutes for review
-        "qa": 600,         # 10 minutes for testing
+        "developer": 900,
+        "architect": 600,
+        "reviewer": 300,
+        "qa": 600,
         "product_owner": 300,
         "release": 300,
         "triage": 180,
@@ -72,43 +79,40 @@ class ClaudeCodeRunner:
 
     def __init__(self):
         """Initialize the Claude Code runner."""
-        self.claude_binary = self._find_claude_binary()
+        self.ssh_host = SSH_HOST
+        self.ssh_user = SSH_USER
+        self.claude_path = SSH_CLAUDE_PATH
 
-    def _find_claude_binary(self) -> str:
-        """Find the Claude Code CLI binary."""
-        # Check common locations
-        locations = [
-            "/usr/local/bin/claude",
-            "/opt/homebrew/bin/claude",
-            os.path.expanduser("~/.local/bin/claude"),
-            os.path.expanduser("~/.npm-global/bin/claude"),
-        ]
+    def _build_ssh_command(self, remote_cmd: str) -> list:
+        """Build SSH command to execute on host."""
+        ssh_cmd = ["ssh"]
 
-        for path in locations:
-            if os.path.isfile(path) and os.access(path, os.X_OK):
-                return path
+        # Add strict host key checking disable for development
+        ssh_cmd.extend(["-o", "StrictHostKeyChecking=no"])
+        ssh_cmd.extend(["-o", "UserKnownHostsFile=/dev/null"])
+        ssh_cmd.extend(["-o", "LogLevel=ERROR"])
 
-        # Try finding in PATH
-        try:
-            result = subprocess.run(
-                ["which", "claude"],
-                capture_output=True,
-                text=True
-            )
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except Exception:
-            pass
+        # Build target
+        if self.ssh_user:
+            target = f"{self.ssh_user}@{self.ssh_host}"
+        else:
+            target = self.ssh_host
 
-        # Fall back to assuming it's in PATH
-        return "claude"
+        ssh_cmd.append(target)
+        ssh_cmd.append(remote_cmd)
+
+        return ssh_cmd
+
+    def get_tools_for_profile(self, tool_profile: str) -> list:
+        """Get allowed tools for a tool profile."""
+        return self.TOOL_PROFILES.get(tool_profile, self.DEFAULT_TOOLS)
 
     def get_tools_for_agent(self, agent_type: str) -> list:
-        """Get allowed tools for an agent type."""
+        """Legacy: Get allowed tools for an agent type."""
         return self.AGENT_TOOLS.get(agent_type, self.DEFAULT_TOOLS)
 
     def get_timeout_for_agent(self, agent_type: str) -> int:
-        """Get timeout in seconds for an agent type."""
+        """Legacy: Get timeout in seconds for an agent type."""
         return self.AGENT_TIMEOUTS.get(agent_type, 600)
 
     async def run(
@@ -116,6 +120,7 @@ class ClaudeCodeRunner:
         prompt: str,
         working_dir: str,
         agent_type: str = "developer",
+        tool_profile: str = None,
         allowed_tools: list = None,
         env: dict = None,
         on_output: Callable[[str], None] = None,
@@ -123,12 +128,13 @@ class ClaudeCodeRunner:
         system_prompt: str = None,
     ) -> AgentResult:
         """
-        Spawn Claude Code CLI subprocess and run a prompt.
+        Execute Claude Code CLI on host via SSH.
 
         Args:
             prompt: The task prompt for Claude Code
-            working_dir: Directory to run in (sandbox project path)
-            agent_type: Type of agent (determines tools and timeout)
+            working_dir: Directory to run in on the host
+            agent_type: Type of agent (legacy fallback for tools/timeout)
+            tool_profile: Tool profile from agent config
             allowed_tools: Override allowed tools list
             env: Additional environment variables
             on_output: Callback for streaming output
@@ -141,60 +147,67 @@ class ClaudeCodeRunner:
         import time
         start_time = time.time()
 
-        # Resolve tools and timeout
-        tools = allowed_tools or self.get_tools_for_agent(agent_type)
-        timeout = timeout or self.get_timeout_for_agent(agent_type)
-
-        # Build command
-        cmd = [self.claude_binary]
-
-        # Add prompt
-        cmd.extend(["-p", prompt])
-
-        # Add allowed tools
-        if tools:
-            cmd.extend(["--allowedTools", ",".join(tools)])
-
-        # Skip permission prompts in automated mode
-        cmd.append("--dangerouslySkipPermissions")
-
-        # Output format for parsing
-        cmd.extend(["--output-format", "stream-json"])
-
-        # Add system prompt if provided
-        if system_prompt:
-            cmd.extend(["--system-prompt", system_prompt])
-
-        # Prepare environment
-        process_env = os.environ.copy()
-        if env:
-            process_env.update(env)
-
-        # Ensure working directory exists
-        work_path = Path(working_dir)
-        if not work_path.exists():
-            logger.error(f"Working directory does not exist: {working_dir}")
+        # Check SSH configuration
+        if not self.ssh_user:
+            logger.error("SSH_USER not configured for Claude CLI execution")
             return AgentResult(
                 success=False,
                 output="",
-                error=f"Working directory does not exist: {working_dir}",
+                error="SSH_USER environment variable not set. Configure it to use Claude CLI on host.",
                 duration_seconds=time.time() - start_time
             )
 
-        logger.info(f"Starting Claude Code: agent={agent_type}, dir={working_dir}")
-        logger.debug(f"Command: {' '.join(cmd)}")
+        # Resolve tools
+        if allowed_tools:
+            tools = allowed_tools
+        elif tool_profile:
+            tools = self.get_tools_for_profile(tool_profile)
+        else:
+            tools = self.get_tools_for_agent(agent_type)
+
+        # Resolve timeout
+        timeout = timeout or self.get_timeout_for_agent(agent_type)
+
+        # Escape the prompt for shell
+        escaped_prompt = prompt.replace("'", "'\\''")
+
+        # Build the remote Claude command
+        remote_cmd_parts = [self.claude_path]
+        remote_cmd_parts.extend(["-p", f"'{escaped_prompt}'"])
+
+        if tools:
+            remote_cmd_parts.extend(["--allowedTools", ",".join(tools)])
+
+        remote_cmd_parts.append("--dangerously-skip-permissions")
+
+        # Use text output for simpler parsing
+        remote_cmd_parts.extend(["--output-format", "text"])
+
+        if system_prompt:
+            escaped_system = system_prompt.replace("'", "'\\''")
+            remote_cmd_parts.extend(["--system-prompt", f"'{escaped_system}'"])
+
+        # Add working directory if it's a valid host path
+        if working_dir and not working_dir.startswith("/app"):
+            remote_cmd_parts.extend(["--cwd", working_dir])
+
+        remote_cmd = " ".join(remote_cmd_parts)
+
+        # Build SSH command
+        ssh_cmd = self._build_ssh_command(remote_cmd)
+
+        logger.info(f"Executing Claude via SSH: agent={agent_type}, host={self.ssh_host}")
+        logger.info(f"SSH command: {' '.join(ssh_cmd[:5])}...")
+        logger.debug(f"Remote command: {remote_cmd[:200]}...")
 
         output_lines = []
         error_lines = []
         files_modified = []
-        commits = []
 
         try:
             # Create subprocess
             proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(work_path),
-                env=process_env,
+                *ssh_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -204,28 +217,10 @@ class ClaudeCodeRunner:
                 async for line in stream:
                     decoded = line.decode("utf-8", errors="replace").rstrip()
                     lines_list.append(decoded)
-
-                    # Parse JSON output for progress
-                    if decoded.startswith("{"):
-                        try:
-                            data = json.loads(decoded)
-                            if data.get("type") == "tool_use":
-                                tool_name = data.get("tool", {}).get("name", "")
-                                if tool_name in ("Write", "Edit"):
-                                    file_path = data.get("tool", {}).get("input", {}).get("file_path")
-                                    if file_path and file_path not in files_modified:
-                                        files_modified.append(file_path)
-                            elif data.get("type") == "text":
-                                text = data.get("text", "")
-                                if callback:
-                                    callback(text)
-                        except json.JSONDecodeError:
-                            pass
-                    elif callback:
+                    if callback:
                         callback(decoded)
 
             try:
-                # Run with timeout
                 stdout_task = asyncio.create_task(
                     read_stream(proc.stdout, on_output, output_lines)
                 )
@@ -260,13 +255,20 @@ class ClaudeCodeRunner:
             success = proc.returncode == 0
             error_msg = "\n".join(error_lines) if error_lines else None
 
-            if not success and not error_msg:
-                error_msg = f"Claude Code exited with code {proc.returncode}"
+            if not success:
+                # Log detailed error info
+                logger.error(f"Claude Code failed with code {proc.returncode}")
+                if error_lines:
+                    logger.error(f"Stderr: {error_msg[:500]}")
+                if output_lines:
+                    logger.error(f"Stdout (first 500 chars): {' '.join(output_lines)[:500]}")
+                if not error_msg:
+                    error_msg = f"Claude Code exited with code {proc.returncode}"
 
             duration = time.time() - start_time
             logger.info(
                 f"Claude Code completed: success={success}, "
-                f"duration={duration:.1f}s, files={len(files_modified)}"
+                f"duration={duration:.1f}s"
             )
 
             return AgentResult(
@@ -274,7 +276,6 @@ class ClaudeCodeRunner:
                 output="\n".join(output_lines),
                 error=error_msg if not success else None,
                 files_modified=files_modified,
-                commits=commits,
                 duration_seconds=duration
             )
 
@@ -287,54 +288,6 @@ class ClaudeCodeRunner:
                 files_modified=files_modified,
                 duration_seconds=time.time() - start_time
             )
-
-    async def run_with_progress(
-        self,
-        prompt: str,
-        working_dir: str,
-        agent_type: str,
-        progress_callback: Callable[[str, int], None],
-        **kwargs
-    ) -> AgentResult:
-        """
-        Run Claude Code with progress reporting.
-
-        Args:
-            prompt: The task prompt
-            working_dir: Directory to run in
-            agent_type: Type of agent
-            progress_callback: Callback(message, percentage)
-            **kwargs: Additional arguments for run()
-        """
-        output_buffer = []
-        total_lines = 0
-
-        def on_output(line: str):
-            nonlocal total_lines
-            output_buffer.append(line)
-            total_lines += 1
-
-            # Estimate progress based on output
-            # This is a rough heuristic
-            estimated_progress = min(90, total_lines * 2)
-            progress_callback(line[:100], estimated_progress)
-
-        progress_callback("Starting agent...", 0)
-
-        result = await self.run(
-            prompt=prompt,
-            working_dir=working_dir,
-            agent_type=agent_type,
-            on_output=on_output,
-            **kwargs
-        )
-
-        if result.success:
-            progress_callback("Completed successfully", 100)
-        else:
-            progress_callback(f"Failed: {result.error}", 100)
-
-        return result
 
 
 # Singleton instance

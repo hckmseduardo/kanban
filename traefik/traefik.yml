@@ -19,7 +19,7 @@ entryPoints:
 
 # Certificate Resolvers (Let's Encrypt)
 certificatesResolvers:
-  letsencrypt:
+  kanban-letsencrypt:
     acme:
       email: "eduardo.m.silva@gmail.com"
       storage: /etc/traefik/certs/acme.json

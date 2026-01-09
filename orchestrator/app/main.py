@@ -15,6 +15,8 @@ from pathlib import Path
 
 import redis.asyncio as redis
 from jinja2 import Environment, FileSystemLoader
+import anthropic
+import httpx
 
 from app.services.database_cloner import database_cloner
 from app.services.github_service import github_service
@@ -48,6 +50,16 @@ try:
         logger.info("Loaded CROSS_DOMAIN_SECRET from Key Vault")
 except Exception as e:
     logger.warning(f"Could not load CROSS_DOMAIN_SECRET from Key Vault: {e}")
+
+# Try to load ANTHROPIC_API_KEY from Key Vault first, fall back to env var
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+try:
+    _kv_anthropic_key = keyvault_service.get_secret("anthropic-api-key")
+    if _kv_anthropic_key:
+        ANTHROPIC_API_KEY = _kv_anthropic_key
+        logger.info("Loaded ANTHROPIC_API_KEY from Key Vault")
+except Exception as e:
+    logger.warning(f"Could not load ANTHROPIC_API_KEY from Key Vault: {e}")
 
 TEAMS_DIR = Path("/app/data/teams")
 # Use HOST_PROJECT_PATH for workspaces so docker compose build contexts resolve correctly
@@ -316,6 +328,8 @@ class Orchestrator:
             # Agent tasks (on-demand AI processing)
             elif task_type == "agent.process_card":
                 await self.process_agent_task(task)
+            elif task_type == "agent.enhance_description":
+                await self.enhance_description_task(task)
             else:
                 logger.warning(f"Unknown task type: {task_type}")
 
@@ -1054,7 +1068,8 @@ class Orchestrator:
         sandboxes = []
         sandbox_slugs = self._get_workspace_sandboxes(workspace_slug)
         for full_slug in sandbox_slugs:
-            sandbox_running = self._is_container_running(f"{full_slug}-app")
+            # Sandbox containers are named {full_slug}-api, not {full_slug}-app
+            sandbox_running = self._is_container_running(f"{full_slug}-api")
             sandboxes.append({
                 "slug": full_slug.replace(f"{workspace_slug}-", ""),
                 "full_slug": full_slug,
@@ -1976,7 +1991,8 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         project_name = f"{workspace_slug}-kanban"
         compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
-        workspace_data_host_path = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}"
+        # Use data/teams/ to match provisioning (kanban data lives in teams, not workspaces)
+        workspace_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{workspace_slug}"
 
         # Get cross-domain secret from Key Vault (production) or environment (development)
         cross_domain_secret = keyvault_service.get_cross_domain_secret()
@@ -2090,7 +2106,8 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         project_name = f"{workspace_slug}-kanban"
         compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
-        workspace_data_host_path = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}"
+        # Use data/teams/ to match provisioning (kanban data lives in teams, not workspaces)
+        workspace_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{workspace_slug}"
 
         env = os.environ.copy()
         env.update({
@@ -2119,7 +2136,8 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         project_name = f"{workspace_slug}-kanban"
         compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
-        workspace_data_host_path = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}"
+        # Use data/teams/ to match provisioning (kanban data lives in teams, not workspaces)
+        workspace_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{workspace_slug}"
 
         # Get cross-domain secret from Key Vault (production) or environment (development)
         cross_domain_secret = keyvault_service.get_cross_domain_secret()
@@ -2161,7 +2179,8 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         project_name = f"{workspace_slug}-kanban"
         compose_file = str(TEMPLATE_DIR / "docker-compose.yml")
-        workspace_data_host_path = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}"
+        # Use data/teams/ to match provisioning (kanban data lives in teams, not workspaces)
+        workspace_data_host_path = f"{HOST_PROJECT_PATH}/data/teams/{workspace_slug}"
 
         # Get cross-domain secret from Key Vault (production) or environment (development)
         cross_domain_secret = keyvault_service.get_cross_domain_secret()
@@ -2500,6 +2519,13 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         except Exception as e:
             logger.error(f"Sandbox provisioning failed: {e}")
+            # Publish failure status to Redis so the portal worker updates the database
+            await self.redis.publish("sandbox:status", json.dumps({
+                "sandbox_id": sandbox_id,
+                "full_slug": full_slug,
+                "status": "failed",
+                "error": str(e)
+            }))
             await self.fail_task(task_id, str(e))
             raise
 
@@ -2627,20 +2653,12 @@ This board helps you explore and develop ideas from concept to implementation-re
     async def _sandbox_create_directory(self, full_slug: str, sandbox_id: str):
         """Create sandbox directory structure."""
         # Sandbox data is stored at {HOST_PROJECT_PATH}/data/sandboxes/{full_slug}
-        sandbox_data_path = Path(f"{HOST_PROJECT_PATH}/data/sandboxes/{full_slug}")
+        # This directory is mounted in docker-compose.yml, so we can use Python file operations
+        sandbox_data_path = f"{HOST_PROJECT_PATH}/data/sandboxes/{full_slug}"
 
-        # Note: Postgres data cleanup is now done in _sandbox_deploy_containers
-        # using docker run to avoid mount propagation issues
-
-        # Create directory structure
-        (sandbox_data_path / "uploads").mkdir(parents=True, exist_ok=True)
-        (sandbox_data_path / "redis").mkdir(parents=True, exist_ok=True)
-
-        # Also create the old directory structure for backwards compatibility
-        sandbox_dir = TEAMS_DIR / full_slug
-        (sandbox_dir / "db").mkdir(parents=True, exist_ok=True)
-        (sandbox_dir / "app").mkdir(parents=True, exist_ok=True)
-        (sandbox_dir / "logs").mkdir(parents=True, exist_ok=True)
+        # Create sandbox data directories
+        os.makedirs(f"{sandbox_data_path}/uploads", exist_ok=True)
+        os.makedirs(f"{sandbox_data_path}/redis", exist_ok=True)
 
         logger.info(f"[{full_slug}] Directory structure created at {sandbox_data_path}")
 
@@ -2699,20 +2717,22 @@ This board helps you explore and develop ideas from concept to implementation-re
             raise
 
         # Write compose file to persistent location in sandbox directory
+        # The sandboxes directory is mounted at HOST_PROJECT_PATH/data/sandboxes in docker-compose.yml
         compose_file_host = f"{HOST_PROJECT_PATH}/data/sandboxes/{full_slug}/docker-compose.app.yml"
-        compose_file = Path(f"/app/data/sandboxes/{full_slug}/docker-compose.app.yml")
+        sandbox_host_dir = f"{HOST_PROJECT_PATH}/data/sandboxes/{full_slug}"
 
-        # Ensure sandbox directory exists
-        compose_file.parent.mkdir(parents=True, exist_ok=True)
-        compose_file.write_text(compose_content)
+        # Ensure directory exists
+        os.makedirs(sandbox_host_dir, exist_ok=True)
+
+        # Write compose file
+        with open(compose_file_host, "w") as f:
+            f.write(compose_content)
+
         logger.info(f"[{full_slug}] Saved compose file to {compose_file_host}")
 
         project_name = f"{full_slug}-app"
 
         try:
-            # Create sandbox data directory
-            Path(sandbox_data_path).mkdir(parents=True, exist_ok=True)
-
             # Stop and remove existing stack if it exists
             subprocess.run(
                 ["docker", "compose", "-f", compose_file_host, "-p", project_name, "down", "--remove-orphans"],
@@ -2721,38 +2741,46 @@ This board helps you explore and develop ideas from concept to implementation-re
                 check=False
             )
 
-            # Clean up postgres data on the HOST to prevent password mismatch issues
-            # We use docker run with alpine to access the host path directly, avoiding
-            # mount propagation issues where the orchestrator can't see directories
-            # created by other containers
+            # Create sandbox data directories and clean up postgres data
+            # The sandboxes directory is mounted, so we can use regular Python file operations
             postgres_host_path = f"{sandbox_data_path}/postgres"
-            cleanup_result = subprocess.run(
-                [
-                    "docker", "run", "--rm",
-                    "-v", f"{sandbox_data_path}:{sandbox_data_path}",
-                    "alpine:latest",
-                    "sh", "-c", f"rm -rf {postgres_host_path} && echo 'Postgres data cleaned'"
-                ],
-                capture_output=True,
-                text=True,
-                check=False
-            )
-            if cleanup_result.returncode == 0 and "cleaned" in cleanup_result.stdout:
-                logger.info(f"[{full_slug}] Cleaned up existing postgres data on host")
+            os.makedirs(f"{sandbox_data_path}/uploads", exist_ok=True)
+            os.makedirs(f"{sandbox_data_path}/redis", exist_ok=True)
+            if os.path.exists(postgres_host_path):
+                shutil.rmtree(postgres_host_path, ignore_errors=True)
+            logger.info(f"[{full_slug}] Created directories and cleaned postgres data")
 
-            # Start the stack
-            result = subprocess.run(
-                ["docker", "compose", "-f", compose_file_host, "-p", project_name, "up", "-d"],
-                capture_output=True,
-                text=True,
-                check=True
-            )
+            # Start the stack with retry logic for transient failures
+            max_retries = 3
+            retry_delay = 2  # seconds
+            last_error = None
 
-            if result.returncode != 0:
-                raise RuntimeError(f"Failed to start sandbox containers: {result.stderr}")
+            for attempt in range(1, max_retries + 1):
+                result = subprocess.run(
+                    ["docker", "compose", "-f", compose_file_host, "-p", project_name, "up", "-d"],
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
 
-            logger.info(f"[{full_slug}] Sandbox containers deployed")
+                if result.returncode == 0:
+                    logger.info(f"[{full_slug}] Sandbox containers deployed (attempt {attempt})")
+                    break
 
+                last_error = result.stderr or result.stdout or "Unknown error"
+                logger.warning(f"[{full_slug}] Docker compose up failed (attempt {attempt}/{max_retries}): {last_error}")
+
+                if attempt < max_retries:
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+            else:
+                # All retries exhausted
+                logger.error(f"[{full_slug}] Docker compose stderr: {result.stderr}")
+                logger.error(f"[{full_slug}] Docker compose stdout: {result.stdout}")
+                raise RuntimeError(f"Failed to start sandbox containers after {max_retries} attempts: {last_error}")
+
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"[{full_slug}] Sandbox deployment failed: {e}")
             raise
@@ -2995,8 +3023,8 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         This method:
         1. Prepares the sandbox context (git branch, working directory)
-        2. Builds the agent prompt from card data
-        3. Spawns Claude Code subprocess
+        2. Builds the agent prompt from card data and agent config
+        3. Spawns Claude Code subprocess with tool_profile and timeout
         4. Streams progress to card comments
         5. Updates card on completion
         """
@@ -3006,7 +3034,8 @@ This board helps you explore and develop ideas from concept to implementation-re
         card_title = payload["card_title"]
         card_description = payload["card_description"]
         column_name = payload["column_name"]
-        agent_type = payload["agent_type"]
+        agent_config = payload.get("agent_config", {})
+        agent_name = agent_config.get("agent_name", "developer")
         sandbox_id = payload["sandbox_id"]
         workspace_slug = payload["workspace_slug"]
         git_branch = payload["git_branch"]
@@ -3014,7 +3043,7 @@ This board helps you explore and develop ideas from concept to implementation-re
         target_project_path = payload["target_project_path"]
 
         logger.info(
-            f"Processing agent task: card={card_id}, agent={agent_type}, "
+            f"Processing agent task: card={card_id}, agent={agent_name}, "
             f"sandbox={sandbox_id}"
         )
 
@@ -3038,7 +3067,7 @@ This board helps you explore and develop ideas from concept to implementation-re
             await self.complete_task(task_id, {
                 "action": "process_card",
                 "card_id": card_id,
-                "agent_type": agent_type,
+                "agent_name": agent_name,
                 "success": self._agent_result.success if self._agent_result else False,
                 "files_modified": self._agent_result.files_modified if self._agent_result else [],
             })
@@ -3098,15 +3127,21 @@ This board helps you explore and develop ideas from concept to implementation-re
         card_title = payload["card_title"]
         card_description = payload["card_description"]
         column_name = payload["column_name"]
-        agent_type = payload["agent_type"]
+        agent_config = payload.get("agent_config", {})
+        agent_name = agent_config.get("agent_name", "developer")
         target_project_path = payload["target_project_path"]
 
-        # Build the prompt for Claude Code
+        # Get agent config values with defaults
+        persona = agent_config.get("persona", "")
+        tool_profile = agent_config.get("tool_profile", "developer")
+        timeout = agent_config.get("timeout", 600)
+
+        # Build the prompt for Claude Code using persona from agent config
         prompt = self._build_agent_prompt(
-            agent_type=agent_type,
             card_title=card_title,
             card_description=card_description,
             column_name=column_name,
+            persona=persona,
         )
 
         # Progress callback for streaming updates
@@ -3114,11 +3149,13 @@ This board helps you explore and develop ideas from concept to implementation-re
             # Could stream to card comments here
             logger.debug(f"Agent progress ({percentage}%): {message[:100]}")
 
-        # Run Claude Code
+        # Run Claude Code with config from kanban-team
         self._agent_result = await claude_runner.run(
             prompt=prompt,
             working_dir=target_project_path,
-            agent_type=agent_type,
+            agent_type=agent_name,  # Still used for tool fallback
+            tool_profile=tool_profile,
+            timeout=timeout,
         )
 
         if not self._agent_result.success:
@@ -3146,7 +3183,8 @@ This board helps you explore and develop ideas from concept to implementation-re
                 )
 
                 # Commit
-                commit_msg = f"Agent: {payload['agent_type']} processed card {card_id[:8]}"
+                agent_name = payload.get("agent_config", {}).get("agent_name", "agent")
+                commit_msg = f"Agent: {agent_name} processed card {card_id[:8]}"
                 subprocess.run(
                     ["git", "commit", "-m", commit_msg],
                     cwd=str(target_path),
@@ -3167,9 +3205,13 @@ This board helps you explore and develop ideas from concept to implementation-re
         kanban_api_url = payload["kanban_api_url"]
 
         # Build comment content
+        agent_config = payload.get("agent_config", {})
+        agent_name = agent_config.get("agent_name", "agent")
+        display_name = agent_config.get("display_name", agent_name)
+
         if result.success:
             comment = f"## Agent Completed\n\n"
-            comment += f"**Agent:** {payload['agent_type']}\n"
+            comment += f"**Agent:** {display_name}\n"
             comment += f"**Duration:** {result.duration_seconds:.1f}s\n"
             if result.files_modified:
                 comment += f"\n**Files Modified:**\n"
@@ -3177,7 +3219,7 @@ This board helps you explore and develop ideas from concept to implementation-re
                     comment += f"- `{f}`\n"
         else:
             comment = f"## Agent Failed\n\n"
-            comment += f"**Agent:** {payload['agent_type']}\n"
+            comment += f"**Agent:** {display_name}\n"
             comment += f"**Error:** {result.error}\n"
             comment += f"\nPlease review and retry."
 
@@ -3187,62 +3229,22 @@ This board helps you explore and develop ideas from concept to implementation-re
 
     def _build_agent_prompt(
         self,
-        agent_type: str,
         card_title: str,
         card_description: str,
         column_name: str,
+        persona: str = "",
     ) -> str:
-        """Build the prompt for Claude Code based on agent type."""
-        # Agent-specific instructions
-        agent_instructions = {
-            "developer": """You are an expert software developer. Your task is to implement the feature or fix described in the card.
+        """Build the prompt for Claude Code using persona from kanban-team.
 
-Instructions:
-1. Read the existing codebase to understand patterns and conventions
-2. Implement the changes described in the card
-3. Write clean, maintainable code following project conventions
-4. Add or update tests as needed
-5. Ensure the code compiles/runs without errors""",
-
-            "architect": """You are a software architect. Your task is to design the technical solution for this card.
-
-Instructions:
-1. Analyze the requirements in the card
-2. Explore the existing codebase architecture
-3. Design a technical approach
-4. Document the design decisions
-5. Break down into implementation tasks if needed""",
-
-            "reviewer": """You are a code reviewer. Your task is to review the implementation for this card.
-
-Instructions:
-1. Review the code changes for quality and correctness
-2. Check for bugs, security issues, and performance problems
-3. Verify tests are adequate
-4. Provide constructive feedback""",
-
-            "qa": """You are a QA engineer. Your task is to test the implementation for this card.
-
-Instructions:
-1. Review the requirements in the card
-2. Run existing tests
-3. Identify test gaps
-4. Write additional tests if needed
-5. Report any issues found""",
-
-            "product_owner": """You are a product owner. Your task is to refine the requirements for this card.
-
-Instructions:
-1. Review the card description
-2. Clarify any ambiguous requirements
-3. Add acceptance criteria
-4. Ensure the card is ready for development""",
-        }
-
-        instructions = agent_instructions.get(
-            agent_type,
-            "Process this card according to your role."
-        )
+        Args:
+            card_title: The card title
+            card_description: The card description/requirements
+            column_name: Current column name
+            persona: Agent persona/instructions from kanban-team config
+        """
+        # Use persona from config, or a generic fallback
+        if not persona:
+            persona = "Process this card according to your role."
 
         prompt = f"""# Task: {card_title}
 
@@ -3251,12 +3253,239 @@ Instructions:
 ## Description:
 {card_description}
 
-## Instructions:
-{instructions}
+## Agent Instructions:
+{persona}
 
 Please complete this task. Update files as needed and explain what you did."""
 
         return prompt
+
+    # =========================================================================
+    # Enhance Description Task (On-demand AI)
+    # =========================================================================
+
+    async def enhance_description_task(self, task: dict):
+        """Enhance a card's description using Claude Code subprocess.
+
+        This method:
+        1. Calls Claude Code to analyze the card
+        2. Generates enhanced description, acceptance criteria, etc.
+        3. Returns results to kanban-team via API call
+        """
+        task_id = task["task_id"]
+        payload = task["payload"]
+        card_id = payload["card_id"]
+        card_title = payload["card_title"]
+        card_description = payload["card_description"]
+        workspace_slug = payload["workspace_slug"]
+        kanban_api_url = payload["kanban_api_url"]
+        options = payload.get("options", {})
+        mode = payload.get("mode", "append")
+        apply_labels = payload.get("apply_labels", True)
+        add_checklist = payload.get("add_checklist", True)
+
+        logger.info(f"Enhancing description: card={card_id}, workspace={workspace_slug}")
+
+        steps = [
+            ("Analyzing card content", self._enhance_analyze),
+            ("Generating enhancements", self._enhance_generate),
+            ("Updating card", self._enhance_update_card),
+        ]
+
+        # Store payload for step functions
+        self._current_payload = payload
+        self._enhance_result = None
+
+        try:
+            for i, (step_name, step_func) in enumerate(steps, 1):
+                await self.update_progress(task_id, i, len(steps), step_name)
+                await step_func(card_id)
+                logger.info(f"[{card_id}] {step_name} - completed")
+
+            await self.complete_task(task_id, {
+                "action": "enhance_description",
+                "card_id": card_id,
+                "success": True,
+                "result": self._enhance_result,
+            })
+
+            logger.info(f"Enhance description completed: card={card_id}")
+
+        except Exception as e:
+            logger.error(f"Enhance description failed: {e}")
+            await self.fail_task(task_id, str(e))
+            raise
+
+    async def _enhance_analyze(self, card_id: str):
+        """Analyze the card content."""
+        # This step is mainly for progress indication
+        pass
+
+    async def _enhance_generate(self, card_id: str):
+        """Generate enhanced content using Claude Code CLI."""
+        payload = self._current_payload
+        card_title = payload["card_title"]
+        card_description = payload["card_description"]
+        options = payload.get("options", {})
+
+        # Build the enhancement prompt
+        prompt = self._build_enhance_prompt(card_title, card_description, options)
+
+        # Run Claude Code CLI with readonly tools (no file modifications needed)
+        result = await claude_runner.run(
+            prompt=prompt,
+            working_dir=str(Path.cwd()),  # Doesn't matter for this task
+            agent_type="product_owner",
+            tool_profile="readonly",
+            timeout=120,  # 2 minutes should be enough
+        )
+
+        if not result.success:
+            raise RuntimeError(f"Claude Code failed: {result.error}")
+
+        # Parse the JSON output from Claude's response
+        self._enhance_result = self._parse_enhance_output(result.output)
+
+    async def _enhance_update_card(self, card_id: str):
+        """Update the card via kanban-team API."""
+        if not self._enhance_result:
+            logger.warning("No enhancement result to apply")
+            return
+
+        payload = self._current_payload
+        workspace_slug = payload["workspace_slug"]
+        mode = payload.get("mode", "append")
+        apply_labels = payload.get("apply_labels", True)
+        add_checklist = payload.get("add_checklist", True)
+
+        result = self._enhance_result
+        logger.info(f"Enhancement result: {result}")
+
+        # Build the update payload
+        update_data = {
+            "enhanced_description": result.get("enhanced_description", ""),
+            "acceptance_criteria": result.get("acceptance_criteria", []) if add_checklist else [],
+            "complexity": result.get("complexity", ""),
+            "complexity_reason": result.get("complexity_reason", ""),
+            "suggested_labels": result.get("suggested_labels", []) if apply_labels else [],
+        }
+
+        logger.info(f"Sending update_data with description length: {len(update_data.get('enhanced_description', ''))}, mode={mode}")
+
+        # Use internal Docker network URL to bypass external auth
+        internal_api_url = f"http://{workspace_slug}-kanban-api-1:8000"
+
+        # Call kanban-team API to apply changes
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{internal_api_url}/cards/{card_id}/apply-enhancement",
+                    headers={"X-Service-Secret": CROSS_DOMAIN_SECRET},
+                    json={
+                        "mode": mode,
+                        "apply_labels": apply_labels,
+                        "add_checklist": add_checklist,
+                        **update_data,
+                    }
+                )
+                logger.info(f"Apply enhancement response: {response.status_code}")
+                logger.info(f"Response body: {response.text}")
+                if response.status_code != 200:
+                    logger.warning(f"Failed to apply enhancement: {response.text}")
+        except Exception as e:
+            logger.error(f"Error calling kanban-team API: {e}")
+
+    def _build_enhance_prompt(
+        self,
+        card_title: str,
+        card_description: str,
+        options: dict,
+    ) -> str:
+        """Build the prompt for enhancing card description."""
+        features = []
+        if options.get("refine_description", True):
+            features.append("- Refine and improve the description for clarity")
+        if options.get("acceptance_criteria", True):
+            features.append("- Generate acceptance criteria as a list of testable requirements")
+        if options.get("complexity_estimate", True):
+            features.append("- Estimate complexity (low, medium, high) with a brief reason")
+        if options.get("suggest_labels", True):
+            features.append("- Suggest appropriate labels (e.g., bug, feature, enhancement, documentation)")
+
+        features_text = "\n".join(features)
+
+        prompt = f"""Analyze this kanban card and enhance it.
+
+## Card Title
+{card_title}
+
+## Current Description
+{card_description or "(No description provided)"}
+
+## Tasks
+{features_text}
+
+## Output Format
+Respond with ONLY a JSON object in this exact format (no markdown, no code blocks):
+{{
+  "enhanced_description": "The improved description text",
+  "acceptance_criteria": ["Criterion 1", "Criterion 2", "..."],
+  "complexity": "low|medium|high",
+  "complexity_reason": "Brief explanation of complexity rating",
+  "suggested_labels": ["label1", "label2"]
+}}
+
+Be concise but thorough. Focus on actionable improvements."""
+
+        return prompt
+
+    def _parse_enhance_output(self, output: str) -> dict:
+        """Parse the Claude Code output to extract enhancement data."""
+        import re
+
+        logger.info(f"Parsing Claude output ({len(output)} chars): {output[:500]}...")
+
+        # Try to find JSON block in the output - look for outermost braces
+        # Find the first { and last } to extract JSON
+        first_brace = output.find('{')
+        last_brace = output.rfind('}')
+
+        if first_brace != -1 and last_brace > first_brace:
+            json_str = output[first_brace:last_brace + 1]
+            try:
+                result = json.loads(json_str)
+                logger.info(f"Successfully parsed JSON: {list(result.keys())}")
+                return result
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse JSON block: {e}")
+
+        # Try parsing the whole output as JSON
+        try:
+            result = json.loads(output.strip())
+            logger.info(f"Successfully parsed whole output as JSON")
+            return result
+        except json.JSONDecodeError:
+            pass
+
+        # Try to find JSON in code blocks
+        code_block_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', output, re.DOTALL)
+        if code_block_match:
+            try:
+                result = json.loads(code_block_match.group(1))
+                logger.info(f"Successfully parsed JSON from code block")
+                return result
+            except json.JSONDecodeError:
+                pass
+
+        # Fallback: return the raw output as enhanced description
+        logger.warning("Could not parse JSON from Claude output, using raw text")
+        return {
+            "enhanced_description": output[:2000] if output else "",
+            "acceptance_criteria": [],
+            "complexity": "medium",
+            "complexity_reason": "Could not determine",
+            "suggested_labels": [],
+        }
 
 
 async def main():
