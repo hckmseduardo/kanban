@@ -12,6 +12,7 @@ import shlex
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import redis.asyncio as redis
 from jinja2 import Environment, FileSystemLoader
@@ -2651,7 +2652,7 @@ This board helps you explore and develop ideas from concept to implementation-re
             pass
 
     async def _sandbox_create_directory(self, full_slug: str, sandbox_id: str):
-        """Create sandbox directory structure and clone repository."""
+        """Create sandbox directory structure and clone/update repository."""
         # Sandbox data is stored at {HOST_PROJECT_PATH}/data/sandboxes/{full_slug}
         # This directory is mounted in docker-compose.yml, so we can use Python file operations
         sandbox_data_path = f"{HOST_PROJECT_PATH}/data/sandboxes/{full_slug}"
@@ -2662,7 +2663,7 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         logger.info(f"[{full_slug}] Directory structure created at {sandbox_data_path}")
 
-        # Clone repository with the sandbox branch
+        # Setup repository with the sandbox branch
         workspace_slug = self._current_payload["workspace_slug"]
         github_org = self._current_payload.get("github_org", "hckmseduardo")
         github_repo = self._current_payload.get("github_repo_name", f"{workspace_slug}-app")
@@ -2677,19 +2678,69 @@ This board helps you explore and develop ideas from concept to implementation-re
             clone_url = github_repo_url.replace("https://github.com", f"https://{github_token}@github.com")
 
         repo_path = f"{sandbox_data_path}/repo"
-        os.makedirs(repo_path, exist_ok=True)
+        git_dir = f"{repo_path}/.git"
 
-        logger.info(f"[{full_slug}] Cloning repository with branch {git_branch}")
-        result = subprocess.run(
-            ["git", "clone", "--branch", git_branch, clone_url, "."],
-            cwd=repo_path,
-            capture_output=True,
-            text=True
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to clone repository: {result.stderr}")
+        # Check if repository already exists
+        if os.path.exists(git_dir):
+            logger.info(f"[{full_slug}] Repository already exists, updating to latest version")
 
-        logger.info(f"[{full_slug}] Repository cloned successfully to {repo_path}")
+            # Fetch all remote changes
+            result = subprocess.run(
+                ["git", "fetch", "--all"],
+                cwd=repo_path,
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                logger.warning(f"[{full_slug}] Failed to fetch: {result.stderr}")
+
+            # Checkout the correct branch
+            logger.info(f"[{full_slug}] Checking out branch {git_branch}")
+            result = subprocess.run(
+                ["git", "checkout", git_branch],
+                cwd=repo_path,
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                logger.warning(f"[{full_slug}] Failed to checkout {git_branch}: {result.stderr}")
+                # Try to create the branch from origin if checkout failed
+                result = subprocess.run(
+                    ["git", "checkout", "-b", git_branch, f"origin/{git_branch}"],
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(f"Failed to checkout branch {git_branch}: {result.stderr}")
+
+            # Pull latest changes
+            logger.info(f"[{full_slug}] Pulling latest changes for branch {git_branch}")
+            result = subprocess.run(
+                ["git", "pull", "origin", git_branch],
+                cwd=repo_path,
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                logger.warning(f"[{full_slug}] Failed to pull (may be ok if no remote changes): {result.stderr}")
+
+            logger.info(f"[{full_slug}] Repository updated successfully")
+        else:
+            # Clone fresh
+            os.makedirs(repo_path, exist_ok=True)
+
+            logger.info(f"[{full_slug}] Cloning repository with branch {git_branch}")
+            result = subprocess.run(
+                ["git", "clone", "--branch", git_branch, clone_url, "."],
+                cwd=repo_path,
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to clone repository: {result.stderr}")
+
+            logger.info(f"[{full_slug}] Repository cloned successfully to {repo_path}")
 
     async def _sandbox_deploy_containers(self, full_slug: str, sandbox_id: str):
         """Deploy sandbox containers using the sandbox-compose template"""
@@ -3111,16 +3162,56 @@ This board helps you explore and develop ideas from concept to implementation-re
     async def _agent_prepare_context(self, card_id: str, sandbox_id: str):
         """Prepare the sandbox context for agent execution."""
         payload = self._current_payload
-        git_branch = payload["git_branch"]
+        workspace_slug = payload["workspace_slug"]
+        sandbox_slug = payload.get("sandbox_slug")
+
+        if not sandbox_slug:
+            raise RuntimeError(f"sandbox_slug is required - card must be linked to a sandbox")
+
+        # Construct full_slug from workspace and sandbox slugs
+        full_slug = f"{workspace_slug}-{sandbox_slug}"
+        logger.info(f"[{card_id}] Using sandbox: {full_slug} (branch: sandbox/{full_slug})")
+
+        # Always compute git_branch from full_slug - don't trust payload
+        # Sandbox branch format is: sandbox/{full_slug}
+        git_branch = f"sandbox/{full_slug}"
+        # Update payload so other steps use the correct branch
+        payload["git_branch"] = git_branch
 
         # Repo path is in sandbox data folder (cloned during sandbox provisioning)
         # Format: /data/sandboxes/{full_slug}/repo/
-        sandbox_data_path = Path(HOST_PROJECT_PATH) / "data" / "sandboxes" / sandbox_id
+        sandbox_data_path = Path(HOST_PROJECT_PATH) / "data" / "sandboxes" / full_slug
         repo_path = sandbox_data_path / "repo"
 
-        # Repo should already exist from sandbox provisioning
+        # If repo doesn't exist, clone it now
         if not repo_path.exists() or not (repo_path / ".git").exists():
-            raise RuntimeError(f"Repository not found at {repo_path}. Sandbox may not have been provisioned correctly.")
+            logger.info(f"[{card_id}] Repository not found at {repo_path}, cloning now...")
+
+            # Get GitHub info from payload or lookup workspace
+            github_repo_url = payload.get("github_repo_url")
+            if not github_repo_url:
+                raise RuntimeError(f"Repository not found and github_repo_url not in payload")
+
+            github_token = os.environ.get("GITHUB_TOKEN")
+            clone_url = github_repo_url
+            if github_token and "github.com" in github_repo_url:
+                clone_url = github_repo_url.replace("https://github.com", f"https://{github_token}@github.com")
+
+            # Ensure directory exists
+            os.makedirs(str(repo_path), exist_ok=True)
+
+            # Clone with the sandbox branch
+            logger.info(f"[{card_id}] Cloning {github_repo_url} branch {git_branch}")
+            result = subprocess.run(
+                ["git", "clone", "--branch", git_branch, clone_url, "."],
+                cwd=str(repo_path),
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to clone repository: {result.stderr}")
+
+            logger.info(f"[{card_id}] Repository cloned successfully")
 
         # Use the repo path
         payload["target_project_path"] = str(repo_path)
@@ -3170,6 +3261,7 @@ This board helps you explore and develop ideas from concept to implementation-re
         agent_config = payload.get("agent_config", {})
         agent_name = agent_config.get("agent_name", "developer")
         target_project_path = payload["target_project_path"]
+        sandbox_slug = payload.get("sandbox_slug", "")
 
         # Get agent config values with defaults
         persona = agent_config.get("persona", "")
@@ -3177,11 +3269,14 @@ This board helps you explore and develop ideas from concept to implementation-re
         timeout = agent_config.get("timeout", 600)
 
         # Build the prompt for Claude Code using persona from agent config
+        # Include sandbox info so agents can link created cards to the same sandbox
         prompt = self._build_agent_prompt(
             card_title=card_title,
             card_description=card_description,
             column_name=column_name,
             persona=persona,
+            sandbox_id=sandbox_id,
+            sandbox_slug=sandbox_slug,
         )
 
         # Progress callback for streaming updates
@@ -3339,10 +3434,19 @@ This board helps you explore and develop ideas from concept to implementation-re
                     else:
                         logger.warning(f"Failed to update description: {desc_response.status_code}")
 
+                # Special handling for project_manager agent: create epics and cards
+                if agent_name == "project_manager" and result.success:
+                    await self._handle_project_manager_output(card_id, sandbox_id)
+
+                # Get board_id for card movements (needed by scrum_master and column moves)
+                board_id = payload.get("board_id")
+
+                # Special handling for scrum_master agent: move next card from project plan
+                if agent_name == "scrum_master" and result.success and board_id:
+                    await self._handle_scrum_master_output(card_id, kanban_api_url, board_id)
+
                 # If successful and column_success is set, move the card
                 if result.success and column_success:
-                    # First get the column ID by name
-                    board_id = payload.get("board_id")
                     if board_id:
                         board_resp = await client.get(
                             f"{kanban_api_url}/boards/{board_id}",
@@ -3363,7 +3467,6 @@ This board helps you explore and develop ideas from concept to implementation-re
 
                 # If failed and column_failure is set, move the card there
                 elif not result.success and column_failure:
-                    board_id = payload.get("board_id")
                     if board_id:
                         board_resp = await client.get(
                             f"{kanban_api_url}/boards/{board_id}",
@@ -3391,6 +3494,8 @@ This board helps you explore and develop ideas from concept to implementation-re
         card_description: str,
         column_name: str,
         persona: str = "",
+        sandbox_id: str = "",
+        sandbox_slug: str = "",
     ) -> str:
         """Build the prompt for Claude Code using persona from kanban-team.
 
@@ -3399,10 +3504,22 @@ This board helps you explore and develop ideas from concept to implementation-re
             card_description: The card description/requirements
             column_name: Current column name
             persona: Agent persona/instructions from kanban-team config
+            sandbox_id: The sandbox ID this card is linked to
+            sandbox_slug: The sandbox slug for reference
         """
         # Use persona from config, or a generic fallback
         if not persona:
             persona = "Process this card according to your role."
+
+        # Build context section with sandbox info
+        context_section = ""
+        if sandbox_id or sandbox_slug:
+            context_section = f"""
+## Card Context:
+- Sandbox ID: {sandbox_id}
+- Sandbox Slug: {sandbox_slug}
+IMPORTANT: When creating project plans or cards, use this sandbox_id to link them to the same sandbox.
+"""
 
         prompt = f"""# Task: {card_title}
 
@@ -3410,9 +3527,16 @@ This board helps you explore and develop ideas from concept to implementation-re
 
 ## Description:
 {card_description}
-
+{context_section}
 ## Agent Instructions:
 {persona}
+
+## Progress Tracking:
+You MUST track your progress in `docs/Backlog.json`:
+1. Read `docs/Backlog.json` at the start to understand current project state
+2. Update task status as you progress (todo → in_progress → done)
+3. Add new tasks discovered during work to the backlog
+4. Save changes to `docs/Backlog.json` after completing tasks
 
 Please complete this task. Update files as needed and explain what you did."""
 
@@ -3596,6 +3720,479 @@ Respond with ONLY a JSON object in this exact format (no markdown, no code block
 Be concise but thorough. Focus on actionable improvements."""
 
         return prompt
+
+    def _parse_project_plan_output(self, output: str) -> Optional[dict]:
+        """Parse Claude output to extract project plan JSON from project_manager agent."""
+        import re
+
+        logger.info(f"Parsing project plan output ({len(output)} chars)")
+        logger.info(f"Raw output preview: {output[:1000]}...")
+
+        if not output or not output.strip():
+            logger.warning("Empty output from project_manager agent")
+            return None
+
+        # Try to find JSON block in the output - look for outermost braces
+        first_brace = output.find('{')
+        last_brace = output.rfind('}')
+
+        if first_brace != -1 and last_brace > first_brace:
+            json_str = output[first_brace:last_brace + 1]
+            logger.info(f"Found JSON block from pos {first_brace} to {last_brace}")
+            try:
+                result = json.loads(json_str)
+                logger.info(f"Parsed JSON keys: {list(result.keys())}")
+                if "epics" in result:
+                    logger.info(f"Successfully parsed project plan with {len(result.get('epics', []))} epics")
+                    return result
+                else:
+                    logger.warning(f"JSON parsed but no 'epics' key found. Keys: {list(result.keys())}")
+                    # Return anyway if it has project_summary - might be a valid plan
+                    if "project_summary" in result:
+                        logger.info("Found project_summary, returning result anyway")
+                        return result
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse JSON block: {e}")
+                logger.warning(f"JSON string that failed: {json_str[:500]}...")
+
+        # Try parsing the whole output as JSON
+        try:
+            result = json.loads(output.strip())
+            logger.info(f"Parsed whole output as JSON. Keys: {list(result.keys())}")
+            if "epics" in result:
+                return result
+        except json.JSONDecodeError:
+            pass
+
+        # Try to find JSON in code blocks
+        code_block_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', output, re.DOTALL)
+        if code_block_match:
+            try:
+                result = json.loads(code_block_match.group(1))
+                logger.info(f"Parsed JSON from code block. Keys: {list(result.keys())}")
+                if "epics" in result:
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+        logger.warning("Could not parse project plan JSON from Claude output")
+        logger.warning(f"Full output was: {output[:2000]}")
+        return None
+
+    async def _handle_project_manager_output(self, card_id: str, sandbox_id: str):
+        """Handle project_manager agent output: create epics and cards on Feature Request board."""
+        logger.info(f"[{card_id}] _handle_project_manager_output called")
+
+        if not self._agent_result:
+            logger.warning(f"[{card_id}] No agent result available")
+            return
+
+        payload = self._current_payload
+        workspace_slug = payload["workspace_slug"]
+        board_id = payload.get("board_id")
+        kanban_api_url = f"http://{workspace_slug}-kanban-api-1:8000"
+        target_project_path = payload.get("target_project_path", "")
+
+        # Try to parse from agent output first
+        project_plan = None
+        if self._agent_result.output:
+            logger.info(f"[{card_id}] Agent output length: {len(self._agent_result.output)} chars")
+            project_plan = self._parse_project_plan_output(self._agent_result.output)
+
+        # If parsing failed, check for PROJECT_PLAN.json file in repo
+        if not project_plan and target_project_path:
+            plan_file_paths = [
+                Path(target_project_path) / "docs" / "PROJECT_PLAN.json",
+                Path(target_project_path) / "PROJECT_PLAN.json",
+            ]
+            for plan_file in plan_file_paths:
+                if plan_file.exists():
+                    logger.info(f"[{card_id}] Found project plan file: {plan_file}")
+                    try:
+                        with open(plan_file, 'r') as f:
+                            project_plan = json.load(f)
+                        logger.info(f"[{card_id}] Loaded project plan from file with {len(project_plan.get('epics', []))} epics")
+                        break
+                    except Exception as e:
+                        logger.warning(f"[{card_id}] Failed to read plan file: {e}")
+        if not project_plan or not project_plan.get("epics"):
+            logger.warning(f"[{card_id}] No valid project plan in output")
+            return
+
+        logger.info(f"[{card_id}] Processing project plan with {len(project_plan['epics'])} epics")
+
+        # ALWAYS use the sandbox_id from the original task (passed as parameter)
+        # Don't trust project plan's sandbox_id - agent might write wrong value (e.g., full_slug instead of UUID)
+        # The task's sandbox_id is guaranteed to be correct (comes from the source card via webhook)
+        original_sandbox_id = sandbox_id
+        plan_sandbox_id = project_plan.get("sandbox_id")
+        if plan_sandbox_id:
+            logger.info(f"[{card_id}] Project plan has sandbox_id: {plan_sandbox_id} (ignoring, using task's sandbox_id)")
+
+        # Validate sandbox_id looks like a UUID (contains dashes, ~36 chars)
+        if not sandbox_id or '-' not in sandbox_id or len(sandbox_id) < 30:
+            logger.error(f"[{card_id}] Invalid sandbox_id format: {sandbox_id} - expected UUID format")
+            return
+
+        logger.info(f"[{card_id}] Creating cards with sandbox_id: {sandbox_id} (original task sandbox_id)")
+        logger.info(f"[{card_id}] First card to move: {project_plan.get('first_card', 'NOT SPECIFIED')}")
+
+        created_epics = {}  # epic_name -> epic_id
+        total_cards_created = 0
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                headers = {"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")}
+
+                # 1. Find Feature Request board
+                boards_resp = await client.get(f"{kanban_api_url}/boards", headers=headers)
+                feature_board = None
+                if boards_resp.status_code == 200:
+                    for board in boards_resp.json():
+                        if "Feature Request" in board.get("name", ""):
+                            board_resp = await client.get(
+                                f"{kanban_api_url}/boards/{board['id']}", headers=headers
+                            )
+                            if board_resp.status_code == 200:
+                                feature_board = board_resp.json()
+                                logger.info(f"[{card_id}] Found Feature Request board: {feature_board['id']}")
+                                break
+
+                if not feature_board:
+                    logger.error(f"[{card_id}] Feature Request board not found in workspace")
+                    return
+
+                # Find first column (Feature Request column)
+                columns = sorted(feature_board.get("columns", []), key=lambda c: c.get("position", 0))
+                first_column_id = columns[0]["id"] if columns else None
+
+                if not first_column_id:
+                    logger.error(f"[{card_id}] No columns in Feature Request board")
+                    return
+
+                # 2. Create epics on Ideas Pipeline board (where the idea card is)
+                for epic_data in project_plan["epics"]:
+                    epic_resp = await client.post(
+                        f"{kanban_api_url}/epics",
+                        headers=headers,
+                        json={
+                            "board_id": board_id,
+                            "name": epic_data["name"],
+                            "description": epic_data.get("description", ""),
+                            "color": epic_data.get("color", "#6366f1"),
+                            "status": "open",
+                        }
+                    )
+                    if epic_resp.status_code in [200, 201]:
+                        epic = epic_resp.json()
+                        created_epics[epic_data["name"]] = epic["id"]
+                        logger.info(f"[{card_id}] Created epic: {epic['name']} ({epic['id']})")
+                    else:
+                        logger.warning(f"[{card_id}] Failed to create epic: {epic_resp.status_code}")
+
+                # 3. Create cards on Feature Request board
+                created_cards = {}  # title -> card_id mapping
+                for epic_data in project_plan["epics"]:
+                    epic_id = created_epics.get(epic_data["name"])
+
+                    for i, card_data in enumerate(epic_data.get("cards", [])):
+                        # Build card description with metadata
+                        description = card_data.get("description", "")
+                        description += f"\n\n---\n**Priority:** {card_data.get('priority', 'P2')}"
+                        description += f"\n**Complexity:** {card_data.get('complexity', 'M')}"
+                        if card_data.get("depends_on"):
+                            description += f"\n**Depends on:** {', '.join(card_data['depends_on'])}"
+                        description += f"\n**Epic:** {epic_data['name']}"
+
+                        card_resp = await client.post(
+                            f"{kanban_api_url}/cards",
+                            headers=headers,
+                            json={
+                                "column_id": first_column_id,
+                                "title": card_data["title"],
+                                "description": description,
+                                "position": i,
+                                "labels": card_data.get("labels", []),
+                                "priority": card_data.get("priority"),
+                                "sandbox_id": sandbox_id,
+                                "epic_id": epic_id,
+                            }
+                        )
+                        if card_resp.status_code in [200, 201]:
+                            total_cards_created += 1
+                            created_card = card_resp.json()
+                            created_cards[card_data["title"]] = created_card["id"]
+                            logger.info(f"[{card_id}] Created card: {card_data['title']} ({created_card['id']})")
+                        else:
+                            logger.warning(f"[{card_id}] Failed to create card: {card_resp.status_code}")
+
+                # 4. Update original idea card with project plan summary
+                summary = f"\n\n---\n\n## Project Plan Created\n\n"
+                summary += f"**Summary:** {project_plan.get('project_summary', '')}\n\n"
+                summary += f"### Epics ({len(created_epics)})\n"
+                for epic_name in created_epics:
+                    epic_data = next((e for e in project_plan["epics"] if e["name"] == epic_name), {})
+                    summary += f"- **{epic_name}** ({len(epic_data.get('cards', []))} cards)\n"
+
+                if project_plan.get("execution_notes"):
+                    summary += f"\n### Execution Notes\n{project_plan['execution_notes']}\n"
+
+                if project_plan.get("risks"):
+                    summary += f"\n### Risks\n"
+                    for risk in project_plan["risks"]:
+                        summary += f"- {risk}\n"
+
+                summary += f"\n**Total Cards Created:** {total_cards_created} on Feature Request board\n"
+
+                card_resp = await client.get(f"{kanban_api_url}/cards/{card_id}", headers=headers)
+                if card_resp.status_code == 200:
+                    current = card_resp.json().get("description", "") or ""
+                    await client.patch(
+                        f"{kanban_api_url}/cards/{card_id}",
+                        headers=headers,
+                        json={"description": current + summary}
+                    )
+
+                # 5. Add completion comment
+                await client.post(
+                    f"{kanban_api_url}/cards/{card_id}/comments",
+                    headers=headers,
+                    json={
+                        "text": f"Project plan created: {len(created_epics)} epics with {total_cards_created} cards on Feature Request board.",
+                        "author_name": "Agent: Project Manager"
+                    }
+                )
+
+                logger.info(f"[{card_id}] Project plan processing complete: {len(created_epics)} epics, {total_cards_created} cards")
+
+                # 6. Move first card to UI/UX Design column
+                first_card_title = project_plan.get("first_card")
+                if first_card_title and first_card_title in created_cards:
+                    first_card_id = created_cards[first_card_title]
+
+                    # Find UI/UX Design column
+                    ux_column_id = None
+                    for col in columns:
+                        if col.get("name") == "UI/UX Design":
+                            ux_column_id = col["id"]
+                            break
+
+                    if ux_column_id:
+                        move_resp = await client.post(
+                            f"{kanban_api_url}/cards/{first_card_id}/move",
+                            headers=headers,
+                            params={"column_id": ux_column_id, "position": 0}
+                        )
+                        if move_resp.status_code == 200:
+                            logger.info(f"[{card_id}] Moved first card '{first_card_title}' to UI/UX Design")
+
+                            # Add comment to the moved card
+                            await client.post(
+                                f"{kanban_api_url}/cards/{first_card_id}/comments",
+                                headers=headers,
+                                json={
+                                    "text": "Automatically moved to UI/UX Design as the first card to start development.",
+                                    "author_name": "Agent: Project Manager"
+                                }
+                            )
+                        else:
+                            logger.warning(f"[{card_id}] Failed to move first card: {move_resp.status_code}")
+                    else:
+                        logger.warning(f"[{card_id}] UI/UX Design column not found")
+                elif first_card_title:
+                    logger.warning(f"[{card_id}] First card '{first_card_title}' not found in created cards")
+
+        except Exception as e:
+            logger.error(f"[{card_id}] Error handling project manager output: {e}")
+
+    async def _handle_scrum_master_output(self, card_id: str, kanban_api_url: str, board_id: str):
+        """Handle scrum_master agent output: move next card to UI/UX Design column.
+
+        The scrum_master agent outputs a JSON block specifying which card to move:
+        {
+            "action": "MOVE_CARD",
+            "card_title": "Card title to find and move",
+            "target_column": "UI/UX Design",
+            "reason": "Explanation"
+        }
+        """
+        logger.info(f"[{card_id}] _handle_scrum_master_output called")
+
+        if not self._agent_result:
+            logger.warning(f"[{card_id}] No agent result available for scrum_master")
+            return
+
+        # Parse JSON from agent output
+        output = self._agent_result.output
+        action_data = self._parse_scrum_master_action(output)
+
+        if not action_data:
+            logger.warning(f"[{card_id}] Could not parse action from scrum_master output")
+            return
+
+        action = action_data.get("action")
+        logger.info(f"[{card_id}] Scrum master action: {action}")
+
+        if action == "PROJECT_COMPLETE":
+            logger.info(f"[{card_id}] Project complete: {action_data.get('message')}")
+            return
+
+        if action == "NO_PROJECT_PLAN":
+            logger.info(f"[{card_id}] No project plan found: {action_data.get('message')}")
+            return
+
+        if action != "MOVE_CARD":
+            logger.warning(f"[{card_id}] Unknown scrum_master action: {action}")
+            return
+
+        card_title = action_data.get("card_title")
+        target_column = action_data.get("target_column", "UI/UX Design")
+        reason = action_data.get("reason", "")
+
+        if not card_title:
+            logger.warning(f"[{card_id}] No card_title in MOVE_CARD action")
+            return
+
+        logger.info(f"[{card_id}] Moving card '{card_title}' to '{target_column}': {reason}")
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                headers = {"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")}
+
+                # Get board data to find columns and cards
+                board_resp = await client.get(
+                    f"{kanban_api_url}/boards/{board_id}",
+                    headers=headers
+                )
+
+                if board_resp.status_code != 200:
+                    logger.error(f"[{card_id}] Failed to get board: {board_resp.status_code}")
+                    return
+
+                board_data = board_resp.json()
+                columns = board_data.get("columns", [])
+
+                # Find the target column ID
+                target_column_id = None
+                for col in columns:
+                    if col.get("name") == target_column:
+                        target_column_id = col["id"]
+                        break
+
+                if not target_column_id:
+                    logger.error(f"[{card_id}] Target column '{target_column}' not found in board")
+                    return
+
+                # Search for the card by title across all columns
+                target_card_id = None
+                for col in columns:
+                    for c in col.get("cards", []):
+                        if c.get("title") == card_title:
+                            target_card_id = c["id"]
+                            logger.info(f"[{card_id}] Found card '{card_title}' with ID {target_card_id}")
+                            break
+                    if target_card_id:
+                        break
+
+                if not target_card_id:
+                    # Try searching via API
+                    logger.info(f"[{card_id}] Card not found in board data, trying API search...")
+                    search_resp = await client.get(
+                        f"{kanban_api_url}/cards",
+                        params={"board_id": board_id, "search": card_title},
+                        headers=headers
+                    )
+                    if search_resp.status_code == 200:
+                        cards = search_resp.json()
+                        for c in cards:
+                            if c.get("title") == card_title:
+                                target_card_id = c["id"]
+                                break
+
+                if not target_card_id:
+                    logger.warning(f"[{card_id}] Card '{card_title}' not found")
+                    return
+
+                # Move the card to the target column
+                move_resp = await client.post(
+                    f"{kanban_api_url}/cards/{target_card_id}/move",
+                    headers=headers,
+                    params={"column_id": target_column_id, "position": 0}
+                )
+
+                if move_resp.status_code == 200:
+                    logger.info(f"[{card_id}] Successfully moved card '{card_title}' to '{target_column}'")
+
+                    # Add a comment to the moved card explaining why
+                    await client.post(
+                        f"{kanban_api_url}/cards/{target_card_id}/comments",
+                        headers=headers,
+                        json={
+                            "text": f"Moved to {target_column} by Scrum Master.\n\nReason: {reason}",
+                            "author_name": "Agent: Scrum Master"
+                        }
+                    )
+                else:
+                    logger.error(f"[{card_id}] Failed to move card: {move_resp.status_code}")
+
+        except Exception as e:
+            logger.error(f"[{card_id}] Error in scrum_master handler: {e}")
+
+    def _parse_scrum_master_action(self, output: str) -> Optional[dict]:
+        """Parse the scrum_master agent output to extract the action JSON."""
+        import re
+
+        if not output:
+            return None
+
+        # Try to find JSON block in code block first
+        code_block_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', output, re.DOTALL)
+        if code_block_match:
+            try:
+                result = json.loads(code_block_match.group(1))
+                if "action" in result:
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+        # Try to find JSON with action key anywhere in output
+        action_patterns = [
+            r'\{\s*"action"\s*:\s*"MOVE_CARD"[^}]+\}',
+            r'\{\s*"action"\s*:\s*"PROJECT_COMPLETE"[^}]+\}',
+            r'\{\s*"action"\s*:\s*"NO_PROJECT_PLAN"[^}]+\}',
+        ]
+
+        for pattern in action_patterns:
+            match = re.search(pattern, output, re.DOTALL)
+            if match:
+                try:
+                    result = json.loads(match.group(0))
+                    return result
+                except json.JSONDecodeError:
+                    continue
+
+        # Try to find any JSON object with "action" key
+        first_brace = output.find('{')
+        while first_brace != -1:
+            # Find matching closing brace
+            depth = 0
+            for i in range(first_brace, len(output)):
+                if output[i] == '{':
+                    depth += 1
+                elif output[i] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            candidate = output[first_brace:i+1]
+                            result = json.loads(candidate)
+                            if "action" in result:
+                                return result
+                        except json.JSONDecodeError:
+                            pass
+                        break
+            first_brace = output.find('{', first_brace + 1)
+
+        return None
 
     def _parse_enhance_output(self, output: str) -> dict:
         """Parse the Claude Code output to extract enhancement data."""

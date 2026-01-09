@@ -1,0 +1,17 @@
+{
+  "project": "kanban",
+  "lastUpdated": "2026-01-09",
+  "tasks": [
+    {
+      "id": "1",
+      "title": "Example task",
+      "description": "This is an example task structure",
+      "status": "todo",
+      "priority": "medium",
+      "createdAt": "2026-01-09",
+      "updatedAt": "2026-01-09"
+    }
+  ],
+  "statusOptions": ["todo", "in_progress", "done"],
+  "priorityOptions": ["low", "medium", "high", "critical"]
+}

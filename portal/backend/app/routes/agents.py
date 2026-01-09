@@ -64,6 +64,7 @@ class CardEventPayload(BaseModel):
     previous_column: Optional[dict] = None
     board: Optional[dict] = None
     sandbox_id: Optional[str] = None  # Sandbox identifier for isolation
+    sandbox_slug: Optional[str] = None  # Sandbox slug from card's linked sandbox
     workspace_slug: Optional[str] = None
 
 
@@ -142,15 +143,33 @@ async def receive_card_event(
     board_id = payload.board.get("id") if payload.board else None
 
     # Get sandbox details for isolation
+    # sandbox_id from payload should be UUID, but might be full_slug if card was created incorrectly
     sandbox_id = payload.sandbox_id
+    sandbox_slug = payload.sandbox_slug  # May be None if kanban-team lookup failed
     git_branch = "main"
     target_project_path = f"/data/repos/{workspace_slug}"
+    sandbox_record = None  # Store for later use
 
     if sandbox_id:
-        sandbox = db_service.get_sandbox_by_full_slug(sandbox_id)
-        if sandbox:
-            git_branch = sandbox.get("git_branch", f"sandbox/{sandbox_id}")
-            target_project_path = f"/data/repos/{workspace_slug}/sandboxes/{sandbox_id}"
+        # First try to look up by UUID
+        sandbox_record = db_service.get_sandbox_by_id(sandbox_id)
+
+        # If not found and sandbox_id looks like a full_slug (contains workspace prefix),
+        # try to look up by full_slug - this handles cards created with wrong sandbox_id format
+        if not sandbox_record and '-' in sandbox_id:
+            logger.warning(f"sandbox_id '{sandbox_id}' not found by UUID, trying as full_slug")
+            sandbox_record = db_service.get_sandbox_by_full_slug(sandbox_id)
+
+        if sandbox_record:
+            # Use the actual UUID from the record, not the payload value
+            sandbox_id = sandbox_record.get("id", sandbox_id)
+            full_slug = sandbox_record.get("full_slug", sandbox_id)
+            git_branch = sandbox_record.get("git_branch", f"sandbox/{full_slug}")
+            target_project_path = f"/data/repos/{workspace_slug}/sandboxes/{full_slug}"
+            # Derive sandbox_slug from record if not in payload
+            if not sandbox_slug:
+                sandbox_slug = sandbox_record.get("slug")
+            logger.info(f"Resolved sandbox: id={sandbox_id}, slug={sandbox_slug}, full_slug={full_slug}")
 
     # Build kanban API URL
     if settings.port == 443:
@@ -173,6 +192,7 @@ async def receive_card_event(
             column_name=column_name,
             agent_config=agent_config,
             sandbox_id=sandbox_id or workspace_slug,
+            sandbox_slug=sandbox_slug,
             workspace_slug=workspace_slug,
             git_branch=git_branch,
             kanban_api_url=kanban_api_url,

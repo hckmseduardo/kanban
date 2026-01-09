@@ -182,7 +182,8 @@ EOF
     info "Renewal cron job scheduled"
 
     # Keep container running and monitor logs
-    exec tail -f /var/log/certbot/cron.log 2>/dev/null || tail -f /dev/null
+    touch /var/log/certbot/cron.log
+    exec tail -f /var/log/certbot/cron.log
 
 else
     error "Invalid CERT_MODE: $CERT_MODE (must be 'development' or 'production')"
