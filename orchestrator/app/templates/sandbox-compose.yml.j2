@@ -30,7 +30,10 @@ services:
 
   # FastAPI Backend (sandbox branch)
   {{ full_slug }}-api:
-    image: {{ workspace_slug }}-api:latest
+    build:
+      context: {{ data_path }}/repo/backend
+      dockerfile: Dockerfile
+    image: {{ full_slug }}-api:latest
     container_name: {{ full_slug }}-api
     restart: unless-stopped
     depends_on:
@@ -79,7 +82,10 @@ services:
 
   # React Frontend (sandbox branch)
   {{ full_slug }}-web:
-    image: {{ workspace_slug }}-web:latest
+    build:
+      context: {{ data_path }}/repo/frontend
+      dockerfile: Dockerfile
+    image: {{ full_slug }}-web:latest
     container_name: {{ full_slug }}-web
     restart: unless-stopped
     depends_on:

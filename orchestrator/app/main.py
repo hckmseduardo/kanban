@@ -326,6 +326,8 @@ class Orchestrator:
                 await self.provision_sandbox(task)
             elif task_type == "sandbox.delete":
                 await self.delete_sandbox(task)
+            elif task_type == "sandbox.restart":
+                await self.restart_sandbox(task)
             # Agent tasks (on-demand AI processing)
             elif task_type == "agent.process_card":
                 await self.process_agent_task(task)
@@ -2956,6 +2958,174 @@ This board helps you explore and develop ideas from concept to implementation-re
             await self.fail_task(task_id, str(e))
             raise
 
+    async def restart_sandbox(self, task: dict):
+        """Restart a sandbox environment by pulling latest code and rebuilding containers"""
+        task_id = task["task_id"]
+        payload = task["payload"]
+        sandbox_id = payload["sandbox_id"]
+        full_slug = payload["full_slug"]
+        workspace_slug = payload.get("workspace_slug", full_slug.rsplit("-", 1)[0])
+
+        # Store payload for access by step functions
+        self._current_payload = payload
+
+        logger.info(f"Restarting sandbox: {full_slug}")
+
+        steps = [
+            ("Pulling latest code", self._sandbox_restart_pull_code),
+            ("Stopping containers", self._sandbox_stop_containers),
+            ("Rebuilding containers", self._sandbox_restart_rebuild),
+            ("Running health check", self._sandbox_restart_health_check),
+        ]
+
+        try:
+            for i, (step_name, step_func) in enumerate(steps, 1):
+                await self.update_progress(task_id, i, len(steps), step_name)
+                await step_func(full_slug, sandbox_id)
+                logger.info(f"[{full_slug}] {step_name} - completed")
+
+            await self.redis.publish("sandbox:status", json.dumps({
+                "sandbox_id": sandbox_id,
+                "full_slug": full_slug,
+                "status": "restarted"
+            }))
+
+            await self.complete_task(task_id, {
+                "action": "restart_sandbox",
+                "sandbox_id": sandbox_id,
+                "full_slug": full_slug,
+                "restarted": True
+            })
+
+            logger.info(f"Sandbox {full_slug} restarted successfully")
+
+        except Exception as e:
+            logger.error(f"Sandbox restart failed: {e}")
+            await self.fail_task(task_id, str(e))
+            raise
+
+    async def _sandbox_restart_pull_code(self, full_slug: str, sandbox_id: str):
+        """Pull latest code from the sandbox branch"""
+        workspace_slug = self._current_payload.get("workspace_slug", full_slug.rsplit("-", 1)[0])
+        repo_path = f"{HOST_PROJECT_PATH}/data/sandboxes/{full_slug}/repo"
+        git_branch = f"sandbox/{full_slug}"
+
+        logger.info(f"[{full_slug}] Pulling latest from {git_branch}")
+
+        # Check if repo directory exists
+        if not os.path.exists(repo_path):
+            logger.warning(f"[{full_slug}] Repo directory not found: {repo_path}")
+            return
+
+        try:
+            # Fetch and checkout the sandbox branch
+            result = subprocess.run(
+                ["git", "fetch", "origin"],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if result.returncode != 0:
+                logger.warning(f"[{full_slug}] Git fetch failed: {result.stderr}")
+
+            # Checkout the sandbox branch
+            result = subprocess.run(
+                ["git", "checkout", git_branch],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if result.returncode != 0:
+                logger.warning(f"[{full_slug}] Git checkout failed: {result.stderr}")
+
+            # Pull latest
+            result = subprocess.run(
+                ["git", "pull", "origin", git_branch],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if result.returncode != 0:
+                logger.warning(f"[{full_slug}] Git pull failed: {result.stderr}")
+            else:
+                logger.info(f"[{full_slug}] Code updated: {result.stdout.strip()}")
+
+        except Exception as e:
+            logger.error(f"[{full_slug}] Failed to pull code: {e}")
+            # Don't raise - continue with restart even if pull fails
+
+    async def _sandbox_restart_rebuild(self, full_slug: str, sandbox_id: str):
+        """Rebuild and start sandbox containers"""
+        if not self.docker_available:
+            raise RuntimeError("Docker CLI not available")
+
+        compose_file = f"{HOST_PROJECT_PATH}/data/sandboxes/{full_slug}/docker-compose.app.yml"
+        project_name = f"{full_slug}-app"
+
+        if not os.path.exists(compose_file):
+            raise RuntimeError(f"Compose file not found: {compose_file}")
+
+        logger.info(f"[{full_slug}] Rebuilding containers")
+
+        # Remove old containers and images
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "down", "--rmi", "local", "--remove-orphans"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+
+        # Build and start
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_file, "-p", project_name, "up", "-d", "--build"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+
+        if result.returncode != 0:
+            logger.error(f"[{full_slug}] Docker compose up failed: {result.stderr}")
+            raise RuntimeError(f"Failed to rebuild containers: {result.stderr}")
+
+        logger.info(f"[{full_slug}] Containers rebuilt successfully")
+
+    async def _sandbox_restart_health_check(self, full_slug: str, sandbox_id: str):
+        """Health check after sandbox restart"""
+        if not self.docker_available:
+            logger.warning("Docker not available, skipping health check")
+            return
+
+        logger.info(f"[{full_slug}] Running health check")
+
+        # Check key containers
+        containers_to_check = [
+            f"{full_slug}-api",
+            f"{full_slug}-web",
+        ]
+
+        max_retries = 10
+        for i in range(max_retries):
+            all_running = True
+            for container in containers_to_check:
+                result = run_docker_cmd([
+                    "inspect", "-f", "{{.State.Status}}", container
+                ], check=False)
+
+                if result.returncode != 0 or result.stdout.strip() != "running":
+                    all_running = False
+                    break
+
+            if all_running:
+                logger.info(f"[{full_slug}] All containers healthy")
+                return
+
+            await asyncio.sleep(2)
+
+        logger.warning(f"[{full_slug}] Some containers may not be fully healthy")
+
     async def _sandbox_stop_containers(self, full_slug: str, sandbox_id: str):
         """Stop sandbox containers"""
         if not self.docker_available:
@@ -3262,11 +3432,18 @@ This board helps you explore and develop ideas from concept to implementation-re
         agent_name = agent_config.get("agent_name", "developer")
         target_project_path = payload["target_project_path"]
         sandbox_slug = payload.get("sandbox_slug", "")
+        workspace_slug = payload["workspace_slug"]
+        board_id = payload.get("board_id")
 
         # Get agent config values with defaults
         persona = agent_config.get("persona", "")
         tool_profile = agent_config.get("tool_profile", "developer")
         timeout = agent_config.get("timeout", 600)
+
+        # For scrum_master agent, fetch the current board state so it can see all cards
+        board_state = None
+        if agent_name == "scrum_master" and board_id:
+            board_state = await self._fetch_board_state_for_agent(workspace_slug, board_id)
 
         # Build the prompt for Claude Code using persona from agent config
         # Include sandbox info so agents can link created cards to the same sandbox
@@ -3277,6 +3454,7 @@ This board helps you explore and develop ideas from concept to implementation-re
             persona=persona,
             sandbox_id=sandbox_id,
             sandbox_slug=sandbox_slug,
+            board_state=board_state,
         )
 
         # Progress callback for streaming updates
@@ -3306,41 +3484,172 @@ This board helps you explore and develop ideas from concept to implementation-re
         target_project_path = payload["target_project_path"]
         git_branch = payload["git_branch"]
 
-        # If files were modified, commit them
-        if result.success and result.files_modified:
-            target_path = Path(target_project_path)
+        # Always check for uncommitted changes (agents may not report files_modified)
+        target_path = Path(target_project_path)
+        status_lines = []
+        status_ok = True
+        try:
+            status_result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=str(target_path),
+                capture_output=True,
+                text=True
+            )
+            if status_result.returncode != 0:
+                raise RuntimeError(status_result.stderr.strip() or "git status failed")
+            status_lines = [line for line in status_result.stdout.splitlines() if line.strip()]
+        except Exception as e:
+            status_error = f"git status failed: {e}"
+            logger.warning(f"[{card_id}] Failed to check git status: {e}")
+            result.git_dirty = True
+            result.commit_error = status_error
+            if result.error:
+                result.error = f"{result.error}\nCommit error: {status_error}"
+            else:
+                result.error = f"Commit error: {status_error}"
+            result.success = False
+            status_ok = False
+
+        commit_hash = None
+        commit_error = result.commit_error
+        push_error = None
+        push_attempted = False
+        push_success = False
+
+        if status_lines:
+            result.git_dirty = True
+            changed_files = []
+            for line in status_lines:
+                path_part = line[3:] if len(line) > 3 else ""
+                if " -> " in path_part:
+                    path_part = path_part.split(" -> ")[-1]
+                if path_part:
+                    changed_files.append(path_part)
+
+            if not result.files_modified:
+                result.files_modified = changed_files
+            else:
+                for path in changed_files:
+                    if path not in result.files_modified:
+                        result.files_modified.append(path)
+
+            agent_name = payload.get("agent_config", {}).get("agent_name", "agent")
+            commit_msg = f"Agent: {agent_name} processed card {card_id[:8]}"
+
             try:
-                # Stage changes
-                subprocess.run(
+                add_result = subprocess.run(
                     ["git", "add", "-A"],
                     cwd=str(target_path),
-                    capture_output=True
+                    capture_output=True,
+                    text=True
                 )
+                if add_result.returncode != 0:
+                    raise RuntimeError(add_result.stderr.strip() or "git add failed")
 
-                # Commit
-                agent_name = payload.get("agent_config", {}).get("agent_name", "agent")
-                commit_msg = f"Agent: {agent_name} processed card {card_id[:8]}"
-                subprocess.run(
+                commit_result = subprocess.run(
                     ["git", "commit", "-m", commit_msg],
                     cwd=str(target_path),
-                    capture_output=True
+                    capture_output=True,
+                    text=True
                 )
+                if commit_result.returncode != 0:
+                    error_text = commit_result.stderr.strip() or commit_result.stdout.strip()
+                    raise RuntimeError(error_text or "git commit failed")
 
-                logger.info(f"Committed changes: {len(result.files_modified)} files")
+                hash_result = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=str(target_path),
+                    capture_output=True,
+                    text=True
+                )
+                if hash_result.returncode == 0:
+                    commit_hash = hash_result.stdout.strip()
 
-                # Push to remote
-                github_token = os.environ.get("GITHUB_TOKEN")
-                if github_token:
-                    # Set up credentials for push
-                    subprocess.run(
-                        ["git", "push", "origin", git_branch],
-                        cwd=str(target_path),
-                        capture_output=True,
-                        env={**os.environ, "GIT_ASKPASS": "echo", "GIT_TERMINAL_PROMPT": "0"}
-                    )
-                    logger.info(f"Pushed changes to {git_branch}")
+                logger.info(f"[{card_id}] Committed changes ({len(result.files_modified)} files)")
+
             except Exception as e:
-                logger.warning(f"Could not commit/push changes: {e}")
+                commit_error = str(e)
+
+            # Verify working tree is clean after commit
+            try:
+                final_status = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=str(target_path),
+                    capture_output=True,
+                    text=True
+                )
+                if final_status.returncode == 0 and final_status.stdout.strip():
+                    result.git_dirty = True
+                    if not commit_error:
+                        commit_error = "Working tree not clean after commit"
+                else:
+                    result.git_dirty = False
+            except Exception as e:
+                logger.warning(f"[{card_id}] Failed to verify git status: {e}")
+                if not commit_error:
+                    commit_error = f"git status failed after commit: {e}"
+        elif status_ok:
+            result.git_dirty = False
+
+        # Push if there are unpushed commits and no commit errors
+        ahead_count = 0
+        push_needed = False
+        try:
+            ahead_result = subprocess.run(
+                ["git", "rev-list", "--count", f"origin/{git_branch}..{git_branch}"],
+                cwd=str(target_path),
+                capture_output=True,
+                text=True
+            )
+            if ahead_result.returncode == 0:
+                ahead_count = int(ahead_result.stdout.strip() or "0")
+                push_needed = ahead_count > 0
+            else:
+                push_needed = True
+        except Exception:
+            push_needed = commit_hash is not None
+
+        if commit_hash:
+            push_needed = True
+
+        github_token = os.environ.get("GITHUB_TOKEN")
+        if github_token and not commit_error and push_needed:
+            push_attempted = True
+            try:
+                push_result = subprocess.run(
+                    ["git", "push", "origin", git_branch],
+                    cwd=str(target_path),
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "GIT_ASKPASS": "echo", "GIT_TERMINAL_PROMPT": "0"}
+                )
+                if push_result.returncode == 0:
+                    push_success = True
+                    logger.info(f"[{card_id}] Pushed changes to {git_branch}")
+                else:
+                    error_text = push_result.stderr.strip() or push_result.stdout.strip()
+                    push_error = f"git push failed: {error_text}"
+            except Exception as e:
+                push_error = f"git push failed: {e}"
+
+        result.commit_hash = commit_hash
+        result.push_attempted = push_attempted
+        result.push_success = push_success
+        result.commit_error = commit_error
+        result.push_error = push_error
+        result.push_needed = push_needed
+        result.ahead_count = ahead_count
+
+        if commit_error:
+            logger.warning(f"[{card_id}] Commit issue: {commit_error}")
+            result.commit_error = commit_error
+            if result.error:
+                result.error = f"{result.error}\nCommit error: {commit_error}"
+            else:
+                result.error = f"Commit error: {commit_error}"
+            result.success = False
+        elif push_error:
+            logger.warning(f"[{card_id}] Push issue: {push_error}")
 
     async def _agent_update_card(self, card_id: str, sandbox_id: str):
         """Update the kanban card with agent results."""
@@ -3366,10 +3675,28 @@ This board helps you explore and develop ideas from concept to implementation-re
             comment += f"**Status:** Completed\n"
             comment += f"**Duration:** {result.duration_seconds:.1f}s\n"
             comment += f"**Branch:** `{git_branch}`\n"
+            if result.commit_hash:
+                comment += f"**Commit:** `{result.commit_hash}`\n"
+            if result.push_attempted:
+                if result.push_success:
+                    comment += f"**Push:** Success\n"
+                else:
+                    push_error = result.push_error or "Unknown error"
+                    comment += f"**Push:** Failed ({push_error})\n"
+            elif result.push_needed:
+                if result.ahead_count > 0:
+                    comment += f"**Push:** Pending ({result.ahead_count} commits ahead, no token)\n"
+                else:
+                    comment += f"**Push:** Pending (no token)\n"
+            elif result.commit_hash:
+                comment += f"**Push:** Skipped (no token)\n"
+            comment += f"**Git Status:** {'Dirty' if result.git_dirty else 'Clean'}\n"
             if result.files_modified:
                 comment += f"\n**Files Modified:**\n"
                 for f in result.files_modified[:10]:
                     comment += f"- `{f}`\n"
+            else:
+                comment += f"\n**Files Modified:** None detected\n"
             if result.output:
                 # Include summary of what was done
                 output_summary = result.output[:1000] if len(result.output) > 1000 else result.output
@@ -3378,6 +3705,22 @@ This board helps you explore and develop ideas from concept to implementation-re
             comment = f"## Agent: {display_name}\n\n"
             comment += f"**Status:** Failed\n"
             comment += f"**Error:** {result.error}\n"
+            if result.commit_hash:
+                comment += f"\n**Commit:** `{result.commit_hash}`\n"
+            if result.push_attempted:
+                if result.push_success:
+                    comment += f"**Push:** Success\n"
+                else:
+                    push_error = result.push_error or "Unknown error"
+                    comment += f"**Push:** Failed ({push_error})\n"
+            elif result.push_needed:
+                if result.ahead_count > 0:
+                    comment += f"**Push:** Pending ({result.ahead_count} commits ahead, no token)\n"
+                else:
+                    comment += f"**Push:** Pending (no token)\n"
+            elif result.commit_hash:
+                comment += f"**Push:** Skipped (no token)\n"
+            comment += f"**Git Status:** {'Dirty' if result.git_dirty else 'Clean'}\n"
             comment += f"\nPlease review and retry."
 
         logger.info(f"Card update for {card_id}: {comment[:200]}...")
@@ -3488,6 +3831,54 @@ This board helps you explore and develop ideas from concept to implementation-re
         except Exception as e:
             logger.error(f"Error updating card via API: {e}")
 
+    async def _fetch_board_state_for_agent(self, workspace_slug: str, board_id: str) -> str:
+        """Fetch current board state for agents like scrum_master that need to see all cards.
+
+        Returns a formatted string showing all columns and their cards.
+        """
+        kanban_api_url = f"http://{workspace_slug}-kanban-api-1:8000"
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                headers = {"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")}
+                board_resp = await client.get(
+                    f"{kanban_api_url}/boards/{board_id}",
+                    headers=headers
+                )
+
+                if board_resp.status_code != 200:
+                    logger.warning(f"Failed to fetch board state: {board_resp.status_code}")
+                    return None
+
+                board_data = board_resp.json()
+                columns = board_data.get("columns", [])
+
+                # Build a readable summary of all cards and their columns
+                lines = ["Below is the current state of all cards on the kanban board:\n"]
+
+                for col in columns:
+                    col_name = col.get("name", "Unknown")
+                    cards = col.get("cards", [])
+                    lines.append(f"### Column: {col_name}")
+
+                    if not cards:
+                        lines.append("  (empty)\n")
+                    else:
+                        for card in cards:
+                            card_title = card.get("title", "Untitled")
+                            card_id = card.get("id", "")[:8]
+                            lines.append(f"  - [{card_id}] {card_title}")
+                        lines.append("")
+
+                lines.append("\nUse this information to identify which cards are already Done,")
+                lines.append("which are in progress, and which are still waiting in Backlog.")
+
+                return "\n".join(lines)
+
+        except Exception as e:
+            logger.error(f"Error fetching board state: {e}")
+            return None
+
     def _build_agent_prompt(
         self,
         card_title: str,
@@ -3496,6 +3887,7 @@ This board helps you explore and develop ideas from concept to implementation-re
         persona: str = "",
         sandbox_id: str = "",
         sandbox_slug: str = "",
+        board_state: str = None,
     ) -> str:
         """Build the prompt for Claude Code using persona from kanban-team.
 
@@ -3506,6 +3898,7 @@ This board helps you explore and develop ideas from concept to implementation-re
             persona: Agent persona/instructions from kanban-team config
             sandbox_id: The sandbox ID this card is linked to
             sandbox_slug: The sandbox slug for reference
+            board_state: Current kanban board state (for scrum_master)
         """
         # Use persona from config, or a generic fallback
         if not persona:
@@ -3521,13 +3914,21 @@ This board helps you explore and develop ideas from concept to implementation-re
 IMPORTANT: When creating project plans or cards, use this sandbox_id to link them to the same sandbox.
 """
 
+        # Add board state for scrum_master (so it can see all cards and their columns)
+        board_state_section = ""
+        if board_state:
+            board_state_section = f"""
+## Current Kanban Board State:
+{board_state}
+"""
+
         prompt = f"""# Task: {card_title}
 
 ## Column: {column_name}
 
 ## Description:
 {card_description}
-{context_section}
+{context_section}{board_state_section}
 ## Agent Instructions:
 {persona}
 
@@ -4041,6 +4442,11 @@ Be concise but thorough. Focus on actionable improvements."""
             logger.info(f"[{card_id}] No project plan found: {action_data.get('message')}")
             return
 
+        if action == "CARDS_IN_PROGRESS":
+            in_progress = action_data.get("in_progress_cards", [])
+            logger.info(f"[{card_id}] Cards in progress, waiting for completion: {in_progress}")
+            return
+
         if action != "MOVE_CARD":
             logger.warning(f"[{card_id}] Unknown scrum_master action: {action}")
             return
@@ -4156,10 +4562,12 @@ Be concise but thorough. Focus on actionable improvements."""
                 pass
 
         # Try to find JSON with action key anywhere in output
+        # Note: CARDS_IN_PROGRESS has nested array, so it uses the fallback JSON parser below
         action_patterns = [
             r'\{\s*"action"\s*:\s*"MOVE_CARD"[^}]+\}',
             r'\{\s*"action"\s*:\s*"PROJECT_COMPLETE"[^}]+\}',
             r'\{\s*"action"\s*:\s*"NO_PROJECT_PLAN"[^}]+\}',
+            r'\{\s*"action"\s*:\s*"CARDS_IN_PROGRESS"[^}]+\}',
         ]
 
         for pattern in action_patterns:

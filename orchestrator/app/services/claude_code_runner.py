@@ -29,6 +29,14 @@ class AgentResult:
     error: Optional[str] = None
     files_modified: list = None
     commits: list = None
+    git_dirty: bool = False
+    commit_hash: Optional[str] = None
+    push_attempted: bool = False
+    push_success: bool = False
+    commit_error: Optional[str] = None
+    push_error: Optional[str] = None
+    push_needed: bool = False
+    ahead_count: int = 0
     duration_seconds: float = 0
 
     def __post_init__(self):
