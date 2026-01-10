@@ -124,6 +124,36 @@ class ClaudeCodeRunner:
         """Legacy: Get timeout in seconds for an agent type."""
         return self.AGENT_TIMEOUTS.get(agent_type, 600)
 
+    async def run_ssh_command(self, remote_cmd: str, timeout: int = 60) -> tuple[int, str, str]:
+        """Run a shell command on the host via SSH."""
+        if not self.ssh_user:
+            return 1, "", "SSH_USER environment variable not set."
+
+        ssh_cmd = self._build_ssh_command(remote_cmd)
+        logger.debug(f"SSH command: {' '.join(ssh_cmd[:5])}...")
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *ssh_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                return 1, "", f"SSH command timed out after {timeout}s"
+
+            stdout_text = stdout.decode("utf-8", errors="replace")
+            stderr_text = stderr.decode("utf-8", errors="replace")
+            return proc.returncode, stdout_text, stderr_text
+        except Exception as e:
+            return 1, "", f"SSH command failed: {e}"
+
     async def run(
         self,
         prompt: str,

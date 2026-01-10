@@ -3598,23 +3598,15 @@ This board helps you explore and develop ideas from concept to implementation-re
         target_project_path = payload["target_project_path"]
         git_branch = payload["git_branch"]
 
-        # Always check for uncommitted changes (agents may not report files_modified)
-        target_path = Path(target_project_path)
+        # Always check for uncommitted changes on the host via SSH
+        repo_path = shlex.quote(str(target_project_path))
         status_lines = []
         status_ok = True
-        try:
-            status_result = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=str(target_path),
-                capture_output=True,
-                text=True
-            )
-            if status_result.returncode != 0:
-                raise RuntimeError(status_result.stderr.strip() or "git status failed")
-            status_lines = [line for line in status_result.stdout.splitlines() if line.strip()]
-        except Exception as e:
-            status_error = f"git status failed: {e}"
-            logger.warning(f"[{card_id}] Failed to check git status: {e}")
+        status_cmd = f"cd {repo_path} && git status --porcelain"
+        status_code, status_out, status_err = await claude_runner.run_ssh_command(status_cmd, timeout=30)
+        if status_code != 0:
+            status_error = status_err.strip() or "git status failed"
+            logger.warning(f"[{card_id}] Failed to check git status: {status_error}")
             result.git_dirty = True
             result.commit_error = status_error
             if result.error:
@@ -3623,12 +3615,16 @@ This board helps you explore and develop ideas from concept to implementation-re
                 result.error = f"Commit error: {status_error}"
             result.success = False
             status_ok = False
+        else:
+            status_lines = [line for line in status_out.splitlines() if line.strip()]
 
         commit_hash = None
         commit_error = result.commit_error
         push_error = None
         push_attempted = False
         push_success = False
+        ahead_count = 0
+        push_needed = False
 
         if status_lines:
             result.git_dirty = True
@@ -3647,104 +3643,67 @@ This board helps you explore and develop ideas from concept to implementation-re
                     if path not in result.files_modified:
                         result.files_modified.append(path)
 
-            agent_name = payload.get("agent_config", {}).get("agent_name", "agent")
-            commit_msg = f"Agent: {agent_name} processed card {card_id[:8]}"
+            commit_message = self._extract_commit_message(result.output)
+            if commit_message:
+                commit_message = " ".join(commit_message.split())
+            else:
+                commit_error = "Missing COMMIT_MESSAGE in agent output"
 
-            try:
-                add_result = subprocess.run(
-                    ["git", "add", "-A"],
-                    cwd=str(target_path),
-                    capture_output=True,
-                    text=True
-                )
-                if add_result.returncode != 0:
-                    raise RuntimeError(add_result.stderr.strip() or "git add failed")
-
-                commit_result = subprocess.run(
-                    ["git", "commit", "-m", commit_msg],
-                    cwd=str(target_path),
-                    capture_output=True,
-                    text=True
-                )
-                if commit_result.returncode != 0:
-                    error_text = commit_result.stderr.strip() or commit_result.stdout.strip()
-                    raise RuntimeError(error_text or "git commit failed")
-
-                hash_result = subprocess.run(
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=str(target_path),
-                    capture_output=True,
-                    text=True
-                )
-                if hash_result.returncode == 0:
-                    commit_hash = hash_result.stdout.strip()
-
-                logger.info(f"[{card_id}] Committed changes ({len(result.files_modified)} files)")
-
-            except Exception as e:
-                commit_error = str(e)
-
-            # Verify working tree is clean after commit
-            try:
-                final_status = subprocess.run(
-                    ["git", "status", "--porcelain"],
-                    cwd=str(target_path),
-                    capture_output=True,
-                    text=True
-                )
-                if final_status.returncode == 0 and final_status.stdout.strip():
-                    result.git_dirty = True
-                    if not commit_error:
-                        commit_error = "Working tree not clean after commit"
+            if commit_message and not commit_error:
+                add_cmd = f"cd {repo_path} && git add -A"
+                add_code, add_out, add_err = await claude_runner.run_ssh_command(add_cmd, timeout=30)
+                if add_code != 0:
+                    commit_error = add_err.strip() or add_out.strip() or "git add failed"
                 else:
-                    result.git_dirty = False
-            except Exception as e:
-                logger.warning(f"[{card_id}] Failed to verify git status: {e}")
+                    commit_cmd = f"cd {repo_path} && git commit -m {shlex.quote(commit_message)}"
+                    commit_code, commit_out, commit_err = await claude_runner.run_ssh_command(commit_cmd, timeout=30)
+                    if commit_code != 0:
+                        commit_error = commit_err.strip() or commit_out.strip() or "git commit failed"
+                    else:
+                        hash_cmd = f"cd {repo_path} && git rev-parse HEAD"
+                        hash_code, hash_out, _ = await claude_runner.run_ssh_command(hash_cmd, timeout=15)
+                        if hash_code == 0:
+                            commit_hash = hash_out.strip()
+                        logger.info(f"[{card_id}] Committed changes ({len(result.files_modified)} files)")
+
+            # Verify working tree is clean after commit attempt
+            final_cmd = f"cd {repo_path} && git status --porcelain"
+            final_code, final_out, final_err = await claude_runner.run_ssh_command(final_cmd, timeout=30)
+            if final_code == 0 and final_out.strip():
+                result.git_dirty = True
                 if not commit_error:
-                    commit_error = f"git status failed after commit: {e}"
+                    commit_error = "Working tree not clean after commit"
+            elif final_code == 0:
+                result.git_dirty = False
+            else:
+                logger.warning(f"[{card_id}] Failed to verify git status: {final_err.strip() or final_out.strip()}")
+                if not commit_error:
+                    commit_error = f"git status failed after commit: {final_err.strip() or final_out.strip()}"
         elif status_ok:
             result.git_dirty = False
 
         # Push if there are unpushed commits and no commit errors
-        ahead_count = 0
-        push_needed = False
-        try:
-            ahead_result = subprocess.run(
-                ["git", "rev-list", "--count", f"origin/{git_branch}..{git_branch}"],
-                cwd=str(target_path),
-                capture_output=True,
-                text=True
-            )
-            if ahead_result.returncode == 0:
-                ahead_count = int(ahead_result.stdout.strip() or "0")
-                push_needed = ahead_count > 0
-            else:
-                push_needed = True
-        except Exception:
-            push_needed = commit_hash is not None
+        ahead_ref = f"origin/{git_branch}..{git_branch}"
+        ahead_cmd = f"cd {repo_path} && git rev-list --count {shlex.quote(ahead_ref)}"
+        ahead_code, ahead_out, _ = await claude_runner.run_ssh_command(ahead_cmd, timeout=30)
+        if ahead_code == 0:
+            ahead_count = int(ahead_out.strip() or "0")
+            push_needed = ahead_count > 0
+        elif commit_hash:
+            push_needed = True
 
         if commit_hash:
             push_needed = True
 
-        github_token = os.environ.get("GITHUB_TOKEN")
-        if github_token and not commit_error and push_needed:
+        if not commit_error and push_needed:
             push_attempted = True
-            try:
-                push_result = subprocess.run(
-                    ["git", "push", "origin", git_branch],
-                    cwd=str(target_path),
-                    capture_output=True,
-                    text=True,
-                    env={**os.environ, "GIT_ASKPASS": "echo", "GIT_TERMINAL_PROMPT": "0"}
-                )
-                if push_result.returncode == 0:
-                    push_success = True
-                    logger.info(f"[{card_id}] Pushed changes to {git_branch}")
-                else:
-                    error_text = push_result.stderr.strip() or push_result.stdout.strip()
-                    push_error = f"git push failed: {error_text}"
-            except Exception as e:
-                push_error = f"git push failed: {e}"
+            push_cmd = f"cd {repo_path} && git push origin {shlex.quote(git_branch)}"
+            push_code, push_out, push_err = await claude_runner.run_ssh_command(push_cmd, timeout=60)
+            if push_code == 0:
+                push_success = True
+                logger.info(f"[{card_id}] Pushed changes to {git_branch}")
+            else:
+                push_error = f"git push failed: {push_err.strip() or push_out.strip()}"
 
         result.commit_hash = commit_hash
         result.push_attempted = push_attempted
@@ -3764,6 +3723,11 @@ This board helps you explore and develop ideas from concept to implementation-re
             result.success = False
         elif push_error:
             logger.warning(f"[{card_id}] Push issue: {push_error}")
+            if result.error:
+                result.error = f"{result.error}\nPush error: {push_error}"
+            else:
+                result.error = f"Push error: {push_error}"
+            result.success = False
 
     async def _agent_update_card(self, card_id: str, sandbox_id: str):
         """Update the kanban card with agent results."""
@@ -3776,6 +3740,7 @@ This board helps you explore and develop ideas from concept to implementation-re
         # Use internal Docker network URL for service-to-service calls
         kanban_api_url = f"http://{workspace_slug}-kanban-api-1:8000"
         git_branch = payload["git_branch"]
+        session_id = payload.get("claude_session_id")
 
         # Build comment content
         agent_config = payload.get("agent_config", {})
@@ -4055,6 +4020,11 @@ IMPORTANT: When creating project plans or cards, use this sandbox_id to link the
 {context_section}{board_state_section}
 ## Agent Instructions:
 {persona}
+
+## Commit Instructions:
+- Do NOT run git commit/push commands.
+- If you modified files, include a single line at the end of your response:
+  `COMMIT_MESSAGE: <type>: <short description>`
 
 ## Progress Tracking:
 You MUST track your progress in `docs/Backlog.json`:
@@ -4723,6 +4693,35 @@ Be concise but thorough. Focus on actionable improvements."""
                             pass
                         break
             first_brace = output.find('{', first_brace + 1)
+
+        return None
+
+    def _extract_commit_message(self, output: str) -> Optional[str]:
+        """Extract COMMIT_MESSAGE from agent output."""
+        import re
+
+        if not output:
+            return None
+
+        line_match = re.search(r'^\s*COMMIT_MESSAGE\s*:\s*(.+)$', output, re.MULTILINE)
+        if line_match:
+            return line_match.group(1).strip().strip('"')
+
+        code_block_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', output, re.DOTALL)
+        if code_block_match:
+            try:
+                result = json.loads(code_block_match.group(1))
+                if isinstance(result, dict) and result.get("commit_message"):
+                    return str(result["commit_message"]).strip()
+            except json.JSONDecodeError:
+                pass
+
+        try:
+            result = json.loads(output.strip())
+            if isinstance(result, dict) and result.get("commit_message"):
+                return str(result["commit_message"]).strip()
+        except json.JSONDecodeError:
+            pass
 
         return None
 
