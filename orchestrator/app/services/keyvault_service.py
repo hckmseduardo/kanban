@@ -26,6 +26,8 @@ class KeyVaultService:
     # Map of Key Vault secret names to environment variable names
     SECRET_MAPPINGS = {
         "cross-domain-secret": "CROSS_DOMAIN_SECRET",
+        "test-user-email": "TEST_USER_EMAIL",
+        "test-user-password": "TEST_USER_PASSWORD",
     }
 
     def __init__(self):

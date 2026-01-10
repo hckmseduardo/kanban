@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -134,6 +135,7 @@ class ClaudeCodeRunner:
         on_output: Callable[[str], None] = None,
         timeout: int = None,
         system_prompt: str = None,
+        session_id: str = None,
     ) -> AgentResult:
         """
         Execute Claude Code CLI on host via SSH.
@@ -148,6 +150,7 @@ class ClaudeCodeRunner:
             on_output: Callback for streaming output
             timeout: Override timeout in seconds
             system_prompt: Optional system prompt override
+            session_id: Optional Claude session ID to reuse across runs
 
         Returns:
             AgentResult with success status and output
@@ -186,6 +189,9 @@ class ClaudeCodeRunner:
         if tools:
             remote_cmd_parts.extend(["--allowedTools", ",".join(tools)])
 
+        if session_id:
+            remote_cmd_parts.extend(["--session-id", session_id])
+
         remote_cmd_parts.append("--dangerously-skip-permissions")
 
         # Use text output for simpler parsing
@@ -195,18 +201,31 @@ class ClaudeCodeRunner:
             escaped_system = system_prompt.replace("'", "'\\''")
             remote_cmd_parts.extend(["--system-prompt", f"'{escaped_system}'"])
 
-        remote_cmd = " ".join(remote_cmd_parts)
+        env_prefix = ""
+        if env:
+            env_parts = []
+            for key, value in env.items():
+                if value is None or value == "":
+                    continue
+                env_parts.append(f"{key}={shlex.quote(str(value))}")
+            if env_parts:
+                env_prefix = " ".join(env_parts) + " "
+
+        remote_cmd_core = env_prefix + " ".join(remote_cmd_parts)
 
         # If working directory specified, cd into it first
         if working_dir and not working_dir.startswith("/app"):
-            remote_cmd = f"cd '{working_dir}' && {remote_cmd}"
+            remote_cmd = f"cd '{working_dir}' && {remote_cmd_core}"
+        else:
+            remote_cmd = remote_cmd_core
 
         # Build SSH command
         ssh_cmd = self._build_ssh_command(remote_cmd)
 
         logger.info(f"Executing Claude via SSH: agent={agent_type}, host={self.ssh_host}")
         logger.info(f"SSH command: {' '.join(ssh_cmd[:5])}...")
-        logger.debug(f"Remote command: {remote_cmd[:200]}...")
+        remote_cmd_log = " ".join(remote_cmd_parts)
+        logger.debug(f"Remote command: {remote_cmd_log[:200]}...")
 
         output_lines = []
         error_lines = []

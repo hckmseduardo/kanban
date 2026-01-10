@@ -10,6 +10,7 @@ import signal
 import subprocess
 import shlex
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -3289,6 +3290,7 @@ This board helps you explore and develop ideas from concept to implementation-re
         sandbox_id = payload["sandbox_id"]
         workspace_slug = payload["workspace_slug"]
         git_branch = payload["git_branch"]
+        session_id = payload.get("claude_session_id")
         kanban_api_url = payload["kanban_api_url"]
         target_project_path = payload["target_project_path"]
 
@@ -3299,6 +3301,8 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         steps = [
             ("Preparing sandbox context", self._agent_prepare_context),
+            ("Resolving Claude session", self._agent_resolve_session),
+            ("Preparing QA context", self._agent_prepare_qa_context),
             ("Running AI agent", self._agent_run_claude),
             ("Processing results", self._agent_process_results),
             ("Updating card", self._agent_update_card),
@@ -3341,6 +3345,12 @@ This board helps you explore and develop ideas from concept to implementation-re
         # Construct full_slug from workspace and sandbox slugs
         full_slug = f"{workspace_slug}-{sandbox_slug}"
         logger.info(f"[{card_id}] Using sandbox: {full_slug} (branch: sandbox/{full_slug})")
+
+        base_domain = DOMAIN.replace("kanban.", "")
+        port_suffix = "" if PORT == "443" else f":{PORT}"
+        sandbox_url = f"https://{full_slug}.sandbox.{base_domain}{port_suffix}"
+        payload["sandbox_url"] = sandbox_url
+        payload["sandbox_api_url"] = f"{sandbox_url}/api"
 
         # Always compute git_branch from full_slug - don't trust payload
         # Sandbox branch format is: sandbox/{full_slug}
@@ -3422,6 +3432,95 @@ This board helps you explore and develop ideas from concept to implementation-re
         else:
             logger.info(f"Pulled latest changes for {git_branch}")
 
+    async def _agent_resolve_session(self, card_id: str, sandbox_id: str):
+        """Ensure a persistent Claude session ID exists for this card."""
+        payload = self._current_payload
+        session_id = payload.get("claude_session_id")
+        kanban_api_url = payload.get("kanban_api_url")
+
+        if session_id and not self._is_valid_uuid(session_id):
+            logger.warning(f"[{card_id}] Invalid Claude session ID provided: {session_id}")
+            session_id = None
+
+        if not session_id:
+            session_id = str(uuid.uuid4())
+            payload["claude_session_id"] = session_id
+
+            if kanban_api_url:
+                try:
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        resp = await client.patch(
+                            f"{kanban_api_url}/cards/{card_id}",
+                            headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")},
+                            json={"claude_session_id": session_id},
+                        )
+                    if resp.status_code != 200:
+                        logger.warning(
+                            f"[{card_id}] Failed to persist session ID: {resp.status_code} {resp.text}"
+                        )
+                except Exception as e:
+                    logger.warning(f"[{card_id}] Failed to persist session ID: {e}")
+            else:
+                logger.warning(f"[{card_id}] Missing kanban_api_url; cannot persist session ID")
+
+        logger.info(f"[{card_id}] Claude session resolved: {session_id}")
+
+    @staticmethod
+    def _is_valid_uuid(value: str) -> bool:
+        """Validate UUID string for Claude session IDs."""
+        try:
+            uuid.UUID(value)
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    async def _agent_prepare_qa_context(self, card_id: str, sandbox_id: str):
+        """Prepare QA runtime context for sandbox validation."""
+        payload = self._current_payload
+        agent_name = payload.get("agent_config", {}).get("agent_name", "")
+        if agent_name != "qa":
+            return
+
+        qa_auth_error = None
+        sandbox_url = payload.get("sandbox_url")
+        sandbox_api_url = payload.get("sandbox_api_url")
+
+        if not sandbox_url or not sandbox_api_url:
+            qa_auth_error = "Sandbox URL not available"
+
+        test_user_email = keyvault_service.get_secret("test-user-email")
+        test_user_password = keyvault_service.get_secret("test-user-password")
+        if not test_user_email or not test_user_password:
+            qa_auth_error = "Missing test user credentials from Key Vault"
+
+        portal_base = f"https://{DOMAIN}"
+        if PORT != "443":
+            portal_base = f"https://{DOMAIN}:{PORT}"
+        portal_api_url = f"{portal_base}/api"
+
+        qa_access_token = None
+        if not qa_auth_error:
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.post(
+                        f"{portal_api_url}/auth/test-login",
+                        params={"email": test_user_email, "password": test_user_password},
+                    )
+                if resp.status_code == 200:
+                    qa_access_token = resp.json().get("access_token")
+                    if not qa_access_token:
+                        qa_auth_error = "Test login response missing access token"
+                else:
+                    qa_auth_error = f"Test login failed (status {resp.status_code})"
+            except Exception as e:
+                qa_auth_error = f"Test login error: {e}"
+
+        if qa_auth_error:
+            logger.warning(f"[{card_id}] QA auth unavailable: {qa_auth_error}")
+
+        payload["qa_access_token"] = qa_access_token
+        payload["qa_auth_error"] = qa_auth_error
+
     async def _agent_run_claude(self, card_id: str, sandbox_id: str):
         """Run Claude Code subprocess for the agent task."""
         payload = self._current_payload
@@ -3434,6 +3533,8 @@ This board helps you explore and develop ideas from concept to implementation-re
         sandbox_slug = payload.get("sandbox_slug", "")
         workspace_slug = payload["workspace_slug"]
         board_id = payload.get("board_id")
+        sandbox_url = payload.get("sandbox_url", "")
+        sandbox_api_url = payload.get("sandbox_api_url", "")
 
         # Get agent config values with defaults
         persona = agent_config.get("persona", "")
@@ -3454,8 +3555,19 @@ This board helps you explore and develop ideas from concept to implementation-re
             persona=persona,
             sandbox_id=sandbox_id,
             sandbox_slug=sandbox_slug,
+            sandbox_url=sandbox_url,
+            sandbox_api_url=sandbox_api_url,
             board_state=board_state,
         )
+
+        env = None
+        if agent_name == "qa":
+            env = {
+                "QA_SANDBOX_URL": sandbox_url,
+                "QA_API_URL": sandbox_api_url,
+                "QA_ACCESS_TOKEN": payload.get("qa_access_token"),
+                "QA_AUTH_ERROR": payload.get("qa_auth_error"),
+            }
 
         # Progress callback for streaming updates
         async def on_progress(message: str, percentage: int):
@@ -3469,6 +3581,8 @@ This board helps you explore and develop ideas from concept to implementation-re
             agent_type=agent_name,  # Still used for tool fallback
             tool_profile=tool_profile,
             timeout=timeout,
+            session_id=payload.get("claude_session_id"),
+            env=env,
         )
 
         if not self._agent_result.success:
@@ -3675,6 +3789,8 @@ This board helps you explore and develop ideas from concept to implementation-re
             comment += f"**Status:** Completed\n"
             comment += f"**Duration:** {result.duration_seconds:.1f}s\n"
             comment += f"**Branch:** `{git_branch}`\n"
+            if session_id:
+                comment += f"**Session:** `{session_id}`\n"
             if result.commit_hash:
                 comment += f"**Commit:** `{result.commit_hash}`\n"
             if result.push_attempted:
@@ -3705,6 +3821,8 @@ This board helps you explore and develop ideas from concept to implementation-re
             comment = f"## Agent: {display_name}\n\n"
             comment += f"**Status:** Failed\n"
             comment += f"**Error:** {result.error}\n"
+            if session_id:
+                comment += f"\n**Session:** `{session_id}`\n"
             if result.commit_hash:
                 comment += f"\n**Commit:** `{result.commit_hash}`\n"
             if result.push_attempted:
@@ -3887,6 +4005,8 @@ This board helps you explore and develop ideas from concept to implementation-re
         persona: str = "",
         sandbox_id: str = "",
         sandbox_slug: str = "",
+        sandbox_url: str = "",
+        sandbox_api_url: str = "",
         board_state: str = None,
     ) -> str:
         """Build the prompt for Claude Code using persona from kanban-team.
@@ -3898,6 +4018,8 @@ This board helps you explore and develop ideas from concept to implementation-re
             persona: Agent persona/instructions from kanban-team config
             sandbox_id: The sandbox ID this card is linked to
             sandbox_slug: The sandbox slug for reference
+            sandbox_url: Public sandbox URL for runtime validation
+            sandbox_api_url: Public sandbox API base URL
             board_state: Current kanban board state (for scrum_master)
         """
         # Use persona from config, or a generic fallback
@@ -3906,11 +4028,13 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         # Build context section with sandbox info
         context_section = ""
-        if sandbox_id or sandbox_slug:
+        if sandbox_id or sandbox_slug or sandbox_url:
             context_section = f"""
 ## Card Context:
 - Sandbox ID: {sandbox_id}
 - Sandbox Slug: {sandbox_slug}
+{f"- Sandbox URL: {sandbox_url}" if sandbox_url else ""}
+{f"- Sandbox API: {sandbox_api_url}" if sandbox_api_url else ""}
 IMPORTANT: When creating project plans or cards, use this sandbox_id to link them to the same sandbox.
 """
 

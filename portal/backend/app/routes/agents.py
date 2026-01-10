@@ -66,6 +66,7 @@ class CardEventPayload(BaseModel):
     sandbox_id: Optional[str] = None  # Sandbox identifier for isolation
     sandbox_slug: Optional[str] = None  # Sandbox slug from card's linked sandbox
     workspace_slug: Optional[str] = None
+    claude_session_id: Optional[str] = None  # Persistent Claude CLI session for this card
 
 
 def verify_webhook_signature(
@@ -141,6 +142,7 @@ async def receive_card_event(
     card = payload.card
     column_name = card.get("column", {}).get("name", "")
     board_id = payload.board.get("id") if payload.board else None
+    claude_session_id = card.get("claude_session_id") or payload.claude_session_id
 
     # Get sandbox details for isolation
     # sandbox_id from payload should be UUID, but might be full_slug if card was created incorrectly
@@ -193,6 +195,7 @@ async def receive_card_event(
             agent_config=agent_config,
             sandbox_id=sandbox_id or workspace_slug,
             sandbox_slug=sandbox_slug,
+            claude_session_id=claude_session_id,
             workspace_slug=workspace_slug,
             git_branch=git_branch,
             kanban_api_url=kanban_api_url,
