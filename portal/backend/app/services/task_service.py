@@ -224,6 +224,7 @@ class TaskService:
             queue_name=self.QUEUE_PROVISIONING,
             task_type="workspace.restart",
             payload={
+                "action": "restart_workspace",
                 "workspace_id": workspace_id,
                 "workspace_slug": workspace_slug,
                 "rebuild": rebuild,
@@ -258,6 +259,7 @@ class TaskService:
             queue_name=self.QUEUE_PROVISIONING,
             task_type="workspace.start",
             payload={
+                "action": "start_workspace",
                 "workspace_id": workspace_id,
                 "workspace_slug": workspace_slug,
                 "kanban_only": kanban_only,
@@ -374,6 +376,44 @@ class TaskService:
                 "sandbox_id": sandbox_id,
                 "full_slug": full_slug,
                 "workspace_slug": workspace_slug,
+            },
+            user_id=user_id,
+            priority="high"
+        )
+
+    async def create_sandbox_pull_request_task(
+        self,
+        sandbox_id: str,
+        workspace_id: str,
+        workspace_slug: str,
+        sandbox_slug: str,
+        full_slug: str,
+        git_branch: str,
+        user_id: str,
+        github_org: str,
+        github_repo_name: str,
+    ) -> str:
+        """Create task to open and merge a sandbox pull request.
+
+        This will:
+        1. Create a PR from sandbox branch to main
+        2. Approve the PR
+        3. Merge into main
+        4. Update workspace app code and rebuild containers
+        """
+        return await redis_service.enqueue_task(
+            queue_name=self.QUEUE_PROVISIONING,
+            task_type="sandbox.pull_request",
+            payload={
+                "action": "sandbox.pull_request",
+                "workspace_id": workspace_id,
+                "workspace_slug": workspace_slug,
+                "sandbox_id": sandbox_id,
+                "sandbox_slug": sandbox_slug,
+                "full_slug": full_slug,
+                "git_branch": git_branch,
+                "github_org": github_org,
+                "github_repo_name": github_repo_name,
             },
             user_id=user_id,
             priority="high"

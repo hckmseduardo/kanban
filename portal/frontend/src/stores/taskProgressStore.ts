@@ -22,7 +22,14 @@ interface TaskProgressState {
   tasks: Record<string, TaskProgress>
 
   // Start tracking a new task
-  startTask: (taskId: string, workspaceId?: string, workspaceSlug?: string, action?: string) => void
+  startTask: (
+    taskId: string,
+    workspaceId?: string,
+    workspaceSlug?: string,
+    action?: string,
+    sandboxId?: string,
+    sandboxSlug?: string
+  ) => void
 
   // Update task progress from WebSocket
   updateProgress: (taskId: string, update: Partial<TaskProgress>) => void
@@ -49,7 +56,7 @@ interface TaskProgressState {
 export const useTaskProgressStore = create<TaskProgressState>((set, get) => ({
   tasks: {},
 
-  startTask: (taskId, workspaceId, workspaceSlug, action = 'unknown') => {
+  startTask: (taskId, workspaceId, workspaceSlug, action = 'unknown', sandboxId, sandboxSlug) => {
     set((state) => ({
       tasks: {
         ...state.tasks,
@@ -57,6 +64,8 @@ export const useTaskProgressStore = create<TaskProgressState>((set, get) => ({
           taskId,
           workspaceId,
           workspaceSlug,
+          sandboxId,
+          sandboxSlug,
           action,
           step: 0,
           totalSteps: 1,

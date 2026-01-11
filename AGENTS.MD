@@ -17,14 +17,16 @@ always use the orchestrator to manipulate kanban-team and the apps
 | Kanban Agents | On-demand AI agents via Claude Code | [kanban-agents.md](docs/architecture/kanban-agents.md) |
 | Infrastructure | Docker, Traefik, Redis setup | [infrastructure.md](docs/architecture/infrastructure.md) |
 
-### Claude Code SSH Configuration
+### Agent CLI SSH Configuration
 
-The orchestrator runs Claude Code on the host machine via SSH. Required `.env` variables:
+The orchestrator runs Claude Code (default) or Codex CLI on the host machine via SSH. Required `.env` variables:
 
 ```bash
 SSH_USER=myusername                           # Required: host machine username
 SSH_HOST=host.docker.internal                 # Docker's way to reach host
 SSH_CLAUDE_PATH=/usr/local/bin/claude-loggedin  # Path to Claude CLI wrapper
+SSH_CODEX_PATH=/Users/hckmseduardo/.nvm/versions/node/v24.2.0/bin/codex   # Path to Codex CLI wrapper (optional)
+LLM_PROVIDER=claude-cli                        # Or codex-cli to default to Codex
 ```
 
 See [orchestrator.md](docs/architecture/orchestrator.md#claude-code-runner-service) for full setup instructions.
@@ -44,7 +46,7 @@ When you modify code in the `kanban-team` submodule, you MUST rebuild the Docker
 ./scripts/rebuild-images.sh --all --restart
 ```
 
-**Important:** The `rebuild-workspace.sh` script does NOT rebuild images - it only restarts containers. Always use `rebuild-images.sh` after code changes.
+**Important:** The `rebuild-workspace.sh` script does NOT rebuild images - it only restarts containers. Always use `rebuild-images.sh` after code changes and then use rebuild-workspace to restart the containers.
 
 ## Skills
 

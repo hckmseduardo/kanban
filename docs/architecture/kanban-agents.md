@@ -2,10 +2,10 @@
 
 ## Overview
 
-AI agents in the Kanban system are spawned on-demand when cards are moved between columns. Instead of running persistent agent containers, the orchestrator spawns Claude Code CLI subprocess for each task, providing:
+AI agents in the Kanban system are spawned on-demand when cards are moved between columns. Instead of running persistent agent containers, the orchestrator spawns Claude Code CLI (default) or Codex CLI (optional) subprocesses for each task, providing:
 
 - **Cost efficiency**: No idle containers
-- **Full agentic capabilities**: Claude Code CLI with tools
+- **Full agentic capabilities**: Claude Code CLI or Codex CLI with tools
 - **Pro subscription usage**: No per-call API costs
 - **Sandbox isolation**: Each agent runs in its sandbox's git branch
 
@@ -32,7 +32,7 @@ AI agents in the Kanban system are spawned on-demand when cards are moved betwee
 │  │  - For each task:                                   ││
 │  │    1. Checkout sandbox git branch                   ││
 │  │    2. Prepare environment                           ││
-│  │    3. Spawn Claude Code subprocess                  ││
+│  │    3. Spawn agent CLI subprocess                    ││
 │  │    4. Stream progress to card comments              ││
 │  │    5. Commit changes on success                     ││
 │  │    6. Update card status                            ││
@@ -45,8 +45,8 @@ AI agents in the Kanban system are spawned on-demand when cards are moved betwee
 1. **Card moves to a column** in Kanban Team
 2. **Webhook fires** to Portal Backend `/agents/webhook`
 3. **Task queued** in Redis (`queue:agents:high` or `queue:agents:normal`)
-4. **Orchestrator picks up task** and spawns Claude Code subprocess
-5. **Claude Code executes** with agent persona and tools
+4. **Orchestrator picks up task** and spawns the configured agent CLI subprocess
+5. **Agent CLI executes** with agent persona and tools
 6. **Results committed** to sandbox git branch
 7. **Card updated** with agent completion status
 
@@ -98,9 +98,10 @@ async def create_agent_task(
     """Queue an on-demand agent task."""
 ```
 
-### Claude Code Runner
+### Agent CLI Runners
 
-Located in `orchestrator/app/services/claude_code_runner.py`:
+Located in `orchestrator/app/services/claude_code_runner.py` (Claude CLI) and
+`orchestrator/app/services/codex_cli_runner.py` (Codex CLI):
 
 ```python
 class ClaudeCodeRunner:
@@ -121,10 +122,10 @@ Located in `orchestrator/app/main.py`:
 
 ```python
 async def process_agent_task(self, task: dict):
-    """Process an AI agent task using Claude Code subprocess."""
+    """Process an AI agent task using an agent CLI subprocess."""
     # 1. Prepare sandbox context
     # 2. Build agent prompt
-    # 3. Run Claude Code
+    # 3. Run agent CLI
     # 4. Process results (commit changes)
     # 5. Update card
 ```
@@ -177,7 +178,7 @@ Workspace: my-project
 ### Isolation Mechanisms
 
 1. **Git branch checkout**: Agent works on sandbox-specific branch
-2. **Working directory**: Claude Code runs in sandbox project path
+2. **Working directory**: Agent CLI runs in sandbox project path
 3. **Database**: Each sandbox has isolated database
 4. **Webhook secret**: Per-sandbox authentication
 
@@ -186,12 +187,15 @@ Workspace: my-project
 ### Environment Variables (Orchestrator)
 
 ```bash
-# Claude Code CLI must be installed
-# Uses ~/.claude credentials (Pro subscription)
+# Claude Code CLI must be installed (default)
+# Codex CLI is optional when using llm_provider=codex-cli
 
 # Project paths
 HOST_PROJECT_PATH=/path/to/kanban
 ```
+
+Per-column agent overrides can set `llm_provider` to `codex-cli` to switch the
+agent CLI for that column (defaults to `claude-cli`).
 
 ### Agent Timeouts
 
@@ -238,6 +242,7 @@ except asyncio.TimeoutError:
 
 ### Tool Permissions
 - Claude Code runs with `--dangerouslySkipPermissions` in sandbox
+- Codex CLI runs with `--approval-mode` mapped from tool_profile
 - Tools restricted to sandbox directory
 - No access to other sandboxes
 

@@ -144,26 +144,29 @@ async def route_task(task: dict):
 
 ### Claude Code Runner Service
 
-Executes Claude Code CLI on the host machine via SSH for on-demand AI agent tasks.
-This allows using the Claude Pro subscription for reduced costs instead of API calls.
+Executes Claude Code CLI (default) or Codex CLI (optional) on the host machine via SSH
+for on-demand AI agent tasks. This allows using local CLI authentication instead of API calls.
 
 #### SSH Configuration
 
 The orchestrator runs inside Docker and connects to the host machine via SSH to execute
-Claude Code. This requires the following environment variables:
+the selected agent CLI. This requires the following environment variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SSH_USER` | Username on the host machine | **Required** |
 | `SSH_HOST` | Host to SSH into | `host.docker.internal` |
 | `SSH_CLAUDE_PATH` | Path to Claude CLI on host | `~/.local/bin/claude` |
+| `SSH_CODEX_PATH` | Path to Codex CLI on host | `~/.local/bin/codex` |
 
 **Example `.env` configuration:**
 ```bash
-# SSH Configuration for Claude Code (AI Enhancement)
+# SSH Configuration for agent CLIs (AI Enhancement)
 SSH_USER=myusername
 SSH_HOST=host.docker.internal
 SSH_CLAUDE_PATH=/usr/local/bin/claude-loggedin
+SSH_CODEX_PATH=/usr/local/bin/codex-loggedin
+LLM_PROVIDER=claude-cli  # Or codex-cli to default to Codex
 ```
 
 #### Authentication Wrapper
@@ -183,6 +186,9 @@ exec /Users/myusername/.local/bin/claude "$@"
 
 Make the wrapper executable and set `SSH_CLAUDE_PATH` to point to it.
 
+Codex CLI uses ChatGPT login or `OPENAI_API_KEY` on the host. If you need a wrapper
+script, follow the same pattern and set `SSH_CODEX_PATH` to the wrapper path.
+
 #### Prerequisites
 
 1. **SSH access from Docker to host**: The orchestrator mounts `~/.ssh:/root/.ssh:ro`
@@ -194,6 +200,10 @@ Make the wrapper executable and set `SSH_CLAUDE_PATH` to point to it.
 2. **Claude CLI installed on host**: Install via `npm install -g @anthropic-ai/claude-code`
 
 3. **Claude CLI authenticated**: Run `claude login` on the host to authenticate
+
+4. **Codex CLI installed on host (optional)**: `npm install -g @openai/codex`
+
+5. **Codex CLI authenticated (optional)**: Sign in via `codex` or set `OPENAI_API_KEY`
 
 #### API
 
@@ -578,10 +588,13 @@ AZURE_TENANT_ID=<tenant-id>
 DOMAIN=kanban.amazing-ai.tools
 PORTAL_API_URL=https://kanban.amazing-ai.tools/api
 
-# SSH - Claude Code execution on host (required for AI enhancement)
+# SSH - Agent CLI execution on host (required for AI enhancement)
 SSH_USER=myusername              # Required: username on host machine
 SSH_HOST=host.docker.internal    # Docker's way to reach host
 SSH_CLAUDE_PATH=/usr/local/bin/claude-loggedin  # Path to Claude CLI (or wrapper)
+SSH_CODEX_PATH=/Users/hckmseduardo/.nvm/versions/node/v24.2.0/bin/codex    # Path to Codex CLI (optional)
+LLM_PROVIDER=claude-cli                          # Or codex-cli for default Codex
+OPENAI_API_KEY=<from-keyvault>                   # Optional for Codex CLI auth
 ```
 
 ## Error Handling

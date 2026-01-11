@@ -84,12 +84,30 @@ export default function Layout() {
       } else if (action === 'delete_workspace') {
         showToast('success', `Workspace "${workspaceSlug}" deleted successfully!`)
         queryClient.invalidateQueries({ queryKey: ['workspaces'] })
+      } else if (action === 'start_workspace') {
+        showToast('success', `Workspace "${workspaceSlug}" started successfully!`)
+        queryClient.invalidateQueries({ queryKey: ['workspaces'] })
+        if (workspaceSlug) {
+          queryClient.invalidateQueries({ queryKey: ['workspace-health', workspaceSlug] })
+          queryClient.invalidateQueries({ queryKey: ['workspaces-health-batch'] })
+        }
+      } else if (action === 'restart_workspace') {
+        showToast('success', `Workspace "${workspaceSlug}" restarted successfully!`)
+        queryClient.invalidateQueries({ queryKey: ['workspaces'] })
+        if (workspaceSlug) {
+          queryClient.invalidateQueries({ queryKey: ['workspace-health', workspaceSlug] })
+          queryClient.invalidateQueries({ queryKey: ['workspaces-health-batch'] })
+        }
       } else if (action === 'create_sandbox') {
         showToast('success', `Sandbox "${sandboxSlug}" created successfully!`)
         queryClient.invalidateQueries({ queryKey: ['workspaces'] })
         queryClient.invalidateQueries({ queryKey: ['sandboxes'] })
       } else if (action === 'delete_sandbox') {
         showToast('success', `Sandbox "${sandboxSlug}" deleted successfully!`)
+        queryClient.invalidateQueries({ queryKey: ['workspaces'] })
+        queryClient.invalidateQueries({ queryKey: ['sandboxes'] })
+      } else if (action === 'sandbox.pull_request') {
+        showToast('success', `Sandbox "${sandboxSlug}" deployed to main!`)
         queryClient.invalidateQueries({ queryKey: ['workspaces'] })
         queryClient.invalidateQueries({ queryKey: ['sandboxes'] })
       }

@@ -3,18 +3,23 @@ import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { workspacesApi, sandboxesApi, Workspace, Sandbox, WorkspaceMember, WorkspaceInvitation, WorkspaceHealth, setNavigatingAway, authApi } from '../services/api'
 import { useAuthStore } from '../stores/authStore'
+import { useTaskProgressStore } from '../stores/taskProgressStore'
 
 export default function WorkspaceDetailPage() {
   const { slug } = useParams<{ slug: string }>()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { user } = useAuthStore()
+  const { startTask } = useTaskProgressStore()
+  const tasks = useTaskProgressStore((state) => state.tasks)
 
   const [showCreateSandbox, setShowCreateSandbox] = useState(false)
   const [sandboxName, setSandboxName] = useState('')
   const [sandboxSlug, setSandboxSlug] = useState('')
   const [sandboxBranch, setSandboxBranch] = useState('main')
   const [createError, setCreateError] = useState('')
+  const [pullRequestError, setPullRequestError] = useState('')
+  const [startWorkspaceError, setStartWorkspaceError] = useState('')
 
   const [deleteConfirm, setDeleteConfirm] = useState<{ slug: string; name: string; type: 'workspace' | 'sandbox' } | null>(null)
   const [deleteInput, setDeleteInput] = useState('')
@@ -48,6 +53,7 @@ export default function WorkspaceDetailPage() {
     queryFn: () => sandboxesApi.list(slug!).then(res => res.data),
     enabled: !!slug && !!workspace?.app_template_id,
   })
+  const sandboxes = sandboxesData?.sandboxes || []
 
   // Get workspace members
   const { data: membersData, isLoading: membersLoading } = useQuery({
@@ -83,11 +89,21 @@ export default function WorkspaceDetailPage() {
   // Start workspace mutation
   const startWorkspaceMutation = useMutation({
     mutationFn: () => workspacesApi.start(slug!),
-    onSuccess: () => {
+    onMutate: () => {
+      setStartWorkspaceError('')
+    },
+    onSuccess: (response) => {
+      const taskId = response.data.task_id
+      if (taskId && workspace?.id && workspace?.slug) {
+        startTask(taskId, workspace.id, workspace.slug, 'start_workspace')
+      }
       // Invalidate health to trigger re-check after start completes
       setTimeout(() => {
         queryClient.invalidateQueries({ queryKey: ['workspace-health', slug] })
       }, 5000) // Wait 5 seconds before re-checking health
+    },
+    onError: (err: any) => {
+      setStartWorkspaceError(err.response?.data?.detail || 'Failed to start workspace')
     }
   })
 
@@ -116,6 +132,30 @@ export default function WorkspaceDetailPage() {
     }
   })
 
+  const createPullRequestMutation = useMutation({
+    mutationFn: (sandboxSlug: string) => sandboxesApi.createPullRequest(slug!, sandboxSlug),
+    onMutate: () => {
+      setPullRequestError('')
+    },
+    onSuccess: (response, sandboxSlug) => {
+      const taskId = response.data.task_id
+      const sandboxRecord = sandboxes.find((sandbox) => sandbox.slug === sandboxSlug)
+      if (taskId && workspace?.id && workspace?.slug) {
+        startTask(
+          taskId,
+          workspace.id,
+          workspace.slug,
+          'sandbox.pull_request',
+          sandboxRecord?.id,
+          sandboxSlug
+        )
+      }
+    },
+    onError: (err: any) => {
+      setPullRequestError(err.response?.data?.detail || 'Failed to create pull request')
+    }
+  })
+
   const deleteWorkspaceMutation = useMutation({
     mutationFn: () => workspacesApi.delete(slug!),
     onSuccess: () => {
@@ -126,11 +166,18 @@ export default function WorkspaceDetailPage() {
   const restartWorkspaceMutation = useMutation({
     mutationFn: (options: { rebuild?: boolean; restart_app?: boolean }) =>
       workspacesApi.restart(slug!, options),
-    onSuccess: () => {
+    onSuccess: (response) => {
+      const taskId = response.data.task_id
+      if (taskId && workspace?.id && workspace?.slug) {
+        startTask(taskId, workspace.id, workspace.slug, 'restart_workspace')
+      }
       setShowRestartModal(false)
       setRestartRebuild(false)
       setRestartApp(true)
       queryClient.invalidateQueries({ queryKey: ['workspace', slug] })
+      setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ['workspace-health', slug] })
+      }, 5000)
     }
   })
 
@@ -301,6 +348,27 @@ export default function WorkspaceDetailPage() {
   const userRole = currentUserMembership?.role || null
   const canManageMembers = userRole === 'owner' || userRole === 'admin'
   const canCreateSandbox = userRole === 'owner' || userRole === 'admin'
+  const getSandboxPrTask = (sandboxSlug: string) =>
+    Object.values(tasks).find(
+      (task) =>
+        task.sandboxSlug === sandboxSlug &&
+        task.action === 'sandbox.pull_request' &&
+        (task.status === 'pending' || task.status === 'in_progress')
+    )
+  const workspaceStartTask = Object.values(tasks).find(
+    (task) =>
+      task.workspaceSlug === slug &&
+      task.action === 'start_workspace' &&
+      (task.status === 'pending' || task.status === 'in_progress')
+  )
+  const workspaceRestartTask = Object.values(tasks).find(
+    (task) =>
+      task.workspaceSlug === slug &&
+      task.action === 'restart_workspace' &&
+      (task.status === 'pending' || task.status === 'in_progress')
+  )
+  const workspaceActionTask = workspaceStartTask || workspaceRestartTask
+  const isWorkspaceStarting = startWorkspaceMutation.isPending || !!workspaceActionTask
 
   if (workspaceLoading) {
     return (
@@ -320,8 +388,6 @@ export default function WorkspaceDetailPage() {
       </div>
     )
   }
-
-  const sandboxes = sandboxesData?.sandboxes || []
 
   return (
     <div className="space-y-6">
@@ -434,16 +500,16 @@ export default function WorkspaceDetailPage() {
                     {(userRole === 'owner' || userRole === 'admin') && (
                       <button
                         onClick={() => startWorkspaceMutation.mutate()}
-                        disabled={startWorkspaceMutation.isPending}
+                        disabled={isWorkspaceStarting}
                         className="px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 text-sm font-medium flex items-center gap-2 disabled:opacity-50"
                       >
-                        {startWorkspaceMutation.isPending ? (
+                        {isWorkspaceStarting ? (
                           <>
                             <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
                               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                             </svg>
-                            Starting...
+                            {workspaceActionTask?.action === 'restart_workspace' ? 'Restarting...' : 'Starting...'}
                           </>
                         ) : (
                           <>
@@ -463,6 +529,14 @@ export default function WorkspaceDetailPage() {
                       Check Again
                     </button>
                   </div>
+                  {workspaceActionTask && (
+                    <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+                      {workspaceActionTask.action === 'restart_workspace' ? 'Restarting workspace:' : 'Starting workspace:'} {workspaceActionTask.stepName}
+                    </p>
+                  )}
+                  {startWorkspaceError && (
+                    <p className="mt-2 text-sm text-red-600 dark:text-red-400">{startWorkspaceError}</p>
+                  )}
                 </div>
               </div>
             </div>
@@ -483,7 +557,7 @@ export default function WorkspaceDetailPage() {
             {/* Kanban Board */}
             {(() => {
               const kanbanStopped = workspace.status === 'active' && workspaceHealth && !workspaceHealth.kanban_running
-              const isStarting = isStartingKanban || startKanbanMutation.isPending
+              const isStarting = isStartingKanban || startKanbanMutation.isPending || isWorkspaceStarting
 
               return (
                 <button
@@ -608,6 +682,9 @@ export default function WorkspaceDetailPage() {
             <div>
               <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Sandboxes</h2>
               <p className="text-sm text-gray-500 dark:text-gray-400">Development environments with database clones</p>
+              <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                Deploying a sandbox rebuilds the live app and may cause brief downtime.
+              </p>
             </div>
             {canCreateSandbox && (
               <button
@@ -621,6 +698,12 @@ export default function WorkspaceDetailPage() {
               </button>
             )}
           </div>
+
+          {pullRequestError && (
+            <div className="mx-4 mt-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 px-4 py-3 rounded-lg">
+              {pullRequestError}
+            </div>
+          )}
 
           {sandboxesLoading ? (
             <div className="p-8 flex justify-center">
@@ -636,56 +719,80 @@ export default function WorkspaceDetailPage() {
             </div>
           ) : (
             <div className="divide-y divide-gray-200 dark:divide-dark-700">
-              {sandboxes.map((sandbox: Sandbox) => (
-                <div key={sandbox.id} className="p-4 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-dark-700/50">
-                  <div className="flex items-center gap-4">
-                    <div className={`h-10 w-10 rounded-lg flex items-center justify-center ${
-                      sandbox.status === 'active'
-                        ? 'bg-green-100 dark:bg-green-900/30'
-                        : 'bg-yellow-100 dark:bg-yellow-900/30'
-                    }`}>
-                      <svg className={`w-5 h-5 ${
+              {sandboxes.map((sandbox: Sandbox) => {
+                const sandboxTask = getSandboxPrTask(sandbox.slug)
+                const canDeploySandbox = userRole === 'owner' || userRole === 'admin' || sandbox.owner_id === user?.id
+                const isDeploying = !!sandboxTask
+
+                return (
+                  <div key={sandbox.id} className="p-4 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-dark-700/50">
+                    <div className="flex items-center gap-4">
+                      <div className={`h-10 w-10 rounded-lg flex items-center justify-center ${
                         sandbox.status === 'active'
-                          ? 'text-green-600 dark:text-green-400'
-                          : 'text-yellow-600 dark:text-yellow-400'
-                      }`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                      </svg>
-                    </div>
-                    <div>
-                      <h3 className="font-medium text-gray-900 dark:text-gray-100">{sandbox.name}</h3>
-                      <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
-                        <span className="font-mono">{sandbox.full_slug}</span>
-                        <span>·</span>
-                        <span>Branch: {sandbox.git_branch}</span>
+                          ? 'bg-green-100 dark:bg-green-900/30'
+                          : 'bg-yellow-100 dark:bg-yellow-900/30'
+                      }`}>
+                        <svg className={`w-5 h-5 ${
+                          sandbox.status === 'active'
+                            ? 'text-green-600 dark:text-green-400'
+                            : 'text-yellow-600 dark:text-yellow-400'
+                        }`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                        </svg>
+                      </div>
+                      <div>
+                        <h3 className="font-medium text-gray-900 dark:text-gray-100">{sandbox.name}</h3>
+                        <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+                          <span className="font-mono">{sandbox.full_slug}</span>
+                          <span>·</span>
+                          <span>Branch: {sandbox.git_branch}</span>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusBadge(sandbox.status)}`}>
-                      {sandbox.status}
-                    </span>
-                    {sandbox.status === 'active' && (
-                      <a
-                        href={sandbox.subdomain}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-primary-600 dark:text-primary-400 hover:text-primary-700 dark:hover:text-primary-300 text-sm font-medium"
+                    <div className="flex items-center gap-3">
+                      {sandboxTask && (
+                        <div className="flex items-center gap-2 text-xs text-blue-600 dark:text-blue-400">
+                          <svg className="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                          </svg>
+                          <span>{sandboxTask.stepName}</span>
+                        </div>
+                      )}
+                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusBadge(sandbox.status)}`}>
+                        {sandbox.status}
+                      </span>
+                      {canDeploySandbox && (
+                        <button
+                          onClick={() => createPullRequestMutation.mutate(sandbox.slug)}
+                          disabled={sandbox.status !== 'active' || isDeploying || createPullRequestMutation.isPending}
+                          className="px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
+                          title="Create and merge a PR to update main"
+                        >
+                          {isDeploying ? 'Deploying...' : 'Deploy to Main'}
+                        </button>
+                      )}
+                      {sandbox.status === 'active' && (
+                        <a
+                          href={sandbox.subdomain}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-primary-600 dark:text-primary-400 hover:text-primary-700 dark:hover:text-primary-300 text-sm font-medium"
+                        >
+                          Open
+                        </a>
+                      )}
+                      <button
+                        onClick={() => setDeleteConfirm({ slug: sandbox.slug, name: sandbox.name, type: 'sandbox' })}
+                        className="text-gray-400 hover:text-red-500 p-1"
                       >
-                        Open
-                      </a>
-                    )}
-                    <button
-                      onClick={() => setDeleteConfirm({ slug: sandbox.slug, name: sandbox.name, type: 'sandbox' })}
-                      className="text-gray-400 hover:text-red-500 p-1"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                      </svg>
-                    </button>
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
+                    </div>
                   </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           )}
         </div>

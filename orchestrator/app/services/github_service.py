@@ -255,6 +255,140 @@ class GitHubService:
                 error_detail = response.json().get("message", response.text)
                 raise Exception(f"Failed to delete branch: {error_detail}")
 
+    async def list_pull_requests(
+        self,
+        owner: str,
+        repo: str,
+        state: str = "open",
+        head: Optional[str] = None,
+        base: Optional[str] = None,
+    ) -> list:
+        """List pull requests with optional filters."""
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls"
+        params = {"state": state}
+        if head:
+            params["head"] = head if ":" in head else f"{owner}:{head}"
+        if base:
+            params["base"] = base
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                url,
+                headers=self.headers,
+                auth=self.auth,
+                params=params,
+                timeout=30.0
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            error_detail = response.json().get("message", response.text)
+            raise Exception(f"Failed to list pull requests: {error_detail}")
+
+    async def get_open_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        head: str,
+        base: str = "main",
+    ) -> Optional[dict]:
+        """Get an open PR for the head/base pair if it exists."""
+        prs = await self.list_pull_requests(owner=owner, repo=repo, state="open", head=head, base=base)
+        return prs[0] if prs else None
+
+    async def create_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        head: str,
+        base: str = "main",
+        title: str = None,
+        body: str = None,
+    ) -> dict:
+        """Create a pull request (or return existing open PR)."""
+        existing = await self.get_open_pull_request(owner, repo, head, base)
+        if existing:
+            return existing
+
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls"
+        payload = {
+            "title": title or f"Merge {head} into {base}",
+            "head": head,
+            "base": base,
+            "body": body or "",
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                url,
+                headers=self.headers,
+                auth=self.auth,
+                json=payload,
+                timeout=30.0
+            )
+
+            if response.status_code == 201:
+                return response.json()
+            if response.status_code == 422:
+                # PR may already exist, re-check open PRs
+                existing = await self.get_open_pull_request(owner, repo, head, base)
+                if existing:
+                    return existing
+            error_detail = response.json().get("message", response.text)
+            raise Exception(f"Failed to create pull request: {error_detail}")
+
+    async def approve_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        pull_number: int,
+        body: str = None,
+    ) -> dict:
+        """Approve a pull request via review."""
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls/{pull_number}/reviews"
+        payload = {"event": "APPROVE"}
+        if body:
+            payload["body"] = body
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                url,
+                headers=self.headers,
+                auth=self.auth,
+                json=payload,
+                timeout=30.0
+            )
+
+            if response.status_code in [200, 201]:
+                return response.json()
+            error_detail = response.json().get("message", response.text)
+            raise Exception(f"Failed to approve pull request: {error_detail}")
+
+    async def merge_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        pull_number: int,
+        merge_method: str = "merge",
+    ) -> dict:
+        """Merge a pull request."""
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls/{pull_number}/merge"
+        payload = {"merge_method": merge_method}
+
+        async with httpx.AsyncClient() as client:
+            response = await client.put(
+                url,
+                headers=self.headers,
+                auth=self.auth,
+                json=payload,
+                timeout=30.0
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            error_detail = response.json().get("message", response.text)
+            raise Exception(f"Failed to merge pull request: {error_detail}")
+
     async def clone_repository_url(
         self,
         owner: str,

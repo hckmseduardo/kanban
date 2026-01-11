@@ -354,6 +354,10 @@ export const sandboxesApi = {
     api.delete<{ message: string; task_id: string }>(
       `/workspaces/${workspaceSlug}/sandboxes/${sandboxSlug}`
     ),
+  createPullRequest: (workspaceSlug: string, sandboxSlug: string) =>
+    api.post<{ message: string; task_id: string }>(
+      `/workspaces/${workspaceSlug}/sandboxes/${sandboxSlug}/pull-request`
+    ),
   restartAgent: (workspaceSlug: string, sandboxSlug: string) =>
     api.post(`/workspaces/${workspaceSlug}/sandboxes/${sandboxSlug}/agent/restart`),
 }

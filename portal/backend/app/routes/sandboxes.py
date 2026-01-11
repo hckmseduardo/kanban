@@ -5,6 +5,7 @@ Sandbox permissions are based on workspace team membership:
 - Create sandbox: Admin or owner
 - Update sandbox: Admin or owner
 - Delete sandbox: Sandbox owner, workspace admin, or workspace owner
+- Pull request: Sandbox owner, workspace admin, or workspace owner
 - Restart agent: Admin or owner
 """
 
@@ -412,6 +413,79 @@ async def delete_sandbox(
 
     return {
         "message": "Sandbox deletion started",
+        "task_id": task_id
+    }
+
+
+@router.post("/{sandbox_slug}/pull-request")
+async def create_sandbox_pull_request(
+    workspace_slug: str,
+    sandbox_slug: str,
+    auth: AuthContext = Depends(require_scope("sandboxes:write"))
+):
+    """
+    Create and merge a pull request from a sandbox branch to main.
+
+    This starts an async process that will:
+    1. Create a PR from the sandbox branch to main
+    2. Approve the PR
+    3. Merge the PR
+    4. Update workspace app code and rebuild containers
+
+    Access: Sandbox owner, workspace admin, or workspace owner
+
+    Authentication: JWT or Portal API token
+    Required scope: sandboxes:write
+    """
+    # Get workspace and verify basic access
+    workspace, membership = get_workspace_with_role(workspace_slug, auth.user["id"])
+
+    # Ensure workspace has an app + repo
+    if not workspace.get("app_template_id"):
+        raise HTTPException(status_code=400, detail="Workspace does not have an app")
+
+    github_org = workspace.get("github_org")
+    github_repo_name = workspace.get("github_repo_name")
+    if not github_org or not github_repo_name:
+        raise HTTPException(status_code=400, detail="Workspace GitHub repository not configured")
+
+    # Get sandbox
+    sandbox = db_service.get_sandbox_by_workspace_and_slug(workspace["id"], sandbox_slug)
+    if not sandbox:
+        raise HTTPException(status_code=404, detail="Sandbox not found")
+
+    # Permission check: sandbox owner OR workspace admin/owner
+    is_sandbox_owner = sandbox["owner_id"] == auth.user["id"]
+    is_workspace_admin = membership and membership.get("role") in ["owner", "admin"]
+    if not (is_sandbox_owner or is_workspace_admin):
+        raise HTTPException(
+            status_code=403,
+            detail="Only sandbox owner, workspace admin, or workspace owner can open a pull request"
+        )
+
+    # Check sandbox is in a deployable state
+    if sandbox["status"] != "active":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot create pull request for sandbox with status '{sandbox['status']}'"
+        )
+
+    task_id = await task_service.create_sandbox_pull_request_task(
+        sandbox_id=sandbox["id"],
+        workspace_id=workspace["id"],
+        workspace_slug=workspace["slug"],
+        sandbox_slug=sandbox["slug"],
+        full_slug=sandbox["full_slug"],
+        git_branch=sandbox["git_branch"],
+        user_id=auth.user["id"],
+        github_org=github_org,
+        github_repo_name=github_repo_name,
+    )
+
+    logger.info(f"Sandbox PR started: {sandbox['full_slug']} by {auth.user['id']}")
+
+    return {
+        "message": "Sandbox pull request started",
         "task_id": task_id
     }
 

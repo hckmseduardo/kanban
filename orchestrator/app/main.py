@@ -26,6 +26,7 @@ from app.services.certificate_service import certificate_service
 from app.services.azure_service import azure_service
 from app.services.keyvault_service import keyvault_service
 from app.services.claude_code_runner import claude_runner
+from app.services.codex_cli_runner import codex_runner
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,6 +63,16 @@ try:
         logger.info("Loaded ANTHROPIC_API_KEY from Key Vault")
 except Exception as e:
     logger.warning(f"Could not load ANTHROPIC_API_KEY from Key Vault: {e}")
+
+# Try to load OPENAI_API_KEY from Key Vault first, fall back to env var
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+try:
+    _kv_openai_key = keyvault_service.get_secret("openai-api-key")
+    if _kv_openai_key:
+        OPENAI_API_KEY = _kv_openai_key
+        logger.info("Loaded OPENAI_API_KEY from Key Vault")
+except Exception as e:
+    logger.warning(f"Could not load OPENAI_API_KEY from Key Vault: {e}")
 
 TEAMS_DIR = Path("/app/data/teams")
 # Use HOST_PROJECT_PATH for workspaces so docker compose build contexts resolve correctly
@@ -523,6 +534,8 @@ class Orchestrator:
                 await self.delete_sandbox(task)
             elif task_type == "sandbox.restart":
                 await self.restart_sandbox(task)
+            elif task_type == "sandbox.pull_request":
+                await self.sandbox_pull_request(task)
             # Agent tasks (on-demand AI processing)
             elif task_type == "agent.process_card":
                 await self.process_agent_task(task)
@@ -3199,6 +3212,188 @@ This board helps you explore and develop ideas from concept to implementation-re
             await self.fail_task(task_id, str(e))
             raise
 
+    async def sandbox_pull_request(self, task: dict):
+        """Create, approve, and merge a sandbox PR, then rebuild the workspace app."""
+        task_id = task["task_id"]
+        payload = task["payload"]
+        workspace_id = payload["workspace_id"]
+        workspace_slug = payload["workspace_slug"]
+        sandbox_id = payload["sandbox_id"]
+        sandbox_slug = payload["sandbox_slug"]
+        full_slug = payload.get("full_slug", f"{workspace_slug}-{sandbox_slug}")
+        git_branch = payload.get("git_branch") or f"sandbox/{full_slug}"
+
+        # Store payload for step functions
+        payload["full_slug"] = full_slug
+        payload["git_branch"] = git_branch
+        self._current_payload = payload
+
+        logger.info(f"[{full_slug}] Starting sandbox pull request flow")
+
+        steps = [
+            ("Validating repository", self._sandbox_pr_validate),
+            ("Creating pull request", self._sandbox_pr_create),
+            ("Approving pull request", self._sandbox_pr_approve),
+            ("Merging pull request", self._sandbox_pr_merge),
+            ("Updating workspace code", self._workspace_update_repo_main),
+            ("Rebuilding app containers", self._workspace_rebuild_app_after_merge),
+        ]
+
+        try:
+            for i, (step_name, step_func) in enumerate(steps, 1):
+                await self.update_progress(task_id, i, len(steps), step_name)
+                await step_func(full_slug, sandbox_id)
+                logger.info(f"[{full_slug}] {step_name} - completed")
+
+            pr_url = self._current_payload.get("pull_request_url")
+            pr_number = self._current_payload.get("pull_request_number")
+            merge_sha = self._current_payload.get("merge_sha")
+
+            await self.complete_task(task_id, {
+                "action": "sandbox.pull_request",
+                "workspace_slug": workspace_slug,
+                "sandbox_slug": sandbox_slug,
+                "full_slug": full_slug,
+                "pull_request_url": pr_url,
+                "pull_request_number": pr_number,
+                "merge_sha": merge_sha,
+            })
+
+            logger.info(f"[{full_slug}] Sandbox pull request flow completed")
+
+        except Exception as e:
+            logger.error(f"[{full_slug}] Sandbox pull request failed: {e}")
+            await self.fail_task(task_id, str(e))
+            raise
+
+    async def _sandbox_pr_validate(self, full_slug: str, sandbox_id: str):
+        """Validate GitHub repo and branch for PR creation."""
+        payload = self._current_payload
+        github_org = payload.get("github_org")
+        github_repo = payload.get("github_repo_name")
+        git_branch = payload.get("git_branch")
+        if not github_org or not github_repo:
+            raise RuntimeError("GitHub repository info not configured for this workspace")
+
+        # Ensure token is configured early
+        _ = github_service.token
+
+        # Confirm repository exists
+        repo = await github_service.get_repository(github_org, github_repo)
+        if not repo:
+            raise RuntimeError(f"GitHub repository not found: {github_org}/{github_repo}")
+
+        branch = await github_service.get_branch(github_org, github_repo, git_branch)
+        if not branch:
+            raise RuntimeError(f"Sandbox branch not found: {github_org}/{github_repo}:{git_branch}")
+
+        payload["github_org"] = github_org
+        payload["github_repo_name"] = github_repo
+        payload["git_branch"] = git_branch
+
+    async def _sandbox_pr_create(self, full_slug: str, sandbox_id: str):
+        """Create (or find) a PR from sandbox branch to main."""
+        payload = self._current_payload
+        github_org = payload["github_org"]
+        github_repo = payload["github_repo_name"]
+        git_branch = payload["git_branch"]
+
+        title = f"Deploy sandbox {full_slug}"
+        body = f"Automated PR to merge `{git_branch}` into `main`."
+
+        pr = await github_service.create_pull_request(
+            owner=github_org,
+            repo=github_repo,
+            head=git_branch,
+            base="main",
+            title=title,
+            body=body,
+        )
+
+        payload["pull_request_number"] = pr.get("number")
+        payload["pull_request_url"] = pr.get("html_url")
+        payload["pull_request_state"] = pr.get("state")
+        payload["pull_request_merged"] = pr.get("merged_at") is not None
+
+    async def _sandbox_pr_approve(self, full_slug: str, sandbox_id: str):
+        """Approve the PR if it is open."""
+        payload = self._current_payload
+        if payload.get("pull_request_merged"):
+            logger.info(f"[{full_slug}] PR already merged, skipping approval")
+            return
+        if payload.get("pull_request_state") != "open":
+            raise RuntimeError("Pull request is not open; cannot approve")
+
+        await github_service.approve_pull_request(
+            owner=payload["github_org"],
+            repo=payload["github_repo_name"],
+            pull_number=payload["pull_request_number"],
+            body="Auto-approve sandbox deploy",
+        )
+
+    async def _sandbox_pr_merge(self, full_slug: str, sandbox_id: str):
+        """Merge the PR into main."""
+        payload = self._current_payload
+        if payload.get("pull_request_merged"):
+            logger.info(f"[{full_slug}] PR already merged, skipping merge")
+            return
+        if payload.get("pull_request_state") != "open":
+            raise RuntimeError("Pull request is not open; cannot merge")
+
+        merge_result = await github_service.merge_pull_request(
+            owner=payload["github_org"],
+            repo=payload["github_repo_name"],
+            pull_number=payload["pull_request_number"],
+            merge_method="merge",
+        )
+
+        payload["merge_sha"] = merge_result.get("sha")
+
+    async def _workspace_update_repo_main(self, full_slug: str, sandbox_id: str):
+        """Pull latest main into the workspace app repo."""
+        payload = self._current_payload
+        workspace_slug = payload["workspace_slug"]
+        repo_path = WORKSPACES_DIR / workspace_slug / "app"
+
+        if not repo_path.exists():
+            raise RuntimeError(f"Workspace repo not found at {repo_path}")
+
+        commands = [
+            ["git", "fetch", "origin"],
+            ["git", "checkout", "main"],
+            ["git", "pull", "origin", "main"],
+        ]
+
+        for cmd in commands:
+            result = subprocess.run(
+                cmd,
+                cwd=str(repo_path),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Git command failed ({' '.join(cmd)}): {result.stderr}")
+
+        logger.info(f"[{workspace_slug}] Workspace repo updated to latest main")
+
+    async def _workspace_rebuild_app_after_merge(self, full_slug: str, sandbox_id: str):
+        """Rebuild app containers after updating main."""
+        payload = self._current_payload
+        workspace_slug = payload["workspace_slug"]
+        workspace_id = payload["workspace_id"]
+        compose_file = Path(f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml")
+        legacy_compose = Path(f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/app/docker-compose.yml")
+
+        if compose_file.exists():
+            await self._workspace_restart_rebuild_app(workspace_slug, workspace_id)
+            return
+        if legacy_compose.exists():
+            await self._workspace_start_rebuild_app(workspace_slug, workspace_id)
+            return
+
+        raise RuntimeError(f"No app compose file found for workspace {workspace_slug}")
+
     async def _sandbox_restart_pull_code(self, full_slug: str, sandbox_id: str):
         """Pull latest code from the sandbox branch"""
         workspace_slug = self._current_payload.get("workspace_slug", full_slug.rsplit("-", 1)[0])
@@ -3464,12 +3659,12 @@ This board helps you explore and develop ideas from concept to implementation-re
     # =========================================================================
 
     async def process_agent_task(self, task: dict):
-        """Process an AI agent task using Claude Code subprocess.
+        """Process an AI agent task using an agent CLI subprocess.
 
         This method:
         1. Prepares the sandbox context (git branch, working directory)
         2. Builds the agent prompt from card data and agent config
-        3. Spawns Claude Code subprocess with tool_profile and timeout
+        3. Spawns agent CLI subprocess with tool_profile and timeout
         4. Streams progress to card comments
         5. Updates card on completion
         """
@@ -3481,6 +3676,8 @@ This board helps you explore and develop ideas from concept to implementation-re
         column_name = payload["column_name"]
         agent_config = payload.get("agent_config", {})
         agent_name = agent_config.get("agent_name", "developer")
+        llm_provider = self._resolve_llm_provider(agent_config)
+        payload["llm_provider"] = llm_provider
         sandbox_id = payload["sandbox_id"]
         workspace_slug = payload["workspace_slug"]
         git_branch = payload["git_branch"]
@@ -3502,7 +3699,7 @@ This board helps you explore and develop ideas from concept to implementation-re
         steps = [
             ("Preparing sandbox context", self._agent_prepare_context),
             ("Checking sandbox health", self._agent_check_sandbox_health),
-            ("Resolving Claude session", self._agent_resolve_session),
+            ("Resolving agent session", self._agent_resolve_session),
             ("Preparing QA context", self._agent_prepare_qa_context),
             ("Running AI agent", self._agent_run_claude),
             ("Processing results", self._agent_process_results),
@@ -3832,9 +4029,28 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         logger.info(f"[{card_id}] Sandbox health check passed for {full_slug}")
 
+    def _resolve_llm_provider(self, agent_config: dict) -> str:
+        """Resolve the LLM provider for an agent, defaulting to Claude CLI."""
+        provider = (agent_config or {}).get("llm_provider") or os.getenv("LLM_PROVIDER", "")
+        provider = provider.strip().lower()
+        if not provider:
+            return "claude-cli"
+        if provider in {"claude", "claude-cli", "claude-cli-ssh"}:
+            return "claude-cli"
+        if provider in {"codex", "codex-cli", "codex-cli-ssh"}:
+            return "codex-cli"
+        logger.warning(f"Unsupported LLM provider '{provider}', falling back to Claude CLI")
+        return "claude-cli"
+
     async def _agent_resolve_session(self, card_id: str, sandbox_id: str, ctx: dict):
-        """Ensure a persistent Claude session ID exists for this card."""
+        """Ensure a persistent session ID exists when supported by the agent CLI."""
         payload = ctx["payload"]
+        llm_provider = payload.get("llm_provider") or self._resolve_llm_provider(
+            payload.get("agent_config", {})
+        )
+        if llm_provider != "claude-cli":
+            logger.info(f"[{card_id}] Skipping session resolution for provider {llm_provider}")
+            return
         session_id = payload.get("claude_session_id")
         kanban_api_url = payload.get("kanban_api_url")
 
@@ -3875,68 +4091,48 @@ This board helps you explore and develop ideas from concept to implementation-re
             return False
 
     async def _agent_prepare_qa_context(self, card_id: str, sandbox_id: str, ctx: dict):
-        """Prepare QA runtime context for sandbox validation."""
+        """Prepare QA runtime context for sandbox validation.
+
+        Fetches test credentials from Key Vault and passes them to the QA agent.
+        The agent will authenticate via Playwright browser automation.
+        """
         payload = ctx["payload"]
         agent_name = payload.get("agent_config", {}).get("agent_name", "")
         if agent_name != "qa":
             return
 
-        qa_auth_error = None
         sandbox_url = payload.get("sandbox_url")
         sandbox_api_url = payload.get("sandbox_api_url")
 
         if not sandbox_url or not sandbox_api_url:
-            qa_auth_error = "Sandbox URL not available"
+            raise RuntimeError("Sandbox URL not available for QA testing")
 
+        # Fetch test credentials from Key Vault
         test_user_email = keyvault_service.get_secret("test-user-email")
         test_user_password = keyvault_service.get_secret("test-user-password")
+
         if not test_user_email or not test_user_password:
-            qa_auth_error = "Missing test user credentials from Key Vault"
-
-        portal_base = f"https://{DOMAIN}"
-        if PORT != "443":
-            portal_base = f"https://{DOMAIN}:{PORT}"
-        portal_api_url = f"{portal_base}/api"
-
-        qa_access_token = None
-        if not qa_auth_error:
-            try:
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    resp = await client.post(
-                        f"{portal_api_url}/auth/test-login",
-                        params={"email": test_user_email, "password": test_user_password},
-                    )
-                if resp.status_code == 200:
-                    qa_access_token = resp.json().get("access_token")
-                    if not qa_access_token:
-                        qa_auth_error = "Test login response missing access token"
-                else:
-                    qa_auth_error = f"Test login failed (status {resp.status_code})"
-            except Exception as e:
-                qa_auth_error = f"Test login error: {e}"
-
-        if qa_auth_error:
-            logger.error(f"[{card_id}] QA auth failed: {qa_auth_error}")
-            # QA agent cannot proceed without authentication - fail the task
             raise RuntimeError(
-                f"QA agent cannot authenticate to test the sandbox. "
-                f"Error: {qa_auth_error}. "
-                f"Please ensure the test user credentials in Key Vault (test-user-email, test-user-password) "
-                f"are valid and the user exists in the Entra ID tenant (not as a guest). "
-                f"The test user must be created directly in Entra ID for ROPC authentication to work."
+                "Missing test user credentials from Key Vault. "
+                "Please ensure 'test-user-email' and 'test-user-password' secrets are configured."
             )
 
-        payload["qa_access_token"] = qa_access_token
-        payload["qa_auth_error"] = qa_auth_error
+        logger.info(f"[{card_id}] QA credentials loaded for browser authentication")
+
+        # Store credentials for inclusion in the prompt (QA agent authenticates via Playwright)
+        payload["qa_test_email"] = test_user_email
+        payload["qa_test_password"] = test_user_password
 
     async def _agent_run_claude(self, card_id: str, sandbox_id: str, ctx: dict):
-        """Run Claude Code subprocess for the agent task."""
+        """Run agent CLI subprocess for the agent task."""
         payload = ctx["payload"]
         card_title = payload["card_title"]
         card_description = payload["card_description"]
         column_name = payload["column_name"]
         agent_config = payload.get("agent_config", {})
         agent_name = agent_config.get("agent_name", "developer")
+        llm_provider = payload.get("llm_provider") or self._resolve_llm_provider(agent_config)
+        llm_model = agent_config.get("llm_model")
         target_project_path = payload["target_project_path"]
         sandbox_slug = payload.get("sandbox_slug", "")
         workspace_slug = payload["workspace_slug"]
@@ -3954,8 +4150,16 @@ This board helps you explore and develop ideas from concept to implementation-re
         if agent_name == "scrum_master" and board_id:
             board_state = await self._fetch_board_state_for_agent(workspace_slug, board_id)
 
-        # Build the prompt for Claude Code using persona from agent config
+        # Build the prompt for agent CLI using persona from agent config
         # Include sandbox info so agents can link created cards to the same sandbox
+        # For QA agent, include test credentials from Key Vault
+        qa_credentials = None
+        if agent_name == "qa":
+            qa_credentials = {
+                "email": payload.get("qa_test_email", ""),
+                "password": payload.get("qa_test_password", ""),
+            }
+
         prompt = self._build_agent_prompt(
             card_title=card_title,
             card_description=card_description,
@@ -3966,15 +4170,16 @@ This board helps you explore and develop ideas from concept to implementation-re
             sandbox_url=sandbox_url,
             sandbox_api_url=sandbox_api_url,
             board_state=board_state,
+            qa_credentials=qa_credentials,
         )
 
         env = None
         if agent_name == "qa":
+            # Pass sandbox URLs as env vars for QA agent
+            # Credentials are passed in the prompt for browser authentication via Playwright
             env = {
                 "QA_SANDBOX_URL": sandbox_url,
                 "QA_API_URL": sandbox_api_url,
-                "QA_ACCESS_TOKEN": payload.get("qa_access_token"),
-                "QA_AUTH_ERROR": payload.get("qa_auth_error"),
             }
 
         # Progress callback for streaming updates
@@ -3982,19 +4187,32 @@ This board helps you explore and develop ideas from concept to implementation-re
             # Could stream to card comments here
             logger.debug(f"Agent progress ({percentage}%): {message[:100]}")
 
-        # Run Claude Code with config from kanban-team
-        ctx["result"] = await claude_runner.run(
-            prompt=prompt,
-            working_dir=target_project_path,
-            agent_type=agent_name,  # Still used for tool fallback
-            tool_profile=tool_profile,
-            timeout=timeout,
-            session_id=payload.get("claude_session_id"),
-            env=env,
-        )
+        if llm_provider == "codex-cli":
+            codex_env = dict(env or {})
+            if OPENAI_API_KEY:
+                codex_env.setdefault("OPENAI_API_KEY", OPENAI_API_KEY)
+            ctx["result"] = await codex_runner.run(
+                prompt=prompt,
+                working_dir=target_project_path,
+                agent_type=agent_name,
+                tool_profile=tool_profile,
+                timeout=timeout,
+                model=llm_model,
+                env=codex_env or None,
+            )
+        else:
+            ctx["result"] = await claude_runner.run(
+                prompt=prompt,
+                working_dir=target_project_path,
+                agent_type=agent_name,  # Still used for tool fallback
+                tool_profile=tool_profile,
+                timeout=timeout,
+                session_id=payload.get("claude_session_id"),
+                env=env,
+            )
 
         if not ctx["result"].success:
-            logger.error(f"Claude Code failed: {ctx['result'].error}")
+            logger.error(f"Agent CLI failed: {ctx['result'].error}")
 
     async def _agent_process_results(self, card_id: str, sandbox_id: str, ctx: dict):
         """Process results from Claude Code execution."""
@@ -4393,8 +4611,9 @@ This board helps you explore and develop ideas from concept to implementation-re
         sandbox_url: str = "",
         sandbox_api_url: str = "",
         board_state: str = None,
+        qa_credentials: dict = None,
     ) -> str:
-        """Build the prompt for Claude Code using persona from kanban-team.
+        """Build the prompt for the agent CLI using persona from kanban-team.
 
         Args:
             card_title: The card title
@@ -4406,6 +4625,7 @@ This board helps you explore and develop ideas from concept to implementation-re
             sandbox_url: Public sandbox URL for runtime validation
             sandbox_api_url: Public sandbox API base URL
             board_state: Current kanban board state (for scrum_master)
+            qa_credentials: Test credentials for QA agent (email, password)
         """
         # Use persona from config, or a generic fallback
         if not persona:
@@ -4431,13 +4651,23 @@ IMPORTANT: When creating project plans or cards, use this sandbox_id to link the
 {board_state}
 """
 
+        # Add QA test credentials section for QA agent
+        qa_credentials_section = ""
+        if qa_credentials:
+            qa_credentials_section = f"""
+## Test Credentials:
+Use these credentials to test the sandbox application:
+- Email: {qa_credentials.get("email", "")}
+- Password: {qa_credentials.get("password", "")}
+"""
+
         prompt = f"""# Task: {card_title}
 
 ## Column: {column_name}
 
 ## Description:
 {card_description}
-{context_section}{board_state_section}
+{context_section}{board_state_section}{qa_credentials_section}
 ## Agent Instructions:
 {persona}
 

@@ -178,10 +178,18 @@ class EntraAuthService:
 
         user_info = self.decode_id_token(id_token)
 
+        emails_claim = user_info.get("emails")
+        email_from_claims = ""
+        if isinstance(emails_claim, list) and emails_claim:
+            email_from_claims = emails_claim[0]
+        elif isinstance(emails_claim, str):
+            email_from_claims = emails_claim
+
         # Try multiple fields for email
         email = (
-            user_info.get("preferred_username") or
             user_info.get("email") or
+            email_from_claims or
+            user_info.get("preferred_username") or
             user_info.get("upn") or
             username
         )
@@ -222,10 +230,18 @@ class EntraAuthService:
             except Exception as e:
                 logger.warning(f"Failed to get Graph info: {e}")
 
+        emails_claim = user_info.get("emails")
+        email_from_claims = ""
+        if isinstance(emails_claim, list) and emails_claim:
+            email_from_claims = emails_claim[0]
+        elif isinstance(emails_claim, str):
+            email_from_claims = emails_claim
+
         # Try multiple fields for email (personal vs work accounts differ)
         email = (
-            user_info.get("preferred_username") or
             user_info.get("email") or
+            email_from_claims or
+            user_info.get("preferred_username") or
             user_info.get("upn") or
             user_info.get("unique_name") or
             (user_info.get("graph", {}).get("mail")) or
