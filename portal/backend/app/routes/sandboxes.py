@@ -416,6 +416,64 @@ async def delete_sandbox(
     }
 
 
+@router.post("/{sandbox_slug}/restart")
+async def restart_sandbox(
+    workspace_slug: str,
+    sandbox_slug: str,
+    auth: AuthContext = Depends(require_scope("sandboxes:write"))
+):
+    """
+    Restart sandbox containers.
+
+    This starts an async process that will:
+    1. Pull latest code from the sandbox branch
+    2. Stop existing containers
+    3. Rebuild and start containers with the new code
+    4. Run health check
+
+    Use this when:
+    - Sandbox containers are stopped/crashed
+    - You need to apply code changes to the sandbox
+    - The sandbox is returning 404 errors
+
+    Access: Admin or owner only
+
+    Authentication: JWT or Portal API token
+    Required scope: sandboxes:write
+    """
+    # Get workspace and verify access (admin+ required)
+    workspace, _ = get_workspace_with_role(
+        workspace_slug, auth.user["id"], require_role="admin"
+    )
+
+    # Get sandbox
+    sandbox = db_service.get_sandbox_by_workspace_and_slug(workspace["id"], sandbox_slug)
+    if not sandbox:
+        raise HTTPException(status_code=404, detail="Sandbox not found")
+
+    # Check sandbox is in a restartable state
+    if sandbox["status"] in ["provisioning", "deleting"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot restart sandbox with status '{sandbox['status']}'"
+        )
+
+    # Create restart task
+    task_id = await task_service.create_sandbox_restart_task(
+        sandbox_id=sandbox["id"],
+        full_slug=sandbox["full_slug"],
+        workspace_slug=workspace["slug"],
+        user_id=auth.user["id"],
+    )
+
+    logger.info(f"Sandbox restart started: {sandbox['full_slug']} by {auth.user['id']}")
+
+    return {
+        "message": "Sandbox restart started",
+        "task_id": task_id
+    }
+
+
 @router.post("/{sandbox_slug}/agent/regenerate-secret", response_model=SandboxAgentRestartResponse)
 async def regenerate_agent_secret(
     workspace_slug: str,

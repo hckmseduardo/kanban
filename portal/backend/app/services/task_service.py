@@ -352,6 +352,33 @@ class TaskService:
             priority="high"
         )
 
+    async def create_sandbox_restart_task(
+        self,
+        sandbox_id: str,
+        full_slug: str,
+        workspace_slug: str,
+        user_id: str,
+    ) -> str:
+        """Create task to restart sandbox containers.
+
+        This will:
+        1. Pull latest code from the sandbox branch
+        2. Stop existing containers
+        3. Rebuild and start containers
+        4. Run health check
+        """
+        return await redis_service.enqueue_task(
+            queue_name=self.QUEUE_PROVISIONING,
+            task_type="sandbox.restart",
+            payload={
+                "sandbox_id": sandbox_id,
+                "full_slug": full_slug,
+                "workspace_slug": workspace_slug,
+            },
+            user_id=user_id,
+            priority="high"
+        )
+
     async def create_sandbox_agent_restart_task(
         self,
         sandbox_id: str,
@@ -385,12 +412,12 @@ class TaskService:
         agent_config: dict,
         sandbox_id: str,
         sandbox_slug: str,
-        claude_session_id: str = None,
         workspace_slug: str,
         git_branch: str,
         kanban_api_url: str,
         target_project_path: str,
         user_id: str,
+        claude_session_id: str = None,
         board_id: str = None,
         labels: list = None,
         priority: str = "normal",

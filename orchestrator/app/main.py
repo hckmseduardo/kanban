@@ -103,12 +103,19 @@ class Orchestrator:
         "queue:agents:normal",
     ]
 
+    # Maximum number of concurrent agent tasks
+    MAX_AGENT_WORKERS = int(os.getenv("MAX_AGENT_WORKERS", "5"))
+
     def __init__(self):
         self.running = False
         self.redis: redis.Redis = None
         self.docker_available = False
         self.jinja = Environment(loader=FileSystemLoader(str(TEMPLATE_DIR)))
         self.app_factory_jinja = Environment(loader=FileSystemLoader(str(APP_FACTORY_TEMPLATE_DIR)))
+
+        # Track active agent tasks for graceful shutdown and restart recovery
+        self.active_agent_tasks: dict[str, asyncio.Task] = {}  # task_id -> asyncio.Task
+        self.agent_semaphore = asyncio.Semaphore(self.MAX_AGENT_WORKERS)
 
         # Check if Docker CLI is available
         if docker_available():
@@ -151,7 +158,11 @@ class Orchestrator:
         asyncio.create_task(self.process_health_checks())
         logger.info("Health check processor started")
 
+        # Recover any orphaned agent tasks from previous run
+        await self.recover_orphaned_agent_tasks()
+
         logger.info(f"Orchestrator listening on queues: {self.QUEUES}")
+        logger.info(f"Max concurrent agent workers: {self.MAX_AGENT_WORKERS}")
 
         while self.running:
             try:
@@ -160,11 +171,26 @@ class Orchestrator:
                 if result:
                     queue_name, task_id = result
                     logger.info(f"Processing task {task_id} from {queue_name}")
-                    await self.process_task(task_id)
+
+                    # Check if this is an agent task (should run in parallel)
+                    if "agents" in queue_name:
+                        # Spawn agent task in background with semaphore limit
+                        asyncio.create_task(self._run_agent_task_with_semaphore(task_id))
+                    else:
+                        # Provisioning tasks run sequentially (they're quick)
+                        await self.process_task(task_id)
+
+                # Clean up completed agent tasks
+                self._cleanup_completed_agent_tasks()
 
             except Exception as e:
                 logger.error(f"Orchestrator error: {e}", exc_info=True)
                 await asyncio.sleep(1)
+
+        # Wait for active agent tasks to complete on shutdown
+        if self.active_agent_tasks:
+            logger.info(f"Waiting for {len(self.active_agent_tasks)} active agent tasks to complete...")
+            await asyncio.gather(*self.active_agent_tasks.values(), return_exceptions=True)
 
         logger.info("Orchestrator stopped")
 
@@ -172,6 +198,32 @@ class Orchestrator:
         """Stop the orchestrator"""
         logger.info("Stopping orchestrator...")
         self.running = False
+
+    async def _run_agent_task_with_semaphore(self, task_id: str):
+        """Run an agent task with semaphore-limited concurrency."""
+        async with self.agent_semaphore:
+            # Track the task
+            current_task = asyncio.current_task()
+            self.active_agent_tasks[task_id] = current_task
+            logger.info(f"Starting agent task {task_id} (active: {len(self.active_agent_tasks)}/{self.MAX_AGENT_WORKERS})")
+
+            try:
+                await self.process_task(task_id)
+            except Exception as e:
+                logger.error(f"Agent task {task_id} failed: {e}")
+            finally:
+                # Remove from active tasks
+                self.active_agent_tasks.pop(task_id, None)
+                logger.info(f"Agent task {task_id} finished (active: {len(self.active_agent_tasks)}/{self.MAX_AGENT_WORKERS})")
+
+    def _cleanup_completed_agent_tasks(self):
+        """Remove completed tasks from the active tasks dict."""
+        completed = [
+            task_id for task_id, task in self.active_agent_tasks.items()
+            if task.done()
+        ]
+        for task_id in completed:
+            self.active_agent_tasks.pop(task_id, None)
 
     async def start_active_workspaces(self):
         """Start containers for all active workspaces from database on orchestrator startup"""
@@ -293,6 +345,148 @@ class Orchestrator:
 
         if result.returncode != 0:
             logger.warning(f"[{workspace_slug}] App containers failed to start: {result.stderr}")
+
+    async def recover_orphaned_agent_tasks(self):
+        """
+        Recover orphaned agent tasks from previous orchestrator run.
+
+        When the orchestrator restarts while agents are running, those cards
+        will be stuck with agent_status.status = "processing". This method
+        finds those cards and marks them as failed so they can be retried.
+        """
+        logger.info("Checking for orphaned agent tasks...")
+
+        # Read portal database to get active workspaces
+        portal_db_path = Path("/app/data/portal/portal.json")
+        if not portal_db_path.exists():
+            logger.warning("Portal database not found, skipping orphan recovery")
+            return
+
+        try:
+            with open(portal_db_path, 'r') as f:
+                portal_data = json.load(f)
+
+            workspaces = portal_data.get("workspaces", {})
+            if not workspaces:
+                logger.info("No workspaces found, skipping orphan recovery")
+                return
+
+            recovered = 0
+            cross_domain_secret = os.environ.get("CROSS_DOMAIN_SECRET", "")
+
+            for ws_key, ws in workspaces.items():
+                workspace_slug = ws.get("slug")
+                if not workspace_slug:
+                    continue
+
+                # Check if workspace containers are running
+                project_name = f"{workspace_slug}-kanban"
+                result = subprocess.run(
+                    ["docker", "compose", "-p", project_name, "ps", "-q"],
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+                if not result.stdout.strip():
+                    # Workspace not running, skip
+                    continue
+
+                # Query kanban API for cards with processing status
+                kanban_api_url = f"http://{workspace_slug}-kanban-api-1:8000"
+                try:
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        # Get all boards to find cards
+                        boards_resp = await client.get(
+                            f"{kanban_api_url}/boards",
+                            headers={"X-Service-Secret": cross_domain_secret}
+                        )
+                        if boards_resp.status_code != 200:
+                            continue
+
+                        boards = boards_resp.json()
+                        for board in boards:
+                            board_id = board.get("id")
+                            board_resp = await client.get(
+                                f"{kanban_api_url}/boards/{board_id}",
+                                headers={"X-Service-Secret": cross_domain_secret}
+                            )
+                            if board_resp.status_code != 200:
+                                continue
+
+                            board_data = board_resp.json()
+                            dev_column_id = None
+
+                            # Find Development column
+                            for col in board_data.get("columns", []):
+                                if col.get("name") == "Development":
+                                    dev_column_id = col.get("id")
+                                    break
+
+                            # Check all cards in all columns
+                            for col in board_data.get("columns", []):
+                                for card in col.get("cards", []):
+                                    agent_status = card.get("agent_status")
+                                    if agent_status and agent_status.get("status") == "processing":
+                                        card_id = card.get("id")
+                                        agent_name = agent_status.get("agent_name", "unknown")
+                                        started_at = agent_status.get("started_at", "unknown")
+
+                                        logger.warning(
+                                            f"[{workspace_slug}] Found orphaned agent task: "
+                                            f"card={card_id}, agent={agent_name}, started_at={started_at}"
+                                        )
+
+                                        # Mark as failed
+                                        error_message = (
+                                            f"Agent task was interrupted due to orchestrator restart. "
+                                            f"The {agent_name} agent was running when the orchestrator "
+                                            f"restarted at {datetime.utcnow().isoformat()}Z. "
+                                            f"Please retry the task."
+                                        )
+
+                                        # Add comment explaining the failure
+                                        comment_text = (
+                                            f"## Agent: {agent_name.title()}\n\n"
+                                            f"**Status:** Failed (Interrupted)\n"
+                                            f"**Error:** {error_message}\n\n"
+                                            f"The orchestrator restarted while this agent was running. "
+                                            f"Please move the card back to trigger the agent again."
+                                        )
+                                        await client.post(
+                                            f"{kanban_api_url}/cards/{card_id}/comments",
+                                            headers={"X-Service-Secret": cross_domain_secret},
+                                            json={"text": comment_text, "author_name": "Orchestrator"}
+                                        )
+
+                                        # Move to Development column if found
+                                        if dev_column_id:
+                                            await client.post(
+                                                f"{kanban_api_url}/cards/{card_id}/move",
+                                                headers={"X-Service-Secret": cross_domain_secret},
+                                                params={"column_id": dev_column_id, "position": 0}
+                                            )
+                                            logger.info(f"[{card_id}] Moved to Development column")
+
+                                        # Clear agent_status
+                                        await client.delete(
+                                            f"{kanban_api_url}/cards/{card_id}/agent-status",
+                                            headers={"X-Service-Secret": cross_domain_secret}
+                                        )
+                                        logger.info(f"[{card_id}] Cleared agent_status")
+
+                                        recovered += 1
+
+                except Exception as e:
+                    logger.warning(f"[{workspace_slug}] Failed to check for orphaned tasks: {e}")
+                    continue
+
+            if recovered > 0:
+                logger.info(f"Recovered {recovered} orphaned agent task(s)")
+            else:
+                logger.info("No orphaned agent tasks found")
+
+        except Exception as e:
+            logger.error(f"Failed to recover orphaned agent tasks: {e}")
 
     async def process_task(self, task_id: str):
         """Process a provisioning task"""
@@ -3299,8 +3493,15 @@ This board helps you explore and develop ideas from concept to implementation-re
             f"sandbox={sandbox_id}"
         )
 
+        # Create a context dict for this task (NOT instance variables to avoid race conditions with parallel tasks)
+        ctx = {
+            "payload": payload,
+            "result": None,
+        }
+
         steps = [
             ("Preparing sandbox context", self._agent_prepare_context),
+            ("Checking sandbox health", self._agent_check_sandbox_health),
             ("Resolving Claude session", self._agent_resolve_session),
             ("Preparing QA context", self._agent_prepare_qa_context),
             ("Running AI agent", self._agent_run_claude),
@@ -3308,34 +3509,115 @@ This board helps you explore and develop ideas from concept to implementation-re
             ("Updating card", self._agent_update_card),
         ]
 
-        # Store payload for step functions
-        self._current_payload = payload
-        self._agent_result = None
+        # Update card's agent_status to "processing"
+        kanban_api_url = f"http://{workspace_slug}-kanban-api-1:8000"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.patch(
+                    f"{kanban_api_url}/cards/{card_id}",
+                    headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")},
+                    json={
+                        "agent_status": {
+                            "status": "processing",
+                            "agent_name": agent_name,
+                            "started_at": datetime.utcnow().isoformat() + "Z"
+                        }
+                    }
+                )
+                logger.info(f"[{card_id}] Updated agent_status to 'processing'")
+        except Exception as e:
+            logger.warning(f"[{card_id}] Failed to update agent_status to processing: {e}")
 
         try:
             for i, (step_name, step_func) in enumerate(steps, 1):
                 await self.update_progress(task_id, i, len(steps), step_name)
-                await step_func(card_id, sandbox_id)
+                await step_func(card_id, sandbox_id, ctx)
                 logger.info(f"[{card_id}] {step_name} - completed")
 
+            result = ctx["result"]
             await self.complete_task(task_id, {
                 "action": "process_card",
                 "card_id": card_id,
                 "agent_name": agent_name,
-                "success": self._agent_result.success if self._agent_result else False,
-                "files_modified": self._agent_result.files_modified if self._agent_result else [],
+                "success": result.success if result else False,
+                "files_modified": result.files_modified if result else [],
             })
 
             logger.info(f"Agent task completed: card={card_id}")
 
         except Exception as e:
             logger.error(f"Agent task failed: {e}")
-            await self.fail_task(task_id, str(e))
+            error_message = str(e)
+
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    # Update card's agent_status to "failed"
+                    await client.patch(
+                        f"{kanban_api_url}/cards/{card_id}",
+                        headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")},
+                        json={
+                            "agent_status": {
+                                "status": "failed",
+                                "agent_name": agent_name,
+                                "error": error_message[:500],
+                                "completed_at": datetime.utcnow().isoformat() + "Z"
+                            }
+                        }
+                    )
+                    logger.info(f"[{card_id}] Updated agent_status to 'failed'")
+
+                    # Add a comment explaining the error
+                    agent_config = payload.get("agent_config", {})
+                    display_name = agent_config.get("display_name", agent_name)
+                    comment_text = (
+                        f"## Agent: {display_name}\n\n"
+                        f"**Status:** Failed\n"
+                        f"**Error:** {error_message}\n\n"
+                        f"Please review and fix the issue before retrying."
+                    )
+                    await client.post(
+                        f"{kanban_api_url}/cards/{card_id}/comments",
+                        headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")},
+                        json={"text": comment_text, "author_name": display_name}
+                    )
+                    logger.info(f"[{card_id}] Added error comment to card")
+
+                    # Move card to Development column (column_failure)
+                    column_failure = agent_config.get("column_failure", "Development")
+                    board_id = payload.get("board_id")
+                    if board_id:
+                        board_resp = await client.get(
+                            f"{kanban_api_url}/boards/{board_id}",
+                            headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")}
+                        )
+                        if board_resp.status_code == 200:
+                            board_data = board_resp.json()
+                            for col in board_data.get("columns", []):
+                                if col.get("name") == column_failure:
+                                    move_resp = await client.post(
+                                        f"{kanban_api_url}/cards/{card_id}/move",
+                                        headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")},
+                                        params={"column_id": col["id"], "position": 0}
+                                    )
+                                    if move_resp.status_code == 200:
+                                        logger.info(f"Moved card to column: {column_failure}")
+                                    break
+
+                    # Clear agent_status
+                    await client.delete(
+                        f"{kanban_api_url}/cards/{card_id}/agent-status",
+                        headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")}
+                    )
+                    logger.info(f"[{card_id}] Cleared agent_status")
+
+            except Exception as status_err:
+                logger.warning(f"[{card_id}] Failed to update card after failure: {status_err}")
+            await self.fail_task(task_id, error_message)
             raise
 
-    async def _agent_prepare_context(self, card_id: str, sandbox_id: str):
+    async def _agent_prepare_context(self, card_id: str, sandbox_id: str, ctx: dict):
         """Prepare the sandbox context for agent execution."""
-        payload = self._current_payload
+        payload = ctx["payload"]
         workspace_slug = payload["workspace_slug"]
         sandbox_slug = payload.get("sandbox_slug")
 
@@ -3432,9 +3714,127 @@ This board helps you explore and develop ideas from concept to implementation-re
         else:
             logger.info(f"Pulled latest changes for {git_branch}")
 
-    async def _agent_resolve_session(self, card_id: str, sandbox_id: str):
+    async def _agent_check_sandbox_health(self, card_id: str, sandbox_id: str, ctx: dict):
+        """Check if sandbox containers are running before executing agent.
+
+        This prevents the release agent from completing successfully when
+        the sandbox is actually down (returning 404).
+        """
+        payload = ctx["payload"]
+        agent_config = payload.get("agent_config", {})
+        agent_name = agent_config.get("agent_name", "")
+
+        # Only require sandbox health check for release agent
+        if agent_name != "release":
+            logger.debug(f"[{card_id}] Skipping sandbox health check for agent: {agent_name}")
+            return
+
+        workspace_slug = payload["workspace_slug"]
+        sandbox_slug = payload.get("sandbox_slug")
+        if not sandbox_slug:
+            raise RuntimeError("Cannot check sandbox health: sandbox_slug not set")
+
+        full_slug = f"{workspace_slug}-{sandbox_slug}"
+        sandbox_url = payload.get("sandbox_url")
+        sandbox_api_url = payload.get("sandbox_api_url")
+
+        logger.info(f"[{card_id}] Checking sandbox health for {full_slug}")
+
+        # Check 1: Verify sandbox containers exist and are running
+        if self.docker_available:
+            api_container = f"{full_slug}-api"
+            try:
+                result = subprocess.run(
+                    ["docker", "inspect", api_container, "--format", "{{.State.Status}}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"Sandbox container '{api_container}' not found. "
+                        f"The sandbox may need to be provisioned or restarted first."
+                    )
+
+                status = result.stdout.strip()
+                if status != "running":
+                    raise RuntimeError(
+                        f"Sandbox container '{api_container}' is not running (status: {status}). "
+                        f"Please restart the sandbox before deploying."
+                    )
+
+                # Check restart count for crash loops
+                result = subprocess.run(
+                    ["docker", "inspect", api_container, "--format", "{{.RestartCount}}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if result.returncode == 0:
+                    restart_count = int(result.stdout.strip() or "0")
+                    if restart_count > 5:
+                        raise RuntimeError(
+                            f"Sandbox container '{api_container}' is in a crash loop "
+                            f"({restart_count} restarts). Please check logs and fix issues."
+                        )
+
+                logger.info(f"[{card_id}] Container {api_container} is running")
+
+            except subprocess.TimeoutExpired:
+                logger.warning(f"[{card_id}] Docker inspect timed out")
+            except RuntimeError:
+                raise
+            except Exception as e:
+                logger.warning(f"[{card_id}] Could not check container status: {e}")
+
+        # Check 2: Verify sandbox API is responding (not 404)
+        if sandbox_api_url:
+            try:
+                async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+                    # Try the health endpoint
+                    health_url = f"{sandbox_api_url}/health"
+                    logger.debug(f"[{card_id}] Checking {health_url}")
+
+                    response = await client.get(health_url)
+
+                    if response.status_code == 404:
+                        raise RuntimeError(
+                            f"Sandbox API returned 404 at {health_url}. "
+                            f"The sandbox may not be properly deployed or Traefik routing is misconfigured."
+                        )
+                    elif response.status_code >= 500:
+                        raise RuntimeError(
+                            f"Sandbox API returned {response.status_code} at {health_url}. "
+                            f"The sandbox is experiencing server errors."
+                        )
+                    elif response.status_code != 200:
+                        logger.warning(
+                            f"[{card_id}] Sandbox health check returned {response.status_code} "
+                            f"(expected 200, but continuing)"
+                        )
+                    else:
+                        logger.info(f"[{card_id}] Sandbox API health check passed")
+
+            except httpx.ConnectError as e:
+                raise RuntimeError(
+                    f"Cannot connect to sandbox API at {sandbox_api_url}. "
+                    f"The sandbox containers may not be running. Error: {e}"
+                )
+            except httpx.TimeoutException:
+                raise RuntimeError(
+                    f"Timeout connecting to sandbox API at {sandbox_api_url}. "
+                    f"The sandbox may be overloaded or not responding."
+                )
+            except RuntimeError:
+                raise
+            except Exception as e:
+                logger.warning(f"[{card_id}] Sandbox API check failed (non-fatal): {e}")
+
+        logger.info(f"[{card_id}] Sandbox health check passed for {full_slug}")
+
+    async def _agent_resolve_session(self, card_id: str, sandbox_id: str, ctx: dict):
         """Ensure a persistent Claude session ID exists for this card."""
-        payload = self._current_payload
+        payload = ctx["payload"]
         session_id = payload.get("claude_session_id")
         kanban_api_url = payload.get("kanban_api_url")
 
@@ -3474,9 +3874,9 @@ This board helps you explore and develop ideas from concept to implementation-re
         except (ValueError, TypeError):
             return False
 
-    async def _agent_prepare_qa_context(self, card_id: str, sandbox_id: str):
+    async def _agent_prepare_qa_context(self, card_id: str, sandbox_id: str, ctx: dict):
         """Prepare QA runtime context for sandbox validation."""
-        payload = self._current_payload
+        payload = ctx["payload"]
         agent_name = payload.get("agent_config", {}).get("agent_name", "")
         if agent_name != "qa":
             return
@@ -3516,14 +3916,22 @@ This board helps you explore and develop ideas from concept to implementation-re
                 qa_auth_error = f"Test login error: {e}"
 
         if qa_auth_error:
-            logger.warning(f"[{card_id}] QA auth unavailable: {qa_auth_error}")
+            logger.error(f"[{card_id}] QA auth failed: {qa_auth_error}")
+            # QA agent cannot proceed without authentication - fail the task
+            raise RuntimeError(
+                f"QA agent cannot authenticate to test the sandbox. "
+                f"Error: {qa_auth_error}. "
+                f"Please ensure the test user credentials in Key Vault (test-user-email, test-user-password) "
+                f"are valid and the user exists in the Entra ID tenant (not as a guest). "
+                f"The test user must be created directly in Entra ID for ROPC authentication to work."
+            )
 
         payload["qa_access_token"] = qa_access_token
         payload["qa_auth_error"] = qa_auth_error
 
-    async def _agent_run_claude(self, card_id: str, sandbox_id: str):
+    async def _agent_run_claude(self, card_id: str, sandbox_id: str, ctx: dict):
         """Run Claude Code subprocess for the agent task."""
-        payload = self._current_payload
+        payload = ctx["payload"]
         card_title = payload["card_title"]
         card_description = payload["card_description"]
         column_name = payload["column_name"]
@@ -3575,7 +3983,7 @@ This board helps you explore and develop ideas from concept to implementation-re
             logger.debug(f"Agent progress ({percentage}%): {message[:100]}")
 
         # Run Claude Code with config from kanban-team
-        self._agent_result = await claude_runner.run(
+        ctx["result"] = await claude_runner.run(
             prompt=prompt,
             working_dir=target_project_path,
             agent_type=agent_name,  # Still used for tool fallback
@@ -3585,16 +3993,16 @@ This board helps you explore and develop ideas from concept to implementation-re
             env=env,
         )
 
-        if not self._agent_result.success:
-            logger.error(f"Claude Code failed: {self._agent_result.error}")
+        if not ctx["result"].success:
+            logger.error(f"Claude Code failed: {ctx['result'].error}")
 
-    async def _agent_process_results(self, card_id: str, sandbox_id: str):
+    async def _agent_process_results(self, card_id: str, sandbox_id: str, ctx: dict):
         """Process results from Claude Code execution."""
-        if not self._agent_result:
+        if not ctx["result"]:
             return
 
-        result = self._agent_result
-        payload = self._current_payload
+        result = ctx["result"]
+        payload = ctx["payload"]
         target_project_path = payload["target_project_path"]
         git_branch = payload["git_branch"]
 
@@ -3729,13 +4137,13 @@ This board helps you explore and develop ideas from concept to implementation-re
                 result.error = f"Push error: {push_error}"
             result.success = False
 
-    async def _agent_update_card(self, card_id: str, sandbox_id: str):
+    async def _agent_update_card(self, card_id: str, sandbox_id: str, ctx: dict):
         """Update the kanban card with agent results."""
-        if not self._agent_result:
+        if not ctx["result"]:
             return
 
-        result = self._agent_result
-        payload = self._current_payload
+        result = ctx["result"]
+        payload = ctx["payload"]
         workspace_slug = payload["workspace_slug"]
         # Use internal Docker network URL for service-to-service calls
         kanban_api_url = f"http://{workspace_slug}-kanban-api-1:8000"
@@ -3862,14 +4270,14 @@ This board helps you explore and develop ideas from concept to implementation-re
 
                 # Special handling for project_manager agent: create epics and cards
                 if agent_name == "project_manager" and result.success:
-                    await self._handle_project_manager_output(card_id, sandbox_id)
+                    await self._handle_project_manager_output(card_id, sandbox_id, ctx)
 
                 # Get board_id for card movements (needed by scrum_master and column moves)
                 board_id = payload.get("board_id")
 
                 # Special handling for scrum_master agent: move next card from project plan
                 if agent_name == "scrum_master" and result.success and board_id:
-                    await self._handle_scrum_master_output(card_id, kanban_api_url, board_id)
+                    await self._handle_scrum_master_output(card_id, kanban_api_url, board_id, ctx)
 
                 # If successful and column_success is set, move the card
                 if result.success and column_success:
@@ -3910,6 +4318,18 @@ This board helps you explore and develop ideas from concept to implementation-re
                                     if move_resp.status_code == 200:
                                         logger.info(f"Moved card to column: {column_failure}")
                                     break
+
+                # Clear the agent_status now that processing is complete
+                # (we clear it rather than setting to completed/failed because
+                # the card description and comment already show the result)
+                clear_resp = await client.delete(
+                    f"{kanban_api_url}/cards/{card_id}/agent-status",
+                    headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")}
+                )
+                if clear_resp.status_code == 200:
+                    logger.info(f"[{card_id}] Cleared agent_status")
+                else:
+                    logger.warning(f"[{card_id}] Failed to clear agent_status: {clear_resp.status_code}")
 
         except Exception as e:
             logger.error(f"Error updating card via API: {e}")
@@ -4274,25 +4694,26 @@ Be concise but thorough. Focus on actionable improvements."""
         logger.warning(f"Full output was: {output[:2000]}")
         return None
 
-    async def _handle_project_manager_output(self, card_id: str, sandbox_id: str):
+    async def _handle_project_manager_output(self, card_id: str, sandbox_id: str, ctx: dict):
         """Handle project_manager agent output: create epics and cards on Feature Request board."""
         logger.info(f"[{card_id}] _handle_project_manager_output called")
 
-        if not self._agent_result:
+        if not ctx["result"]:
             logger.warning(f"[{card_id}] No agent result available")
             return
 
-        payload = self._current_payload
+        payload = ctx["payload"]
         workspace_slug = payload["workspace_slug"]
         board_id = payload.get("board_id")
         kanban_api_url = f"http://{workspace_slug}-kanban-api-1:8000"
         target_project_path = payload.get("target_project_path", "")
 
         # Try to parse from agent output first
+        result = ctx["result"]
         project_plan = None
-        if self._agent_result.output:
-            logger.info(f"[{card_id}] Agent output length: {len(self._agent_result.output)} chars")
-            project_plan = self._parse_project_plan_output(self._agent_result.output)
+        if result.output:
+            logger.info(f"[{card_id}] Agent output length: {len(result.output)} chars")
+            project_plan = self._parse_project_plan_output(result.output)
 
         # If parsing failed, check for PROJECT_PLAN.json file in repo
         if not project_plan and target_project_path:
@@ -4500,7 +4921,7 @@ Be concise but thorough. Focus on actionable improvements."""
         except Exception as e:
             logger.error(f"[{card_id}] Error handling project manager output: {e}")
 
-    async def _handle_scrum_master_output(self, card_id: str, kanban_api_url: str, board_id: str):
+    async def _handle_scrum_master_output(self, card_id: str, kanban_api_url: str, board_id: str, ctx: dict):
         """Handle scrum_master agent output: move next card to UI/UX Design column.
 
         The scrum_master agent outputs a JSON block specifying which card to move:
@@ -4513,12 +4934,12 @@ Be concise but thorough. Focus on actionable improvements."""
         """
         logger.info(f"[{card_id}] _handle_scrum_master_output called")
 
-        if not self._agent_result:
+        if not ctx["result"]:
             logger.warning(f"[{card_id}] No agent result available for scrum_master")
             return
 
         # Parse JSON from agent output
-        output = self._agent_result.output
+        output = ctx["result"].output
         action_data = self._parse_scrum_master_action(output)
 
         if not action_data:
