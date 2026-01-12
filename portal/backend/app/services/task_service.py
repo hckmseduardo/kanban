@@ -172,6 +172,7 @@ class TaskService:
         sandboxes: list = None,
         github_org: str = None,
         github_repo_name: str = None,
+        delete_github_repo: bool = False,
     ) -> str:
         """Create task to delete a workspace.
 
@@ -180,7 +181,8 @@ class TaskService:
         2. Delete the app (if present)
         3. Delete the Azure app registration (if present)
         4. Delete the kanban team
-        5. Clean up all resources
+        5. Delete GitHub repo (if delete_github_repo=True)
+        6. Clean up all resources
         """
         payload = {
             "action": "delete_workspace",
@@ -189,6 +191,7 @@ class TaskService:
             "sandboxes": sandboxes or [],
             "github_org": github_org,
             "github_repo_name": github_repo_name,
+            "delete_github_repo": delete_github_repo,
         }
         if azure_object_id:
             payload["azure_object_id"] = azure_object_id
@@ -263,6 +266,82 @@ class TaskService:
                 "workspace_id": workspace_id,
                 "workspace_slug": workspace_slug,
                 "kanban_only": kanban_only,
+            },
+            user_id=user_id,
+            priority="high"
+        )
+
+    async def create_workspace_link_app_task(
+        self,
+        workspace_id: str,
+        workspace_slug: str,
+        user_id: str,
+        app_template_id: str = None,
+        template_owner: str = None,
+        template_repo: str = None,
+        github_org: str = None,
+        github_repo_url: str = None,
+        github_repo_name: str = None,
+    ) -> str:
+        """Create task to link an app to an existing workspace.
+
+        This will:
+        1. If template mode: Create a GitHub repo from the template
+        2. If existing repo mode: Validate and use existing repo
+        3. Create Azure app registration
+        4. Clone repository locally
+        5. Create app database
+        6. Deploy Docker containers
+        7. Create foundation sandbox
+        """
+        return await redis_service.enqueue_task(
+            queue_name=self.QUEUE_PROVISIONING,
+            task_type="workspace.link_app",
+            payload={
+                "action": "link_app",
+                "workspace_id": workspace_id,
+                "workspace_slug": workspace_slug,
+                "app_template_id": app_template_id,
+                "template_owner": template_owner,
+                "template_repo": template_repo,
+                "github_org": github_org,
+                "github_repo_url": github_repo_url,
+                "github_repo_name": github_repo_name,
+            },
+            user_id=user_id,
+            priority="high"
+        )
+
+    async def create_workspace_unlink_app_task(
+        self,
+        workspace_id: str,
+        workspace_slug: str,
+        user_id: str,
+        azure_object_id: str = None,
+        github_org: str = None,
+        github_repo_name: str = None,
+        delete_github_repo: bool = False,
+    ) -> str:
+        """Create task to unlink an app from a workspace.
+
+        This will:
+        1. Delete all sandboxes associated with the app
+        2. Stop and remove app containers
+        3. Delete Azure app registration
+        4. Optionally delete GitHub repository
+        5. Clear app-related fields from workspace
+        """
+        return await redis_service.enqueue_task(
+            queue_name=self.QUEUE_PROVISIONING,
+            task_type="workspace.unlink_app",
+            payload={
+                "action": "unlink_app",
+                "workspace_id": workspace_id,
+                "workspace_slug": workspace_slug,
+                "azure_object_id": azure_object_id,
+                "github_org": github_org,
+                "github_repo_name": github_repo_name,
+                "delete_github_repo": delete_github_repo,
             },
             user_id=user_id,
             priority="high"
@@ -462,6 +541,7 @@ class TaskService:
         labels: list = None,
         priority: str = "normal",
         github_repo_url: str = None,
+        card_number: str = None,
     ) -> str:
         """Create task for on-demand AI agent to process a card.
 
@@ -495,6 +575,7 @@ class TaskService:
             task_type="agent.process_card",
             payload={
                 "card_id": card_id,
+                "card_number": card_number,
                 "card_title": card_title,
                 "card_description": card_description,
                 "column_name": column_name,

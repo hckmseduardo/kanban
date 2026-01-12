@@ -185,8 +185,48 @@ export default function CreateWorkspacePage() {
               )}
             </button>
 
-            {/* App Templates */}
-            {(templates || []).filter(t => t.active).map((template) => (
+            {/* Blank Repository Option */}
+            <button
+              type="button"
+              onClick={() => setSelectedTemplate('blank')}
+              className={`relative rounded-xl border-2 p-4 flex flex-col transition-all ${
+                selectedTemplate === 'blank'
+                  ? 'border-primary-500 bg-primary-50 dark:bg-primary-900/20'
+                  : 'border-gray-200 dark:border-dark-600 hover:border-gray-300 dark:hover:border-dark-500'
+              }`}
+            >
+              <div className="flex items-center gap-3">
+                <div className={`h-10 w-10 rounded-lg flex items-center justify-center ${
+                  selectedTemplate === 'blank'
+                    ? 'bg-primary-500 text-white'
+                    : 'bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400'
+                }`}>
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                  </svg>
+                </div>
+                <div className="text-left">
+                  <h3 className={`font-semibold ${
+                    selectedTemplate === 'blank' ? 'text-primary-700 dark:text-primary-300' : 'text-gray-900 dark:text-gray-100'
+                  }`}>
+                    Blank Repository
+                  </h3>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    Start from scratch
+                  </p>
+                </div>
+              </div>
+              {selectedTemplate === 'blank' && (
+                <div className="absolute top-2 right-2">
+                  <svg className="w-5 h-5 text-primary-500" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                  </svg>
+                </div>
+              )}
+            </button>
+
+            {/* App Templates (exclude 'blank' since it's shown above) */}
+            {(templates || []).filter(t => t.active && t.slug !== 'blank').map((template) => (
               <button
                 key={template.slug}
                 type="button"
@@ -266,7 +306,11 @@ export default function CreateWorkspacePage() {
           {selectedTemplate && (
             <>
               <li>A full-stack app will be deployed at {slug || 'your-slug'}.app.amazing-ai.tools</li>
-              <li>A GitHub repository will be created from the {selectedTemplate} template</li>
+              {selectedTemplate === 'blank' ? (
+                <li>A minimal scaffold repository will be created for you to build from scratch</li>
+              ) : (
+                <li>A GitHub repository will be created from the {selectedTemplate} template</li>
+              )}
               <li>You'll be able to create sandboxes for feature development</li>
             </>
           )}

@@ -129,8 +129,8 @@ async def list_sandboxes(
     # Get workspace and verify access (any member can view)
     workspace, _ = get_workspace_with_role(workspace_slug, auth.user["id"])
 
-    # Check if workspace has an app (sandboxes only for app workspaces)
-    if not workspace.get("app_template_id"):
+    # Check if workspace has an app (sandboxes only for app workspaces - from template or linked repo)
+    if not workspace.get("app_template_id") and not workspace.get("github_repo_url"):
         raise HTTPException(
             status_code=400,
             detail="Sandboxes are only available for workspaces with an app"
@@ -200,8 +200,8 @@ async def create_sandbox(
             workspace_slug, auth.user["id"], require_role="admin"
         )
 
-    # Check if workspace has an app
-    if not workspace.get("app_template_id"):
+    # Check if workspace has an app (from template or linked repo)
+    if not workspace.get("app_template_id") and not workspace.get("github_repo_url"):
         raise HTTPException(
             status_code=400,
             detail="Sandboxes are only available for workspaces with an app"
@@ -617,8 +617,8 @@ async def list_sandboxes_internal(
     if not workspace:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
-    # Check if workspace has an app (sandboxes only for app workspaces)
-    if not workspace.get("app_template_id"):
+    # Check if workspace has an app (sandboxes only for app workspaces - from template or linked repo)
+    if not workspace.get("app_template_id") and not workspace.get("github_repo_url"):
         # Return empty list for workspaces without apps
         return SandboxListResponse(sandboxes=[], total=0)
 
@@ -658,8 +658,8 @@ async def create_sandbox_internal(
     if not workspace:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
-    # Check if workspace has an app
-    if not workspace.get("app_template_id"):
+    # Check if workspace has an app (from template or linked repo)
+    if not workspace.get("app_template_id") and not workspace.get("github_repo_url"):
         raise HTTPException(
             status_code=400,
             detail="Sandboxes are only available for workspaces with an app"

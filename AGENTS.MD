@@ -56,3 +56,4 @@ Skills are documented in the `agent-skills/` folder. Each skill has its own `.md
 |-------|-------------|---------------|
 | `/rebuild-images` | Rebuild kanban-team Docker images after code changes | [rebuild-images.md](agent-skills/rebuild-images.md) |
 | `/rebuild-workspace` | Restart workspace containers (does NOT rebuild images) | [rebuild-workspace.md](agent-skills/rebuild-workspace.md) |
+| `/run-e2e-tests` | Run Playwright E2E tests for invitation flow | [run-e2e-tests.md](agent-skills/run-e2e-tests.md) |

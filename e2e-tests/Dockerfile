@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright:v1.40.0-jammy
+FROM mcr.microsoft.com/playwright:v1.57.0-noble
 
 WORKDIR /app
 
@@ -8,8 +8,7 @@ COPY package.json ./
 # Install dependencies
 RUN npm install
 
-# Install Playwright browsers
-RUN npx playwright install chromium
+# Browsers are pre-installed in the base image
 
 # Copy test files
 COPY . .

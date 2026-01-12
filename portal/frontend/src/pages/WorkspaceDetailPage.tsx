@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { workspacesApi, sandboxesApi, Workspace, Sandbox, WorkspaceMember, WorkspaceInvitation, WorkspaceHealth, setNavigatingAway, authApi } from '../services/api'
+import { workspacesApi, sandboxesApi, appTemplatesApi, Workspace, Sandbox, WorkspaceMember, WorkspaceInvitation, WorkspaceHealth, AppTemplate, LinkAppFromTemplateRequest, LinkAppFromRepoRequest, setNavigatingAway, authApi } from '../services/api'
 import { useAuthStore } from '../stores/authStore'
 import { useTaskProgressStore } from '../stores/taskProgressStore'
 
@@ -10,8 +10,11 @@ export default function WorkspaceDetailPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { user } = useAuthStore()
-  const { startTask } = useTaskProgressStore()
+  const { startTask, getTaskByWorkspaceSlug } = useTaskProgressStore()
   const tasks = useTaskProgressStore((state) => state.tasks)
+
+  // Get active task for this workspace (re-renders when tasks change)
+  const activeTask = slug ? getTaskByWorkspaceSlug(slug) : undefined
 
   const [showCreateSandbox, setShowCreateSandbox] = useState(false)
   const [sandboxName, setSandboxName] = useState('')
@@ -23,6 +26,7 @@ export default function WorkspaceDetailPage() {
 
   const [deleteConfirm, setDeleteConfirm] = useState<{ slug: string; name: string; type: 'workspace' | 'sandbox' } | null>(null)
   const [deleteInput, setDeleteInput] = useState('')
+  const [deleteRepoOnDelete, setDeleteRepoOnDelete] = useState(false)
 
   // Restart workspace state
   const [showRestartModal, setShowRestartModal] = useState(false)
@@ -42,16 +46,33 @@ export default function WorkspaceDetailPage() {
   const [cancelInviteConfirm, setCancelInviteConfirm] = useState<WorkspaceInvitation | null>(null)
   const [editingMember, setEditingMember] = useState<string | null>(null)
 
-  const { data: workspace, isLoading: workspaceLoading } = useQuery({
+  // Link App state
+  const [showLinkAppModal, setShowLinkAppModal] = useState(false)
+  const [linkAppMode, setLinkAppMode] = useState<'template' | 'repo'>('template')
+  const [selectedTemplate, setSelectedTemplate] = useState('')
+  const [existingRepoUrl, setExistingRepoUrl] = useState('')
+  const [linkAppError, setLinkAppError] = useState('')
+
+  // Unlink App state
+  const [showUnlinkAppModal, setShowUnlinkAppModal] = useState(false)
+  const [deleteRepoOnUnlink, setDeleteRepoOnUnlink] = useState(false)
+  const [unlinkConfirmInput, setUnlinkConfirmInput] = useState('')
+
+  const { data: workspace, isLoading: workspaceLoading, refetch: refetchWorkspace } = useQuery({
     queryKey: ['workspace', slug],
     queryFn: () => workspacesApi.get(slug!).then(res => res.data),
     enabled: !!slug,
+    // Poll while linking or unlinking app
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      return (status === 'linking_app' || status === 'unlinking_app') ? 2000 : false
+    },
   })
 
   const { data: sandboxesData, isLoading: sandboxesLoading } = useQuery({
     queryKey: ['sandboxes', slug],
     queryFn: () => sandboxesApi.list(slug!).then(res => res.data),
-    enabled: !!slug && !!workspace?.app_template_id,
+    enabled: !!slug && (!!workspace?.app_template_id || !!workspace?.github_repo_url),
   })
   const sandboxes = sandboxesData?.sandboxes || []
 
@@ -157,7 +178,8 @@ export default function WorkspaceDetailPage() {
   })
 
   const deleteWorkspaceMutation = useMutation({
-    mutationFn: () => workspacesApi.delete(slug!),
+    mutationFn: (options?: { delete_github_repo?: boolean }) =>
+      workspacesApi.delete(slug!, options),
     onSuccess: () => {
       navigate('/workspaces')
     }
@@ -222,6 +244,69 @@ export default function WorkspaceDetailPage() {
       setRemoveMemberConfirm(null)
     }
   })
+
+  // Fetch app templates when link app modal is open
+  const { data: appTemplatesData } = useQuery({
+    queryKey: ['app-templates'],
+    queryFn: () => appTemplatesApi.list().then(res => res.data),
+    enabled: showLinkAppModal,
+  })
+  const appTemplates = appTemplatesData?.templates?.filter(t => t.active) || []
+
+  // Link App mutation
+  const linkAppMutation = useMutation({
+    mutationFn: (data: LinkAppFromTemplateRequest | LinkAppFromRepoRequest) =>
+      workspacesApi.linkApp(slug!, data),
+    onMutate: () => {
+      setLinkAppError('')
+    },
+    onSuccess: (response) => {
+      const taskId = response.data.task_id
+      if (taskId && workspace?.id && workspace?.slug) {
+        startTask(taskId, workspace.id, workspace.slug, 'link_app')
+      }
+      setShowLinkAppModal(false)
+      setSelectedTemplate('')
+      setExistingRepoUrl('')
+      setLinkAppMode('template')
+      queryClient.invalidateQueries({ queryKey: ['workspace', slug] })
+    },
+    onError: (err: any) => {
+      setLinkAppError(err.response?.data?.detail || 'Failed to link app')
+    }
+  })
+
+  // Unlink App mutation
+  const unlinkAppMutation = useMutation({
+    mutationFn: (data: { delete_github_repo?: boolean }) =>
+      workspacesApi.unlinkApp(slug!, data),
+    onSuccess: (response) => {
+      const taskId = response.data.task_id
+      if (taskId && workspace?.id && workspace?.slug) {
+        startTask(taskId, workspace.id, workspace.slug, 'unlink_app')
+      }
+      setShowUnlinkAppModal(false)
+      setDeleteRepoOnUnlink(false)
+      setUnlinkConfirmInput('')
+      queryClient.invalidateQueries({ queryKey: ['workspace', slug] })
+    }
+  })
+
+  const handleLinkApp = () => {
+    if (linkAppMode === 'template') {
+      if (!selectedTemplate) {
+        setLinkAppError('Please select an app template')
+        return
+      }
+      linkAppMutation.mutate({ app_template_slug: selectedTemplate })
+    } else {
+      if (!existingRepoUrl.trim()) {
+        setLinkAppError('Please enter a GitHub repository URL')
+        return
+      }
+      linkAppMutation.mutate({ github_repo_url: existingRepoUrl.trim() })
+    }
+  }
 
   const handleSandboxNameChange = (value: string) => {
     setSandboxName(value)
@@ -370,6 +455,36 @@ export default function WorkspaceDetailPage() {
   const workspaceActionTask = workspaceStartTask || workspaceRestartTask
   const isWorkspaceStarting = startWorkspaceMutation.isPending || !!workspaceActionTask
 
+  // Track link/unlink app tasks
+  const linkAppTask = Object.values(tasks).find(
+    (task) =>
+      task.workspaceSlug === slug &&
+      task.action === 'link_app' &&
+      (task.status === 'pending' || task.status === 'in_progress')
+  )
+  const unlinkAppTask = Object.values(tasks).find(
+    (task) =>
+      task.workspaceSlug === slug &&
+      task.action === 'unlink_app' &&
+      (task.status === 'pending' || task.status === 'in_progress')
+  )
+  const appOperationTask = linkAppTask || unlinkAppTask
+
+  // Refetch workspace when app operation completes
+  useEffect(() => {
+    // Find any recently completed link/unlink tasks for this workspace
+    const completedTask = Object.values(tasks).find(
+      (task) =>
+        task.workspaceSlug === slug &&
+        (task.action === 'link_app' || task.action === 'unlink_app') &&
+        (task.status === 'completed' || task.status === 'failed')
+    )
+    if (completedTask) {
+      refetchWorkspace()
+      queryClient.invalidateQueries({ queryKey: ['sandboxes', slug] })
+    }
+  }, [tasks, slug, refetchWorkspace, queryClient])
+
   if (workspaceLoading) {
     return (
       <div className="flex justify-center py-12">
@@ -414,6 +529,18 @@ export default function WorkspaceDetailPage() {
         </div>
         {(userRole === 'owner' || userRole === 'admin') && (
           <div className="flex items-center gap-2">
+            {/* Unlink App button - visible if workspace has an app (from template or linked repo) */}
+            {(workspace.app_template_id || workspace.github_repo_url) && (
+              <button
+                onClick={() => setShowUnlinkAppModal(true)}
+                className="px-3 py-2 text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/20 rounded-lg text-sm font-medium flex items-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                </svg>
+                Unlink App
+              </button>
+            )}
             <button
               onClick={() => setShowRestartModal(true)}
               className="px-3 py-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-dark-700 rounded-lg text-sm font-medium flex items-center gap-2"
@@ -434,6 +561,36 @@ export default function WorkspaceDetailPage() {
           </div>
         )}
       </div>
+
+      {/* App Operation Progress Banner */}
+      {appOperationTask && (
+        <div className="bg-primary-50 dark:bg-primary-900/20 border border-primary-200 dark:border-primary-800 rounded-xl p-4">
+          <div className="flex items-center gap-4">
+            <div className="flex-shrink-0">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600 dark:border-primary-400"></div>
+            </div>
+            <div className="flex-1 min-w-0">
+              <h3 className="text-sm font-medium text-primary-900 dark:text-primary-100">
+                {appOperationTask.action === 'link_app' ? 'Linking App to Workspace' : 'Unlinking App from Workspace'}
+              </h3>
+              <p className="text-sm text-primary-700 dark:text-primary-300 mt-1">
+                {appOperationTask.stepName || 'Initializing...'}
+              </p>
+              {/* Progress bar */}
+              <div className="mt-2 w-full bg-primary-100 dark:bg-primary-800/50 rounded-full h-2">
+                <div
+                  className="bg-primary-600 dark:bg-primary-400 h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${appOperationTask.percentage || 0}%` }}
+                ></div>
+              </div>
+              <p className="text-xs text-primary-600 dark:text-primary-400 mt-1">
+                Step {appOperationTask.step || 0} of {appOperationTask.totalSteps || 1}
+                {appOperationTask.percentage > 0 && ` (${Math.round(appOperationTask.percentage)}%)`}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Tab Navigation */}
       <div className="border-b border-gray-200 dark:border-dark-700">
@@ -673,10 +830,28 @@ export default function WorkspaceDetailPage() {
             </svg>
           </a>
         )}
+
+        {/* Link App (for kanban-only workspaces - no template or linked repo) */}
+        {!workspace.app_template_id && !workspace.github_repo_url && canManageMembers && (
+          <button
+            onClick={() => setShowLinkAppModal(true)}
+            className="bg-white dark:bg-dark-800 rounded-xl shadow dark:shadow-dark-700/30 p-4 hover:shadow-lg transition-all flex items-center gap-4 border-2 border-dashed border-gray-200 dark:border-dark-600"
+          >
+            <div className="h-12 w-12 rounded-lg bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center">
+              <svg className="w-6 h-6 text-emerald-600 dark:text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+            </div>
+            <div className="text-left">
+              <h3 className="font-semibold text-gray-900 dark:text-gray-100">Link App</h3>
+              <p className="text-sm text-gray-500 dark:text-gray-400">Add an application to this workspace</p>
+            </div>
+          </button>
+        )}
       </div>
 
-      {/* Sandboxes Section (only for app workspaces) */}
-      {workspace.app_template_id && (
+      {/* Sandboxes Section (only for app workspaces - from template or linked repo) */}
+      {(workspace.app_template_id || workspace.github_repo_url) && (
         <div className="bg-white dark:bg-dark-800 rounded-xl shadow dark:shadow-dark-700/30 overflow-hidden">
           <div className="p-4 border-b border-gray-200 dark:border-dark-700 flex items-center justify-between">
             <div>
@@ -1396,6 +1571,26 @@ export default function WorkspaceDetailPage() {
               </p>
             </div>
 
+            {/* GitHub repo deletion option - only show for workspaces with repos */}
+            {deleteConfirm.type === 'workspace' && workspace?.github_repo_url && (
+              <div className="mb-4">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={deleteRepoOnDelete}
+                    onChange={(e) => setDeleteRepoOnDelete(e.target.checked)}
+                    className="w-4 h-4 text-red-600 border-gray-300 rounded focus:ring-red-500"
+                  />
+                  <span className="text-sm text-gray-700 dark:text-gray-300">Also delete GitHub repository</span>
+                </label>
+                {deleteRepoOnDelete && (
+                  <p className="mt-1 ml-6 text-xs text-red-600 dark:text-red-400">
+                    Warning: This will permanently delete the repository!
+                  </p>
+                )}
+              </div>
+            )}
+
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                 Type <strong>{deleteConfirm.slug}</strong> to confirm
@@ -1416,6 +1611,7 @@ export default function WorkspaceDetailPage() {
                 onClick={() => {
                   setDeleteConfirm(null)
                   setDeleteInput('')
+                  setDeleteRepoOnDelete(false)
                 }}
                 className="px-4 py-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-dark-700 rounded-lg"
               >
@@ -1425,7 +1621,7 @@ export default function WorkspaceDetailPage() {
                 type="button"
                 onClick={() => {
                   if (deleteConfirm.type === 'workspace') {
-                    deleteWorkspaceMutation.mutate()
+                    deleteWorkspaceMutation.mutate({ delete_github_repo: deleteRepoOnDelete })
                   } else {
                     deleteSandboxMutation.mutate(deleteConfirm.slug)
                   }
@@ -1434,6 +1630,226 @@ export default function WorkspaceDetailPage() {
                 className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {(deleteSandboxMutation.isPending || deleteWorkspaceMutation.isPending) ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Link App Modal */}
+      {showLinkAppModal && (
+        <div className="fixed inset-0 bg-black/50 dark:bg-black/70 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-dark-800 rounded-xl shadow-xl dark:shadow-dark-900/50 w-full max-w-lg p-6">
+            <h2 className="text-lg font-bold text-gray-900 dark:text-gray-100 mb-4">Link App to Workspace</h2>
+
+            {/* Mode Selection */}
+            <div className="flex gap-4 mb-6">
+              <button
+                type="button"
+                onClick={() => setLinkAppMode('template')}
+                className={`flex-1 p-4 rounded-lg border-2 transition-colors ${
+                  linkAppMode === 'template'
+                    ? 'border-primary-500 bg-primary-50 dark:bg-primary-900/20'
+                    : 'border-gray-200 dark:border-dark-600 hover:border-gray-300 dark:hover:border-dark-500'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
+                    linkAppMode === 'template'
+                      ? 'bg-primary-100 dark:bg-primary-900/30'
+                      : 'bg-gray-100 dark:bg-gray-700'
+                  }`}>
+                    <svg className={`w-4 h-4 ${
+                      linkAppMode === 'template' ? 'text-primary-600 dark:text-primary-400' : 'text-gray-500 dark:text-gray-400'
+                    }`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" />
+                    </svg>
+                  </div>
+                  <div className="text-left">
+                    <h3 className={`font-medium ${
+                      linkAppMode === 'template' ? 'text-primary-700 dark:text-primary-300' : 'text-gray-900 dark:text-gray-100'
+                    }`}>From Template</h3>
+                    <p className="text-sm text-gray-500 dark:text-gray-400">Create new repo from template</p>
+                  </div>
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => setLinkAppMode('repo')}
+                className={`flex-1 p-4 rounded-lg border-2 transition-colors ${
+                  linkAppMode === 'repo'
+                    ? 'border-primary-500 bg-primary-50 dark:bg-primary-900/20'
+                    : 'border-gray-200 dark:border-dark-600 hover:border-gray-300 dark:hover:border-dark-500'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
+                    linkAppMode === 'repo'
+                      ? 'bg-primary-100 dark:bg-primary-900/30'
+                      : 'bg-gray-100 dark:bg-gray-700'
+                  }`}>
+                    <svg className={`w-4 h-4 ${
+                      linkAppMode === 'repo' ? 'text-primary-600 dark:text-primary-400' : 'text-gray-500 dark:text-gray-400'
+                    }`} fill="currentColor" viewBox="0 0 24 24">
+                      <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.87 8.17 6.84 9.5.5.08.66-.23.66-.5v-1.69c-2.77.6-3.36-1.34-3.36-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.87 1.52 2.34 1.07 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.92 0-1.11.38-2 1.03-2.71-.1-.25-.45-1.29.1-2.64 0 0 .84-.27 2.75 1.02.79-.22 1.65-.33 2.5-.33.85 0 1.71.11 2.5.33 1.91-1.29 2.75-1.02 2.75-1.02.55 1.35.2 2.39.1 2.64.65.71 1.03 1.6 1.03 2.71 0 3.82-2.34 4.66-4.57 4.91.36.31.69.92.69 1.85V21c0 .27.16.59.67.5C19.14 20.16 22 16.42 22 12A10 10 0 0012 2z" />
+                    </svg>
+                  </div>
+                  <div className="text-left">
+                    <h3 className={`font-medium ${
+                      linkAppMode === 'repo' ? 'text-primary-700 dark:text-primary-300' : 'text-gray-900 dark:text-gray-100'
+                    }`}>Existing Repository</h3>
+                    <p className="text-sm text-gray-500 dark:text-gray-400">Use existing GitHub repo</p>
+                  </div>
+                </div>
+              </button>
+            </div>
+
+            {linkAppMode === 'template' ? (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                    App Template
+                  </label>
+                  <select
+                    value={selectedTemplate}
+                    onChange={(e) => setSelectedTemplate(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 dark:border-dark-600 bg-white dark:bg-dark-700 text-gray-900 dark:text-gray-100 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                  >
+                    <option value="">Select a template...</option>
+                    {appTemplates.map((t: AppTemplate) => (
+                      <option key={t.slug} value={t.slug}>{t.name}</option>
+                    ))}
+                  </select>
+                  {appTemplates.length === 0 && (
+                    <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">No app templates available</p>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                    GitHub Repository URL
+                  </label>
+                  <input
+                    type="url"
+                    value={existingRepoUrl}
+                    onChange={(e) => setExistingRepoUrl(e.target.value)}
+                    placeholder="https://github.com/org/repo"
+                    className="w-full px-3 py-2 border border-gray-300 dark:border-dark-600 bg-white dark:bg-dark-700 text-gray-900 dark:text-gray-100 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                  />
+                  <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    Enter the full URL to an existing GitHub repository
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {linkAppError && (
+              <div className="mt-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 px-3 py-2 rounded-lg text-sm">
+                {linkAppError}
+              </div>
+            )}
+
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowLinkAppModal(false)
+                  setSelectedTemplate('')
+                  setExistingRepoUrl('')
+                  setLinkAppError('')
+                  setLinkAppMode('template')
+                }}
+                className="px-4 py-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-dark-700 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleLinkApp}
+                disabled={linkAppMutation.isPending}
+                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50"
+              >
+                {linkAppMutation.isPending ? 'Linking...' : 'Link App'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Unlink App Modal */}
+      {showUnlinkAppModal && (
+        <div className="fixed inset-0 bg-black/50 dark:bg-black/70 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-dark-800 rounded-xl shadow-xl dark:shadow-dark-900/50 w-full max-w-md p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center">
+                <svg className="w-6 h-6 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-lg font-bold text-gray-900 dark:text-gray-100">Unlink App</h2>
+                <p className="text-sm text-gray-500 dark:text-gray-400">Remove app from workspace</p>
+              </div>
+            </div>
+
+            <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-4 mb-4">
+              <p className="text-sm text-amber-800 dark:text-amber-300">
+                This will remove the app and all sandboxes from this workspace.
+                The kanban board will remain active.
+              </p>
+            </div>
+
+            <div className="mb-4">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={deleteRepoOnUnlink}
+                  onChange={(e) => setDeleteRepoOnUnlink(e.target.checked)}
+                  className="h-4 w-4 text-amber-600 focus:ring-amber-500 border-gray-300 rounded"
+                />
+                <span className="text-sm text-gray-700 dark:text-gray-300">Also delete GitHub repository</span>
+              </label>
+              {deleteRepoOnUnlink && (
+                <p className="mt-1 ml-6 text-xs text-red-600 dark:text-red-400">
+                  Warning: This will permanently delete the repository!
+                </p>
+              )}
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                Type <strong>unlink</strong> to confirm
+              </label>
+              <input
+                type="text"
+                value={unlinkConfirmInput}
+                onChange={(e) => setUnlinkConfirmInput(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 dark:border-dark-600 bg-white dark:bg-dark-700 text-gray-900 dark:text-gray-100 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                placeholder="unlink"
+              />
+            </div>
+
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowUnlinkAppModal(false)
+                  setDeleteRepoOnUnlink(false)
+                  setUnlinkConfirmInput('')
+                }}
+                className="px-4 py-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-dark-700 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => unlinkAppMutation.mutate({ delete_github_repo: deleteRepoOnUnlink })}
+                disabled={unlinkConfirmInput !== 'unlink' || unlinkAppMutation.isPending}
+                className="px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {unlinkAppMutation.isPending ? 'Unlinking...' : 'Unlink App'}
               </button>
             </div>
           </div>

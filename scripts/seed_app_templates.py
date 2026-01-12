@@ -50,6 +50,16 @@ def seed_app_templates():
             "active": True,
             "created_at": datetime.utcnow().isoformat(),
         },
+        {
+            "id": str(uuid.uuid4()),
+            "slug": "blank",
+            "name": "Blank Repository",
+            "description": "Start from scratch with a minimal scaffold. Includes basic FastAPI backend and React frontend structure.",
+            "github_template_owner": "hckmseduardo",
+            "github_template_repo": "blank-app-scaffold",
+            "active": True,
+            "created_at": datetime.utcnow().isoformat(),
+        },
     ]
 
     try:

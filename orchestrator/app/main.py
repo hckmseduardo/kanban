@@ -363,9 +363,20 @@ class Orchestrator:
 
         When the orchestrator restarts while agents are running, those cards
         will be stuck with agent_status.status = "processing". This method
-        finds those cards and marks them as failed so they can be retried.
+        finds those cards and automatically re-queues them for processing.
+
+        Additionally, this method scans cards in agent-managed columns that
+        may not have been processed (no agent_status or pending status).
+
+        The recovery process:
+        1. Finds cards with agent_status.status = "processing" (interrupted)
+        2. Finds cards in agent-managed columns without agent_status (never triggered)
+        3. Retrieves the original task data using task_id from agent_status
+        4. Re-queues the task with high priority
+        5. Creates fresh tasks for cards that need processing
+        6. Falls back to marking as failed if recovery isn't possible
         """
-        logger.info("Checking for orphaned agent tasks...")
+        logger.info("Checking for orphaned agent tasks and cards in agent-managed columns...")
 
         # Read portal database to get active workspaces
         portal_db_path = Path("/app/data/portal/portal.json")
@@ -427,65 +438,176 @@ class Orchestrator:
                             board_data = board_resp.json()
                             dev_column_id = None
 
-                            # Find Development column
+                            # Find Development column (fallback for failed cards)
                             for col in board_data.get("columns", []):
                                 if col.get("name") == "Development":
                                     dev_column_id = col.get("id")
                                     break
 
+                            # Get column agent configurations for this board
+                            column_agent_configs = {}
+                            try:
+                                agent_configs_resp = await client.get(
+                                    f"{kanban_api_url}/agents/boards/{board_id}/agents",
+                                    headers={"X-Service-Secret": cross_domain_secret}
+                                )
+                                if agent_configs_resp.status_code == 200:
+                                    configs_data = agent_configs_resp.json()
+                                    # Build map of column_id -> {config, agent}
+                                    # Response format: {"board_id": ..., "columns": [{column_id, config, agent}, ...]}
+                                    for col_cfg in configs_data.get("columns", []):
+                                        col_id = col_cfg.get("column_id")
+                                        # Only include if config exists and has an agent assigned
+                                        if col_id and col_cfg.get("config"):
+                                            # Build resolved agent_config from base agent + overrides
+                                            base_agent = col_cfg.get("agent", {}) or {}
+                                            config = col_cfg.get("config", {})
+                                            overrides = config.get("agent_config_override", {}) or {}
+
+                                            resolved_config = {
+                                                "agent_name": config.get("agent_name"),
+                                                "persona": overrides.get("persona") or base_agent.get("persona", ""),
+                                                "tool_profile": overrides.get("tool_profile") or base_agent.get("tool_profile", "developer"),
+                                                "timeout": overrides.get("timeout") or base_agent.get("timeout", 600),
+                                                "column_success": config.get("column_success"),
+                                                "column_failure": config.get("column_failure"),
+                                                "llm_provider": overrides.get("llm_provider") or config.get("llm_provider"),
+                                            }
+                                            column_agent_configs[col_id] = {
+                                                "column_id": col_id,
+                                                "column_name": col_cfg.get("column_name"),
+                                                "agent_config": resolved_config,
+                                            }
+                            except Exception as e:
+                                logger.debug(f"[{workspace_slug}] Could not get column agent configs: {e}")
+
                             # Check all cards in all columns
                             for col in board_data.get("columns", []):
+                                column_id = col.get("id")
+                                column_name = col.get("name", "")
+                                column_has_agent = column_id in column_agent_configs
+
                                 for card in col.get("cards", []):
+                                    card_id = card.get("id")
                                     agent_status = card.get("agent_status")
+
+                                    # Case 1: Card with processing status (interrupted agent)
                                     if agent_status and agent_status.get("status") == "processing":
-                                        card_id = card.get("id")
                                         agent_name = agent_status.get("agent_name", "unknown")
                                         started_at = agent_status.get("started_at", "unknown")
 
+                                        original_task_id = agent_status.get("task_id")
                                         logger.warning(
                                             f"[{workspace_slug}] Found orphaned agent task: "
-                                            f"card={card_id}, agent={agent_name}, started_at={started_at}"
+                                            f"card={card_id}, agent={agent_name}, task_id={original_task_id}, started_at={started_at}"
                                         )
 
-                                        # Mark as failed
-                                        error_message = (
-                                            f"Agent task was interrupted due to orchestrator restart. "
-                                            f"The {agent_name} agent was running when the orchestrator "
-                                            f"restarted at {datetime.utcnow().isoformat()}Z. "
-                                            f"Please retry the task."
-                                        )
+                                        # Try to retrieve and re-queue the original task
+                                        requeued = False
+                                        if original_task_id:
+                                            task_data = await self.redis.hget(f"task:{original_task_id}", "data")
+                                            if task_data:
+                                                try:
+                                                    original_task = json.loads(task_data)
+                                                    # Re-queue the task
+                                                    new_task_id = await self._requeue_agent_task(original_task)
+                                                    logger.info(
+                                                        f"[{card_id}] Re-queued orphaned task as {new_task_id}"
+                                                    )
 
-                                        # Add comment explaining the failure
-                                        comment_text = (
-                                            f"## Agent: {agent_name.title()}\n\n"
-                                            f"**Status:** Failed (Interrupted)\n"
-                                            f"**Error:** {error_message}\n\n"
-                                            f"The orchestrator restarted while this agent was running. "
-                                            f"Please move the card back to trigger the agent again."
-                                        )
-                                        await client.post(
-                                            f"{kanban_api_url}/cards/{card_id}/comments",
-                                            headers={"X-Service-Secret": cross_domain_secret},
-                                            json={"text": comment_text, "author_name": "Orchestrator"}
-                                        )
+                                                    # Add comment explaining the restart
+                                                    comment_text = (
+                                                        f"## Agent: {agent_name.title()}\n\n"
+                                                        f"**Status:** Restarted\n\n"
+                                                        f"The orchestrator restarted while this agent was running. "
+                                                        f"The task has been automatically re-queued and will continue shortly."
+                                                    )
+                                                    await client.post(
+                                                        f"{kanban_api_url}/cards/{card_id}/comments",
+                                                        headers={"X-Service-Secret": cross_domain_secret},
+                                                        json={"text": comment_text, "author_name": "Orchestrator"}
+                                                    )
+                                                    requeued = True
+                                                except Exception as e:
+                                                    logger.warning(f"[{card_id}] Failed to re-queue task: {e}")
 
-                                        # Move to Development column if found
-                                        if dev_column_id:
-                                            await client.post(
-                                                f"{kanban_api_url}/cards/{card_id}/move",
-                                                headers={"X-Service-Secret": cross_domain_secret},
-                                                params={"column_id": dev_column_id, "position": 0}
+                                        if not requeued:
+                                            # Fallback: clear status and notify user if we couldn't re-queue
+                                            logger.warning(f"[{card_id}] Could not re-queue task, clearing status")
+                                            comment_text = (
+                                                f"## Agent: {agent_name.title()}\n\n"
+                                                f"**Status:** Failed (Interrupted)\n\n"
+                                                f"The orchestrator restarted while this agent was running. "
+                                                f"Could not automatically restart the task. "
+                                                f"Please move the card back to trigger the agent again."
                                             )
-                                            logger.info(f"[{card_id}] Moved to Development column")
+                                            await client.post(
+                                                f"{kanban_api_url}/cards/{card_id}/comments",
+                                                headers={"X-Service-Secret": cross_domain_secret},
+                                                json={"text": comment_text, "author_name": "Orchestrator"}
+                                            )
 
-                                        # Clear agent_status
-                                        await client.delete(
-                                            f"{kanban_api_url}/cards/{card_id}/agent-status",
-                                            headers={"X-Service-Secret": cross_domain_secret}
-                                        )
-                                        logger.info(f"[{card_id}] Cleared agent_status")
+                                            # Move to Development column if found
+                                            if dev_column_id:
+                                                await client.post(
+                                                    f"{kanban_api_url}/cards/{card_id}/move",
+                                                    headers={"X-Service-Secret": cross_domain_secret},
+                                                    params={"column_id": dev_column_id, "position": 0}
+                                                )
+                                                logger.info(f"[{card_id}] Moved to Development column")
+
+                                            # Clear agent_status only if not re-queued
+                                            # Pass original_task_id to prevent race condition
+                                            await client.delete(
+                                                f"{kanban_api_url}/cards/{card_id}/agent-status",
+                                                headers={"X-Service-Secret": cross_domain_secret},
+                                                params={"task_id": original_task_id} if original_task_id else None
+                                            )
+                                            logger.info(f"[{card_id}] Cleared agent_status")
 
                                         recovered += 1
+
+                                    # Case 2: Card in agent-managed column without agent_status
+                                    # (card was moved but agent never triggered or was lost)
+                                    elif column_has_agent and not agent_status:
+                                        col_config = column_agent_configs[column_id]
+                                        agent_config = col_config.get("agent_config", {})
+                                        agent_name = agent_config.get("agent_name", "unknown")
+
+                                        logger.info(
+                                            f"[{workspace_slug}] Found card in agent-managed column without agent_status: "
+                                            f"card={card_id}, column={column_name}, agent={agent_name}"
+                                        )
+
+                                        # Create a fresh agent task for this card
+                                        try:
+                                            new_task_id = await self._create_fresh_agent_task(
+                                                card=card,
+                                                column_name=column_name,
+                                                agent_config=agent_config,
+                                                workspace_slug=workspace_slug,
+                                                workspace=ws,
+                                                board_id=board_id,
+                                                kanban_api_url=kanban_api_url,
+                                            )
+
+                                            if new_task_id:
+                                                # Add comment explaining the recovery
+                                                comment_text = (
+                                                    f"## Agent: {agent_name.title()}\n\n"
+                                                    f"**Status:** Triggered (Recovery)\n\n"
+                                                    f"The orchestrator detected this card in an agent-managed column "
+                                                    f"without a processing status. The agent has been triggered to process this card."
+                                                )
+                                                await client.post(
+                                                    f"{kanban_api_url}/cards/{card_id}/comments",
+                                                    headers={"X-Service-Secret": cross_domain_secret},
+                                                    json={"text": comment_text, "author_name": "Orchestrator"}
+                                                )
+                                                logger.info(f"[{card_id}] Created fresh agent task: {new_task_id}")
+                                                recovered += 1
+                                        except Exception as e:
+                                            logger.warning(f"[{card_id}] Failed to create fresh agent task: {e}")
 
                 except Exception as e:
                     logger.warning(f"[{workspace_slug}] Failed to check for orphaned tasks: {e}")
@@ -498,6 +620,171 @@ class Orchestrator:
 
         except Exception as e:
             logger.error(f"Failed to recover orphaned agent tasks: {e}")
+
+    async def _requeue_agent_task(self, original_task: dict) -> str:
+        """Re-queue an agent task after orchestrator restart.
+
+        Creates a new task with the same payload but fresh metadata,
+        and adds it to the agent queue for processing.
+
+        Args:
+            original_task: The original task dict containing type and payload
+
+        Returns:
+            The new task_id
+        """
+        new_task_id = str(uuid.uuid4())
+        payload = original_task.get("payload", {})
+        user_id = original_task.get("user_id", "system")
+        priority = original_task.get("priority", "normal")
+
+        new_task = {
+            "task_id": new_task_id,
+            "type": "agent.process_card",
+            "status": "pending",
+            "payload": payload,
+            "user_id": user_id,
+            "priority": priority,
+            "progress": {
+                "current_step": 0,
+                "total_steps": 0,
+                "step_name": "Queued (restarted)",
+                "percentage": 0
+            },
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "started_at": None,
+            "completed_at": None,
+            "restarted_from": original_task.get("task_id"),
+        }
+
+        # Store task data in Redis
+        await self.redis.hset(f"task:{new_task_id}", mapping={
+            "data": json.dumps(new_task)
+        })
+
+        # Add to agent queue (high priority for restarts)
+        queue_key = f"queue:agents:high"
+        await self.redis.lpush(queue_key, new_task_id)
+
+        logger.info(f"Re-queued agent task {new_task_id} (original: {original_task.get('task_id')})")
+        return new_task_id
+
+    async def _create_fresh_agent_task(
+        self,
+        card: dict,
+        column_name: str,
+        agent_config: dict,
+        workspace_slug: str,
+        workspace: dict,
+        board_id: str,
+        kanban_api_url: str,
+    ) -> Optional[str]:
+        """Create a fresh agent task for a card in an agent-managed column.
+
+        This is used when recovery finds a card in an agent-managed column
+        but no original task data exists (e.g., webhook was lost).
+
+        Args:
+            card: The card data from kanban API
+            column_name: The column name the card is in
+            agent_config: The agent configuration for the column
+            workspace_slug: The workspace slug
+            workspace: The workspace data from portal database
+            board_id: The board ID
+            kanban_api_url: The kanban API URL
+
+        Returns:
+            The new task_id, or None if creation failed
+        """
+        card_id = card.get("id")
+        card_title = card.get("title", "Untitled")
+        card_description = card.get("description", "")
+        card_number = card.get("card_number")
+        labels = card.get("labels", [])
+        claude_session_id = card.get("claude_session_id")
+
+        # Determine sandbox context from card
+        sandbox_id = card.get("sandbox_id")
+        sandbox_slug = None
+        git_branch = "main"
+        target_project_path = f"/data/repos/{workspace_slug}"
+
+        # If card has a sandbox_id, look it up in the portal database
+        if sandbox_id:
+            portal_db_path = Path("/app/data/portal/portal.json")
+            if portal_db_path.exists():
+                try:
+                    with open(portal_db_path, 'r') as f:
+                        portal_data = json.load(f)
+
+                    sandboxes = portal_data.get("sandboxes", {})
+                    # Find sandbox by ID or full_slug
+                    for sb_key, sb in sandboxes.items():
+                        if sb.get("id") == sandbox_id or sb.get("full_slug") == sandbox_id:
+                            full_slug = sb.get("full_slug", sandbox_id)
+                            sandbox_slug = sb.get("slug")
+                            git_branch = sb.get("git_branch", f"sandbox/{full_slug}")
+                            target_project_path = f"/data/repos/{workspace_slug}/sandboxes/{full_slug}"
+                            # Use actual UUID
+                            sandbox_id = sb.get("id", sandbox_id)
+                            break
+                except Exception as e:
+                    logger.warning(f"[{card_id}] Could not look up sandbox: {e}")
+
+        # Create new task
+        new_task_id = str(uuid.uuid4())
+        agent_name = agent_config.get("agent_name", "developer")
+
+        new_task = {
+            "task_id": new_task_id,
+            "type": "agent.process_card",
+            "status": "pending",
+            "payload": {
+                "card_id": card_id,
+                "card_number": card_number,
+                "card_title": card_title,
+                "card_description": card_description,
+                "column_name": column_name,
+                "agent_config": agent_config,
+                "sandbox_id": sandbox_id or workspace_slug,
+                "sandbox_slug": sandbox_slug,
+                "claude_session_id": claude_session_id,
+                "workspace_slug": workspace_slug,
+                "git_branch": git_branch,
+                "kanban_api_url": kanban_api_url,
+                "target_project_path": target_project_path,
+                "board_id": board_id,
+                "labels": labels,
+                "github_repo_url": workspace.get("github_repo_url"),
+            },
+            "user_id": "system",
+            "priority": "high",
+            "progress": {
+                "current_step": 0,
+                "total_steps": 0,
+                "step_name": "Queued (recovery)",
+                "percentage": 0
+            },
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "started_at": None,
+            "completed_at": None,
+            "recovery_triggered": True,
+        }
+
+        # Store task data in Redis
+        await self.redis.hset(f"task:{new_task_id}", mapping={
+            "data": json.dumps(new_task)
+        })
+
+        # Add to agent queue (high priority for recovery)
+        queue_key = "queue:agents:high"
+        await self.redis.lpush(queue_key, new_task_id)
+
+        logger.info(
+            f"Created fresh agent task {new_task_id} for card {card_id} "
+            f"(agent={agent_name}, column={column_name})"
+        )
+        return new_task_id
 
     async def process_task(self, task_id: str):
         """Process a provisioning task"""
@@ -527,6 +814,10 @@ class Orchestrator:
                 await self.restart_workspace(task)
             elif task_type == "workspace.start":
                 await self.start_workspace(task)
+            elif task_type == "workspace.link_app":
+                await self.link_app_to_workspace(task)
+            elif task_type == "workspace.unlink_app":
+                await self.unlink_app_from_workspace(task)
             # App Factory - Sandbox tasks
             elif task_type == "sandbox.provision":
                 await self.provision_sandbox(task)
@@ -1562,11 +1853,13 @@ class Orchestrator:
 
         logger.info(f"[{workspace_slug}] Creating default boards at {kanban_api_url}")
 
-        # Default board templates to create
+        # Default board templates to create (template_id, board_name, board_key, position)
+        # board_key is used as prefix for card numbers (e.g., IDEA-1, FEAT-2, BUG-3)
+        # position determines display order (lower = first)
         default_boards = [
-            ("ideas-pipeline", "Ideas Pipeline"),
-            ("feature-request", "Feature Request"),
-            ("bug-tracking", "Bug Tracking"),
+            ("ideas-pipeline", "Ideas Pipeline", "IDEA", 0),
+            ("feature-request", "Feature Request", "FEAT", 1),
+            ("bug-tracking", "Bug Tracking", "BUG", 2),
         ]
 
         ideas_board_id = None
@@ -1593,11 +1886,11 @@ class Orchestrator:
                 return
 
             # Create boards from templates
-            for template_id, board_name in default_boards:
+            for template_id, board_name, board_key, position in default_boards:
                 try:
                     response = await client.post(
                         f"{kanban_api_url}/templates/{template_id}/apply",
-                        params={"board_name": board_name},
+                        params={"board_name": board_name, "board_key": board_key, "position": position},
                     )
 
                     if response.status_code < 400:
@@ -2485,14 +2778,320 @@ This board helps you explore and develop ideas from concept to implementation-re
         else:
             logger.warning(f"[{workspace_slug}] App restart warning: {result.stderr}")
 
+    # =========================================================================
+    # Link/Unlink App Handlers
+    # =========================================================================
+
+    async def link_app_to_workspace(self, task: dict):
+        """Link an app to an existing kanban-only workspace"""
+        task_id = task["task_id"]
+        payload = task["payload"]
+        workspace_id = payload["workspace_id"]
+        workspace_slug = payload["workspace_slug"]
+        app_template_id = payload.get("app_template_id")
+
+        self._current_payload = payload
+
+        logger.info(f"Linking app to workspace: {workspace_slug} (template: {app_template_id or 'existing-repo'})")
+
+        # Build steps based on mode (template vs existing repo)
+        steps = []
+
+        if app_template_id:
+            # From template mode - create new repo
+            steps.append(("Creating GitHub repository", self._workspace_create_github_repo))
+        else:
+            # Existing repo mode - validate and use existing repo
+            steps.append(("Validating GitHub repository", self._link_app_validate_existing_repo))
+
+        steps.extend([
+            ("Creating Azure app registration", self._workspace_create_azure_app),
+            ("Cloning repository", self._workspace_clone_repo),
+            ("Issuing SSL certificate", self._workspace_issue_certificate),
+            ("Creating app database", self._workspace_create_database),
+            ("Deploying app containers", self._workspace_deploy_app),
+            # Update workspace with app fields BEFORE sandbox creation
+            # (portal API requires app_template_id to be set for sandbox creation)
+            ("Updating workspace", self._link_app_update_workspace),
+            ("Creating foundation sandbox", self._workspace_create_foundation_sandbox),
+            ("Running health check", self._workspace_health_check),
+            ("Finalizing", self._link_app_finalize),
+        ])
+
+        try:
+            for i, (step_name, step_func) in enumerate(steps, 1):
+                await self.update_progress(task_id, i, len(steps), step_name)
+                await step_func(workspace_slug, workspace_id)
+                logger.info(f"[{workspace_slug}] {step_name} - completed")
+
+            await self.complete_task(task_id, {
+                "action": "link_app",
+                "workspace_slug": workspace_slug,
+                "workspace_id": workspace_id,
+            })
+
+            logger.info(f"App linked to workspace {workspace_slug} successfully")
+
+        except Exception as e:
+            logger.error(f"Link app failed: {e}")
+            # Revert workspace status to active on failure
+            await self.redis.publish("workspace:status", json.dumps({
+                "workspace_id": workspace_id,
+                "workspace_slug": workspace_slug,
+                "status": "active"
+            }))
+            await self.fail_task(task_id, str(e))
+            raise
+
+    async def _link_app_validate_existing_repo(self, workspace_slug: str, workspace_id: str):
+        """Validate and prepare existing GitHub repository"""
+        import re
+
+        payload = self._current_payload
+        github_repo_url = payload.get("github_repo_url")
+
+        # Parse org and repo from URL
+        match = re.match(r"https://github\.com/([\w-]+)/([\w.-]+)", github_repo_url)
+        if not match:
+            raise ValueError(f"Invalid GitHub URL: {github_repo_url}")
+
+        github_org = match.group(1)
+        github_repo_name = match.group(2)
+
+        # Verify repo exists and is accessible
+        repo_data = await github_service.get_repository(github_org, github_repo_name)
+        if not repo_data:
+            raise ValueError(f"Repository not found or not accessible: {github_repo_url}")
+
+        # Store for later steps
+        self._current_payload["github_org"] = github_org
+        self._current_payload["github_repo_name"] = github_repo_name
+        self._current_payload["github_repo_url"] = repo_data.get("html_url")
+
+        logger.info(f"[{workspace_slug}] Validated existing repo: {github_repo_url}")
+
+    async def _link_app_update_workspace(self, workspace_slug: str, workspace_id: str):
+        """Update workspace with app fields (before sandbox creation)
+
+        This must run BEFORE sandbox creation because the portal API
+        requires app_template_id to be set for sandbox operations.
+        """
+        payload = self._current_payload
+
+        # Calculate app subdomain (strips kanban. prefix from domain)
+        base_domain = DOMAIN.replace("kanban.", "")
+        app_subdomain = f"https://{workspace_slug}.app.{base_domain}"
+
+        # Build update payload with app fields (but keep linking_app status)
+        update_payload = {
+            "workspace_id": workspace_id,
+            "workspace_slug": workspace_slug,
+            "app_template_id": payload.get("app_template_id"),
+            "app_subdomain": app_subdomain,
+        }
+
+        # Include GitHub repo info
+        if payload.get("github_repo_name"):
+            update_payload["github_repo_name"] = payload["github_repo_name"]
+        if payload.get("github_repo_url"):
+            update_payload["github_repo_url"] = payload["github_repo_url"]
+        if payload.get("github_org"):
+            update_payload["github_org"] = payload["github_org"]
+
+        # Include Azure AD credentials
+        if payload.get("azure_app_id"):
+            update_payload["azure_app_id"] = payload["azure_app_id"]
+            update_payload["azure_object_id"] = payload["azure_object_id"]
+            update_payload["azure_client_secret"] = payload["azure_client_secret"]
+            update_payload["azure_tenant_id"] = payload["azure_tenant_id"]
+
+        await self.redis.publish("workspace:status", json.dumps(update_payload))
+        await asyncio.sleep(0.5)
+
+        logger.info(f"[{workspace_slug}] Workspace updated with app fields (subdomain: {app_subdomain})")
+
+    async def _link_app_finalize(self, workspace_slug: str, workspace_id: str):
+        """Finalize link app - set status to active"""
+        await self.redis.publish("workspace:status", json.dumps({
+            "workspace_id": workspace_id,
+            "workspace_slug": workspace_slug,
+            "status": "active",
+        }))
+        await asyncio.sleep(0.5)
+
+        logger.info(f"[{workspace_slug}] App link finalized")
+
+    async def unlink_app_from_workspace(self, task: dict):
+        """Unlink app from workspace, keeping kanban team intact"""
+        task_id = task["task_id"]
+        payload = task["payload"]
+        workspace_id = payload["workspace_id"]
+        workspace_slug = payload["workspace_slug"]
+        delete_github_repo = payload.get("delete_github_repo", False)
+
+        self._current_payload = payload
+
+        logger.info(f"Unlinking app from workspace: {workspace_slug} (delete_repo={delete_github_repo})")
+
+        steps = [
+            ("Deleting sandboxes", self._unlink_app_delete_sandboxes),
+            ("Stopping app containers", self._workspace_stop_app),
+            ("Removing app containers", self._unlink_app_remove_containers),
+            ("Deleting Azure app registration", self._workspace_delete_azure_app),
+        ]
+
+        if delete_github_repo:
+            steps.append(("Deleting GitHub repository", self._workspace_delete_github_repo))
+
+        steps.extend([
+            ("Cleaning up app data", self._unlink_app_cleanup_data),
+            ("Finalizing", self._unlink_app_finalize),
+        ])
+
+        try:
+            for i, (step_name, step_func) in enumerate(steps, 1):
+                await self.update_progress(task_id, i, len(steps), step_name)
+                await step_func(workspace_slug, workspace_id)
+                logger.info(f"[{workspace_slug}] {step_name} - completed")
+
+            await self.complete_task(task_id, {
+                "action": "unlink_app",
+                "workspace_slug": workspace_slug,
+                "workspace_id": workspace_id,
+            })
+
+            logger.info(f"App unlinked from workspace {workspace_slug} successfully")
+
+        except Exception as e:
+            logger.error(f"Unlink app failed: {e}")
+            # Revert workspace status to active on failure
+            await self.redis.publish("workspace:status", json.dumps({
+                "workspace_id": workspace_id,
+                "workspace_slug": workspace_slug,
+                "status": "active"
+            }))
+            await self.fail_task(task_id, str(e))
+            raise
+
+    async def _unlink_app_delete_sandboxes(self, workspace_slug: str, workspace_id: str):
+        """Delete all sandboxes associated with the app"""
+        sandboxes = self._get_workspace_sandboxes(workspace_slug)
+
+        if not sandboxes:
+            logger.info(f"[{workspace_slug}] No sandboxes to delete")
+            return
+
+        logger.info(f"[{workspace_slug}] Deleting {len(sandboxes)} sandbox(es)")
+
+        for full_slug in sandboxes:
+            try:
+                # Use full_slug as sandbox_id for cleanup functions
+                sandbox_id = full_slug
+                await self._sandbox_stop_containers(full_slug, sandbox_id)
+                await self._sandbox_remove_containers(full_slug, sandbox_id)
+                await self._sandbox_delete_branch(full_slug, sandbox_id)
+                await self._sandbox_archive_data(full_slug, sandbox_id)
+
+                # Publish sandbox deleted status
+                await self.redis.publish("sandbox:status", json.dumps({
+                    "sandbox_id": sandbox_id,
+                    "full_slug": full_slug,
+                    "status": "deleted"
+                }))
+
+                logger.info(f"[{workspace_slug}] Sandbox {full_slug} deleted")
+            except Exception as e:
+                logger.error(f"[{workspace_slug}] Error deleting sandbox {full_slug}: {e}")
+                # Continue with other sandboxes
+
+    async def _unlink_app_remove_containers(self, workspace_slug: str, workspace_id: str):
+        """Remove app containers and volumes"""
+        if not self.docker_available:
+            return
+
+        # Check both new and legacy compose file locations
+        compose_file = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml"
+        legacy_compose_file = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/app/docker-compose.yml"
+
+        compose_path = None
+        if Path(compose_file).exists():
+            compose_path = compose_file
+        elif Path(legacy_compose_file).exists():
+            compose_path = legacy_compose_file
+
+        if not compose_path:
+            logger.info(f"[{workspace_slug}] No app compose file found")
+            return
+
+        project_name = f"{workspace_slug}-app"
+
+        # Down with volumes to clean up database
+        result = subprocess.run(
+            ["docker", "compose", "-f", compose_path, "-p", project_name,
+             "down", "--remove-orphans", "--rmi", "local", "-v"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+
+        if result.returncode == 0:
+            logger.info(f"[{workspace_slug}] App containers and volumes removed")
+        else:
+            logger.warning(f"[{workspace_slug}] Container removal warning: {result.stderr}")
+
+    async def _unlink_app_cleanup_data(self, workspace_slug: str, workspace_id: str):
+        """Clean up app-related data files"""
+        from datetime import datetime
+
+        workspace_dir = WORKSPACES_DIR / workspace_slug
+
+        # Archive app directory if it exists
+        app_dir = workspace_dir / "app"
+        if app_dir.exists():
+            archive_dir = workspace_dir / ".archived-app"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            archived_name = f"app_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            shutil.move(str(app_dir), str(archive_dir / archived_name))
+            logger.info(f"[{workspace_slug}] App directory archived")
+
+        # Remove compose file
+        compose_file = workspace_dir / "docker-compose.app.yml"
+        if compose_file.exists():
+            compose_file.unlink()
+            logger.info(f"[{workspace_slug}] App compose file removed")
+
+    async def _unlink_app_finalize(self, workspace_slug: str, workspace_id: str):
+        """Finalize unlink - clear app fields from workspace"""
+        status_payload = {
+            "workspace_id": workspace_id,
+            "workspace_slug": workspace_slug,
+            "status": "active",
+            # Clear app-related fields by setting them to None
+            "app_template_id": None,
+            "github_repo_url": None,
+            "github_repo_name": None,
+            "github_org": None,
+            "app_subdomain": None,
+            "app_database_name": None,
+            "azure_app_id": None,
+            "azure_object_id": None,
+            "azure_client_secret": None,
+        }
+
+        await self.redis.publish("workspace:status", json.dumps(status_payload))
+        await asyncio.sleep(0.5)
+
+        logger.info(f"[{workspace_slug}] App unlink finalized")
+
     async def delete_workspace(self, task: dict):
         """Delete a workspace and all its resources"""
         task_id = task["task_id"]
         payload = task["payload"]
         workspace_id = payload["workspace_id"]
         workspace_slug = payload["workspace_slug"]
+        delete_github_repo = payload.get("delete_github_repo", False)
 
-        logger.info(f"Deleting workspace: {workspace_slug}")
+        logger.info(f"Deleting workspace: {workspace_slug} (delete_github_repo={delete_github_repo})")
 
         # Store payload for step functions
         self._current_payload = payload
@@ -2500,14 +3099,20 @@ This board helps you explore and develop ideas from concept to implementation-re
         steps = [
             ("Deleting sandboxes", self._workspace_delete_sandboxes),
             ("Stopping app containers", self._workspace_stop_app),
-            ("Deleting GitHub repository", self._workspace_delete_github_repo),
+        ]
+
+        # Only delete GitHub repo if explicitly requested
+        if delete_github_repo:
+            steps.append(("Deleting GitHub repository", self._workspace_delete_github_repo))
+
+        steps.extend([
             ("Deleting Azure app registration", self._workspace_delete_azure_app),
             ("Archiving workspace data", self._workspace_archive_data),
             ("Stopping kanban team", self._delete_stop_containers),
             ("Removing containers", self._delete_remove_containers),
             ("Archiving data", self._delete_archive_data),
             ("Cleaning up", self._delete_cleanup),
-        ]
+        ])
 
         try:
             for i, (step_name, step_func) in enumerate(steps, 1):
@@ -3316,7 +3921,7 @@ This board helps you explore and develop ideas from concept to implementation-re
         payload["pull_request_merged"] = pr.get("merged_at") is not None
 
     async def _sandbox_pr_approve(self, full_slug: str, sandbox_id: str):
-        """Approve the PR if it is open."""
+        """Approve the PR if it is open (skipped for self-owned PRs)."""
         payload = self._current_payload
         if payload.get("pull_request_merged"):
             logger.info(f"[{full_slug}] PR already merged, skipping approval")
@@ -3324,12 +3929,16 @@ This board helps you explore and develop ideas from concept to implementation-re
         if payload.get("pull_request_state") != "open":
             raise RuntimeError("Pull request is not open; cannot approve")
 
-        await github_service.approve_pull_request(
-            owner=payload["github_org"],
-            repo=payload["github_repo_name"],
-            pull_number=payload["pull_request_number"],
-            body="Auto-approve sandbox deploy",
-        )
+        try:
+            await github_service.approve_pull_request(
+                owner=payload["github_org"],
+                repo=payload["github_repo_name"],
+                pull_number=payload["pull_request_number"],
+                body="Auto-approve sandbox deploy",
+            )
+        except Exception as e:
+            # GitHub doesn't allow approving your own PR - skip and proceed to merge
+            logger.warning(f"[{full_slug}] Could not approve PR (may be self-owned): {e}")
 
     async def _sandbox_pr_merge(self, full_slug: str, sandbox_id: str):
         """Merge the PR into main."""
@@ -3671,6 +4280,7 @@ This board helps you explore and develop ideas from concept to implementation-re
         task_id = task["task_id"]
         payload = task["payload"]
         card_id = payload["card_id"]
+        card_number = payload.get("card_number", "")
         card_title = payload["card_title"]
         card_description = payload["card_description"]
         column_name = payload["column_name"]
@@ -3685,8 +4295,11 @@ This board helps you explore and develop ideas from concept to implementation-re
         kanban_api_url = payload["kanban_api_url"]
         target_project_path = payload["target_project_path"]
 
+        # Build log prefix with card_number for easier debugging
+        log_prefix = f"[{card_number}]" if card_number else f"[{card_id[:8]}]"
+
         logger.info(
-            f"Processing agent task: card={card_id}, agent={agent_name}, "
+            f"{log_prefix} Processing agent task: agent={agent_name}, "
             f"sandbox={sandbox_id}"
         )
 
@@ -3694,6 +4307,8 @@ This board helps you explore and develop ideas from concept to implementation-re
         ctx = {
             "payload": payload,
             "result": None,
+            "log_prefix": log_prefix,  # Store for use in step functions
+            "task_id": task_id,  # Store for use when clearing agent_status
         }
 
         steps = [
@@ -3717,19 +4332,20 @@ This board helps you explore and develop ideas from concept to implementation-re
                         "agent_status": {
                             "status": "processing",
                             "agent_name": agent_name,
+                            "task_id": task_id,
                             "started_at": datetime.utcnow().isoformat() + "Z"
                         }
                     }
                 )
-                logger.info(f"[{card_id}] Updated agent_status to 'processing'")
+                logger.info(f"{log_prefix} Updated agent_status to 'processing'")
         except Exception as e:
-            logger.warning(f"[{card_id}] Failed to update agent_status to processing: {e}")
+            logger.warning(f"{log_prefix} Failed to update agent_status to processing: {e}")
 
         try:
             for i, (step_name, step_func) in enumerate(steps, 1):
                 await self.update_progress(task_id, i, len(steps), step_name)
                 await step_func(card_id, sandbox_id, ctx)
-                logger.info(f"[{card_id}] {step_name} - completed")
+                logger.info(f"{log_prefix} {step_name} - completed")
 
             result = ctx["result"]
             await self.complete_task(task_id, {
@@ -3740,10 +4356,10 @@ This board helps you explore and develop ideas from concept to implementation-re
                 "files_modified": result.files_modified if result else [],
             })
 
-            logger.info(f"Agent task completed: card={card_id}")
+            logger.info(f"{log_prefix} Agent task completed successfully")
 
         except Exception as e:
-            logger.error(f"Agent task failed: {e}")
+            logger.error(f"{log_prefix} Agent task failed: {e}")
             error_message = str(e)
 
             try:
@@ -3761,7 +4377,7 @@ This board helps you explore and develop ideas from concept to implementation-re
                             }
                         }
                     )
-                    logger.info(f"[{card_id}] Updated agent_status to 'failed'")
+                    logger.info(f"{log_prefix} Updated agent_status to 'failed'")
 
                     # Add a comment explaining the error
                     agent_config = payload.get("agent_config", {})
@@ -3780,30 +4396,52 @@ This board helps you explore and develop ideas from concept to implementation-re
                     logger.info(f"[{card_id}] Added error comment to card")
 
                     # Move card to Development column (column_failure)
+                    # But first check if user manually moved the card while agent was running
                     column_failure = agent_config.get("column_failure", "Development")
                     board_id = payload.get("board_id")
+                    original_column_name = payload.get("column_name", "")
+                    should_move_card = True
+
                     if board_id:
-                        board_resp = await client.get(
-                            f"{kanban_api_url}/boards/{board_id}",
+                        # Check if card is still in the original column
+                        card_check_resp = await client.get(
+                            f"{kanban_api_url}/cards/{card_id}",
                             headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")}
                         )
-                        if board_resp.status_code == 200:
-                            board_data = board_resp.json()
-                            for col in board_data.get("columns", []):
-                                if col.get("name") == column_failure:
-                                    move_resp = await client.post(
-                                        f"{kanban_api_url}/cards/{card_id}/move",
-                                        headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")},
-                                        params={"column_id": col["id"], "position": 0}
-                                    )
-                                    if move_resp.status_code == 200:
-                                        logger.info(f"Moved card to column: {column_failure}")
-                                    break
+                        if card_check_resp.status_code == 200:
+                            card_check_data = card_check_resp.json()
+                            current_column = card_check_data.get("column", {})
+                            current_column_name = current_column.get("name", "")
+                            if current_column_name and current_column_name != original_column_name:
+                                logger.info(
+                                    f"[{card_id}] Card was moved by user from '{original_column_name}' to "
+                                    f"'{current_column_name}' while agent was running - skipping automatic move"
+                                )
+                                should_move_card = False
 
-                    # Clear agent_status
+                        if should_move_card:
+                            board_resp = await client.get(
+                                f"{kanban_api_url}/boards/{board_id}",
+                                headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")}
+                            )
+                            if board_resp.status_code == 200:
+                                board_data = board_resp.json()
+                                for col in board_data.get("columns", []):
+                                    if col.get("name") == column_failure:
+                                        move_resp = await client.post(
+                                            f"{kanban_api_url}/cards/{card_id}/move",
+                                            headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")},
+                                            params={"column_id": col["id"], "position": 0}
+                                        )
+                                        if move_resp.status_code == 200:
+                                            logger.info(f"Moved card to column: {column_failure}")
+                                        break
+
+                    # Clear agent_status (pass task_id to prevent race condition)
                     await client.delete(
                         f"{kanban_api_url}/cards/{card_id}/agent-status",
-                        headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")}
+                        headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")},
+                        params={"task_id": task_id}
                     )
                     logger.info(f"[{card_id}] Cleared agent_status")
 
@@ -3815,6 +4453,7 @@ This board helps you explore and develop ideas from concept to implementation-re
     async def _agent_prepare_context(self, card_id: str, sandbox_id: str, ctx: dict):
         """Prepare the sandbox context for agent execution."""
         payload = ctx["payload"]
+        log_prefix = ctx.get("log_prefix", f"[{card_id[:8]}]")
         workspace_slug = payload["workspace_slug"]
         sandbox_slug = payload.get("sandbox_slug")
 
@@ -3823,7 +4462,7 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         # Construct full_slug from workspace and sandbox slugs
         full_slug = f"{workspace_slug}-{sandbox_slug}"
-        logger.info(f"[{card_id}] Using sandbox: {full_slug} (branch: sandbox/{full_slug})")
+        logger.info(f"{log_prefix} Using sandbox: {full_slug} (branch: sandbox/{full_slug})")
 
         base_domain = DOMAIN.replace("kanban.", "")
         port_suffix = "" if PORT == "443" else f":{PORT}"
@@ -3844,7 +4483,7 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         # If repo doesn't exist, clone it now
         if not repo_path.exists() or not (repo_path / ".git").exists():
-            logger.info(f"[{card_id}] Repository not found at {repo_path}, cloning now...")
+            logger.info(f"{log_prefix} Repository not found at {repo_path}, cloning now...")
 
             # Get GitHub info from payload or lookup workspace
             github_repo_url = payload.get("github_repo_url")
@@ -3860,7 +4499,7 @@ This board helps you explore and develop ideas from concept to implementation-re
             os.makedirs(str(repo_path), exist_ok=True)
 
             # Clone with the sandbox branch
-            logger.info(f"[{card_id}] Cloning {github_repo_url} branch {git_branch}")
+            logger.info(f"{log_prefix} Cloning {github_repo_url} branch {git_branch}")
             result = subprocess.run(
                 ["git", "clone", "--branch", git_branch, clone_url, "."],
                 cwd=str(repo_path),
@@ -3870,7 +4509,7 @@ This board helps you explore and develop ideas from concept to implementation-re
             if result.returncode != 0:
                 raise RuntimeError(f"Failed to clone repository: {result.stderr}")
 
-            logger.info(f"[{card_id}] Repository cloned successfully")
+            logger.info(f"{log_prefix} Repository cloned successfully")
 
         # Use the repo path
         payload["target_project_path"] = str(repo_path)
@@ -3911,6 +4550,34 @@ This board helps you explore and develop ideas from concept to implementation-re
         else:
             logger.info(f"Pulled latest changes for {git_branch}")
 
+        # Check if working tree is dirty and clean up if needed
+        log_prefix = ctx.get("log_prefix", f"[{card_id[:8]}]")
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True
+        )
+        if status_result.returncode == 0 and status_result.stdout.strip():
+            dirty_files = [line[3:] for line in status_result.stdout.strip().splitlines() if len(line) > 3]
+            logger.warning(f"{log_prefix} Git working tree is dirty with {len(dirty_files)} file(s), cleaning up...")
+
+            # Reset staged changes and checkout to clean working tree
+            subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=str(repo_path), capture_output=True)
+            subprocess.run(["git", "clean", "-fd"], cwd=str(repo_path), capture_output=True)
+
+            # Verify it's clean now
+            verify_result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=str(repo_path),
+                capture_output=True,
+                text=True
+            )
+            if verify_result.returncode == 0 and not verify_result.stdout.strip():
+                logger.info(f"{log_prefix} Git working tree cleaned successfully")
+            else:
+                logger.warning(f"{log_prefix} Git working tree still dirty after cleanup: {verify_result.stdout.strip()[:100]}")
+
     async def _agent_check_sandbox_health(self, card_id: str, sandbox_id: str, ctx: dict):
         """Check if sandbox containers are running before executing agent.
 
@@ -3918,12 +4585,13 @@ This board helps you explore and develop ideas from concept to implementation-re
         the sandbox is actually down (returning 404).
         """
         payload = ctx["payload"]
+        log_prefix = ctx.get("log_prefix", f"[{card_id[:8]}]")
         agent_config = payload.get("agent_config", {})
         agent_name = agent_config.get("agent_name", "")
 
         # Only require sandbox health check for release agent
         if agent_name != "release":
-            logger.debug(f"[{card_id}] Skipping sandbox health check for agent: {agent_name}")
+            logger.debug(f"{log_prefix} Skipping sandbox health check for agent: {agent_name}")
             return
 
         workspace_slug = payload["workspace_slug"]
@@ -3935,7 +4603,7 @@ This board helps you explore and develop ideas from concept to implementation-re
         sandbox_url = payload.get("sandbox_url")
         sandbox_api_url = payload.get("sandbox_api_url")
 
-        logger.info(f"[{card_id}] Checking sandbox health for {full_slug}")
+        logger.info(f"{log_prefix} Checking sandbox health for {full_slug}")
 
         # Check 1: Verify sandbox containers exist and are running
         if self.docker_available:
@@ -3975,14 +4643,14 @@ This board helps you explore and develop ideas from concept to implementation-re
                             f"({restart_count} restarts). Please check logs and fix issues."
                         )
 
-                logger.info(f"[{card_id}] Container {api_container} is running")
+                logger.info(f"{log_prefix} Container {api_container} is running")
 
             except subprocess.TimeoutExpired:
-                logger.warning(f"[{card_id}] Docker inspect timed out")
+                logger.warning(f"{log_prefix} Docker inspect timed out")
             except RuntimeError:
                 raise
             except Exception as e:
-                logger.warning(f"[{card_id}] Could not check container status: {e}")
+                logger.warning(f"{log_prefix} Could not check container status: {e}")
 
         # Check 2: Verify sandbox API is responding (not 404)
         if sandbox_api_url:
@@ -3990,7 +4658,7 @@ This board helps you explore and develop ideas from concept to implementation-re
                 async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
                     # Try the health endpoint
                     health_url = f"{sandbox_api_url}/health"
-                    logger.debug(f"[{card_id}] Checking {health_url}")
+                    logger.debug(f"{log_prefix} Checking {health_url}")
 
                     response = await client.get(health_url)
 
@@ -4006,11 +4674,11 @@ This board helps you explore and develop ideas from concept to implementation-re
                         )
                     elif response.status_code != 200:
                         logger.warning(
-                            f"[{card_id}] Sandbox health check returned {response.status_code} "
+                            f"{log_prefix} Sandbox health check returned {response.status_code} "
                             f"(expected 200, but continuing)"
                         )
                     else:
-                        logger.info(f"[{card_id}] Sandbox API health check passed")
+                        logger.info(f"{log_prefix} Sandbox API health check passed")
 
             except httpx.ConnectError as e:
                 raise RuntimeError(
@@ -4025,9 +4693,9 @@ This board helps you explore and develop ideas from concept to implementation-re
             except RuntimeError:
                 raise
             except Exception as e:
-                logger.warning(f"[{card_id}] Sandbox API check failed (non-fatal): {e}")
+                logger.warning(f"{log_prefix} Sandbox API check failed (non-fatal): {e}")
 
-        logger.info(f"[{card_id}] Sandbox health check passed for {full_slug}")
+        logger.info(f"{log_prefix} Sandbox health check passed for {full_slug}")
 
     def _resolve_llm_provider(self, agent_config: dict) -> str:
         """Resolve the LLM provider for an agent, defaulting to Claude CLI."""
@@ -4045,17 +4713,18 @@ This board helps you explore and develop ideas from concept to implementation-re
     async def _agent_resolve_session(self, card_id: str, sandbox_id: str, ctx: dict):
         """Ensure a persistent session ID exists when supported by the agent CLI."""
         payload = ctx["payload"]
+        log_prefix = ctx.get("log_prefix", f"[{card_id[:8]}]")
         llm_provider = payload.get("llm_provider") or self._resolve_llm_provider(
             payload.get("agent_config", {})
         )
         if llm_provider != "claude-cli":
-            logger.info(f"[{card_id}] Skipping session resolution for provider {llm_provider}")
+            logger.info(f"{log_prefix} Skipping session resolution for provider {llm_provider}")
             return
         session_id = payload.get("claude_session_id")
         kanban_api_url = payload.get("kanban_api_url")
 
         if session_id and not self._is_valid_uuid(session_id):
-            logger.warning(f"[{card_id}] Invalid Claude session ID provided: {session_id}")
+            logger.warning(f"{log_prefix} Invalid Claude session ID provided: {session_id}")
             session_id = None
 
         if not session_id:
@@ -4072,14 +4741,14 @@ This board helps you explore and develop ideas from concept to implementation-re
                         )
                     if resp.status_code != 200:
                         logger.warning(
-                            f"[{card_id}] Failed to persist session ID: {resp.status_code} {resp.text}"
+                            f"{log_prefix} Failed to persist session ID: {resp.status_code} {resp.text}"
                         )
                 except Exception as e:
-                    logger.warning(f"[{card_id}] Failed to persist session ID: {e}")
+                    logger.warning(f"{log_prefix} Failed to persist session ID: {e}")
             else:
-                logger.warning(f"[{card_id}] Missing kanban_api_url; cannot persist session ID")
+                logger.warning(f"{log_prefix} Missing kanban_api_url; cannot persist session ID")
 
-        logger.info(f"[{card_id}] Claude session resolved: {session_id}")
+        logger.info(f"{log_prefix} Claude session resolved: {session_id}")
 
     @staticmethod
     def _is_valid_uuid(value: str) -> bool:
@@ -4097,6 +4766,7 @@ This board helps you explore and develop ideas from concept to implementation-re
         The agent will authenticate via Playwright browser automation.
         """
         payload = ctx["payload"]
+        log_prefix = ctx.get("log_prefix", f"[{card_id[:8]}]")
         agent_name = payload.get("agent_config", {}).get("agent_name", "")
         if agent_name != "qa":
             return
@@ -4117,7 +4787,7 @@ This board helps you explore and develop ideas from concept to implementation-re
                 "Please ensure 'test-user-email' and 'test-user-password' secrets are configured."
             )
 
-        logger.info(f"[{card_id}] QA credentials loaded for browser authentication")
+        logger.info(f"{log_prefix} QA credentials loaded for browser authentication")
 
         # Store credentials for inclusion in the prompt (QA agent authenticates via Playwright)
         payload["qa_test_email"] = test_user_email
@@ -4212,7 +4882,8 @@ This board helps you explore and develop ideas from concept to implementation-re
             )
 
         if not ctx["result"].success:
-            logger.error(f"Agent CLI failed: {ctx['result'].error}")
+            log_prefix = ctx.get("log_prefix", f"[{card_id[:8]}]")
+            logger.error(f"{log_prefix} Agent CLI failed: {ctx['result'].error}")
 
     async def _agent_process_results(self, card_id: str, sandbox_id: str, ctx: dict):
         """Process results from Claude Code execution."""
@@ -4221,6 +4892,7 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         result = ctx["result"]
         payload = ctx["payload"]
+        log_prefix = ctx.get("log_prefix", f"[{card_id[:8]}]")
         target_project_path = payload["target_project_path"]
         git_branch = payload["git_branch"]
 
@@ -4232,7 +4904,7 @@ This board helps you explore and develop ideas from concept to implementation-re
         status_code, status_out, status_err = await claude_runner.run_ssh_command(status_cmd, timeout=30)
         if status_code != 0:
             status_error = status_err.strip() or "git status failed"
-            logger.warning(f"[{card_id}] Failed to check git status: {status_error}")
+            logger.warning(f"{log_prefix} Failed to check git status: {status_error}")
             result.git_dirty = True
             result.commit_error = status_error
             if result.error:
@@ -4290,7 +4962,7 @@ This board helps you explore and develop ideas from concept to implementation-re
                         hash_code, hash_out, _ = await claude_runner.run_ssh_command(hash_cmd, timeout=15)
                         if hash_code == 0:
                             commit_hash = hash_out.strip()
-                        logger.info(f"[{card_id}] Committed changes ({len(result.files_modified)} files)")
+                        logger.info(f"{log_prefix} Committed changes ({len(result.files_modified)} files)")
 
             # Verify working tree is clean after commit attempt
             final_cmd = f"cd {repo_path} && git status --porcelain"
@@ -4302,7 +4974,7 @@ This board helps you explore and develop ideas from concept to implementation-re
             elif final_code == 0:
                 result.git_dirty = False
             else:
-                logger.warning(f"[{card_id}] Failed to verify git status: {final_err.strip() or final_out.strip()}")
+                logger.warning(f"{log_prefix} Failed to verify git status: {final_err.strip() or final_out.strip()}")
                 if not commit_error:
                     commit_error = f"git status failed after commit: {final_err.strip() or final_out.strip()}"
         elif status_ok:
@@ -4327,7 +4999,7 @@ This board helps you explore and develop ideas from concept to implementation-re
             push_code, push_out, push_err = await claude_runner.run_ssh_command(push_cmd, timeout=60)
             if push_code == 0:
                 push_success = True
-                logger.info(f"[{card_id}] Pushed changes to {git_branch}")
+                logger.info(f"{log_prefix} Pushed changes to {git_branch}")
             else:
                 push_error = f"git push failed: {push_err.strip() or push_out.strip()}"
 
@@ -4340,7 +5012,7 @@ This board helps you explore and develop ideas from concept to implementation-re
         result.ahead_count = ahead_count
 
         if commit_error:
-            logger.warning(f"[{card_id}] Commit issue: {commit_error}")
+            logger.warning(f"{log_prefix} Commit issue: {commit_error}")
             result.commit_error = commit_error
             if result.error:
                 result.error = f"{result.error}\nCommit error: {commit_error}"
@@ -4348,7 +5020,7 @@ This board helps you explore and develop ideas from concept to implementation-re
                 result.error = f"Commit error: {commit_error}"
             result.success = False
         elif push_error:
-            logger.warning(f"[{card_id}] Push issue: {push_error}")
+            logger.warning(f"{log_prefix} Push issue: {push_error}")
             if result.error:
                 result.error = f"{result.error}\nPush error: {push_error}"
             else:
@@ -4362,6 +5034,7 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         result = ctx["result"]
         payload = ctx["payload"]
+        log_prefix = ctx.get("log_prefix", f"[{card_id[:8]}]")
         workspace_slug = payload["workspace_slug"]
         # Use internal Docker network URL for service-to-service calls
         kanban_api_url = f"http://{workspace_slug}-kanban-api-1:8000"
@@ -4497,8 +5170,31 @@ This board helps you explore and develop ideas from concept to implementation-re
                 if agent_name == "scrum_master" and result.success and board_id:
                     await self._handle_scrum_master_output(card_id, kanban_api_url, board_id, ctx)
 
+                # Check if we should move the card
+                # Skip move if user manually moved the card to another column while agent was running
+                original_column_name = payload.get("column_name", "")
+                should_move_card = True
+
+                if board_id and (column_success or column_failure):
+                    # Fetch current card state to check its column
+                    card_resp = await client.get(
+                        f"{kanban_api_url}/cards/{card_id}",
+                        headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")}
+                    )
+                    if card_resp.status_code == 200:
+                        card_data = card_resp.json()
+                        current_column = card_data.get("column", {})
+                        current_column_name = current_column.get("name", "")
+
+                        if current_column_name and current_column_name != original_column_name:
+                            logger.info(
+                                f"{log_prefix} Card was moved by user from '{original_column_name}' to "
+                                f"'{current_column_name}' while agent was running - skipping automatic move"
+                            )
+                            should_move_card = False
+
                 # If successful and column_success is set, move the card
-                if result.success and column_success:
+                if result.success and column_success and should_move_card:
                     if board_id:
                         board_resp = await client.get(
                             f"{kanban_api_url}/boards/{board_id}",
@@ -4518,7 +5214,7 @@ This board helps you explore and develop ideas from concept to implementation-re
                                     break
 
                 # If failed and column_failure is set, move the card there
-                elif not result.success and column_failure:
+                elif not result.success and column_failure and should_move_card:
                     if board_id:
                         board_resp = await client.get(
                             f"{kanban_api_url}/boards/{board_id}",
@@ -4540,14 +5236,21 @@ This board helps you explore and develop ideas from concept to implementation-re
                 # Clear the agent_status now that processing is complete
                 # (we clear it rather than setting to completed/failed because
                 # the card description and comment already show the result)
+                # Pass task_id to prevent race condition where a new task has already started
+                task_id = ctx.get("task_id")
                 clear_resp = await client.delete(
                     f"{kanban_api_url}/cards/{card_id}/agent-status",
-                    headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")}
+                    headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")},
+                    params={"task_id": task_id} if task_id else None
                 )
                 if clear_resp.status_code == 200:
-                    logger.info(f"[{card_id}] Cleared agent_status")
+                    clear_data = clear_resp.json()
+                    if clear_data.get("cleared"):
+                        logger.info(f"{log_prefix} Cleared agent_status")
+                    else:
+                        logger.info(f"{log_prefix} Skipped clearing agent_status (task_id mismatch - new task already started)")
                 else:
-                    logger.warning(f"[{card_id}] Failed to clear agent_status: {clear_resp.status_code}")
+                    logger.warning(f"{log_prefix} Failed to clear agent_status: {clear_resp.status_code}")
 
         except Exception as e:
             logger.error(f"Error updating card via API: {e}")

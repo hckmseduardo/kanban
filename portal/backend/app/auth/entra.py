@@ -221,6 +221,9 @@ class EntraAuthService:
 
         user_info = self.decode_id_token(id_token)
 
+        # Log all claims for debugging email extraction issues
+        logger.info(f"ID token claims: {list(user_info.keys())}")
+
         # Get additional info from Graph API if needed
         access_token = token_response.get("access_token")
         if access_token:
@@ -230,6 +233,7 @@ class EntraAuthService:
             except Exception as e:
                 logger.warning(f"Failed to get Graph info: {e}")
 
+        # Extract email from various possible claims
         emails_claim = user_info.get("emails")
         email_from_claims = ""
         if isinstance(emails_claim, list) and emails_claim:
@@ -237,10 +241,35 @@ class EntraAuthService:
         elif isinstance(emails_claim, str):
             email_from_claims = emails_claim
 
+        # Check signInNames for Entra External ID (CIAM)
+        sign_in_names = user_info.get("signInNames", [])
+        email_from_signin = ""
+        if isinstance(sign_in_names, list):
+            for name in sign_in_names:
+                if isinstance(name, dict) and name.get("type") == "emailAddress":
+                    email_from_signin = name.get("value", "")
+                    break
+                elif isinstance(name, str) and "@" in name:
+                    email_from_signin = name
+                    break
+
+        # Check identities array (Entra External ID / B2C)
+        identities = user_info.get("identities", [])
+        email_from_identities = ""
+        if isinstance(identities, list):
+            for identity in identities:
+                if isinstance(identity, dict):
+                    issuer_assigned_id = identity.get("issuerAssignedId", "")
+                    if "@" in str(issuer_assigned_id):
+                        email_from_identities = issuer_assigned_id
+                        break
+
         # Try multiple fields for email (personal vs work accounts differ)
         email = (
             user_info.get("email") or
             email_from_claims or
+            email_from_signin or
+            email_from_identities or
             user_info.get("preferred_username") or
             user_info.get("upn") or
             user_info.get("unique_name") or
@@ -250,6 +279,8 @@ class EntraAuthService:
         )
 
         logger.info(f"Entra auth: oid={user_info.get('oid')}, email={email}, name={user_info.get('name')}")
+        if not email:
+            logger.warning(f"No email found! Available claims: {user_info}")
 
         return {
             "oid": user_info.get("oid"),

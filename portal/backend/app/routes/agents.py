@@ -205,11 +205,13 @@ async def receive_card_event(
             labels=card.get("labels", []),
             priority="high" if "urgent" in [l.lower() for l in card.get("labels", [])] else "normal",
             github_repo_url=workspace.get("github_repo_url"),
+            card_number=card.get("card_number"),
         )
 
+        card_num = card.get('card_number') or card.get('id', '')[:8]
         logger.info(
             f"Agent task queued: {task_id} "
-            f"(card={card.get('id')}, agent={agent_config['agent_name']}, sandbox={sandbox_id})"
+            f"(card={card_num}, agent={agent_config['agent_name']}, sandbox={sandbox_id})"
         )
 
         return {

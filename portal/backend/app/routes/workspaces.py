@@ -23,14 +23,84 @@ from app.models.workspace import (
     WorkspaceResponse,
     WorkspaceListResponse,
     WorkspaceStatusResponse,
+    LinkAppFromTemplateRequest,
+    LinkAppFromRepoRequest,
+    UnlinkAppRequest,
+    DeleteWorkspaceRequest,
 )
 from app.services.database_service import db_service
 from app.services.task_service import task_service
 from app.services.email_service import send_workspace_invitation_email
+import httpx
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def _add_member_to_kanban_team(
+    workspace_slug: str,
+    user_id: str,
+    user_email: str,
+    user_name: str,
+    role: str
+) -> bool:
+    """
+    Add a member to the kanban-team's members database.
+    This is called when a user accepts a workspace invitation.
+
+    The kanban-team uses its own database for members, separate from the portal.
+    We need to add the member there so they can access the kanban board.
+    """
+    # Build kanban API URL
+    if settings.port == 443 or settings.port == "443":
+        kanban_api_url = f"https://{workspace_slug}.{settings.domain}/api"
+    else:
+        kanban_api_url = f"https://{workspace_slug}.{settings.domain}:{settings.port}/api"
+
+    # Use the cross-domain secret for service-to-service authentication
+    headers = {
+        "X-Service-Secret": settings.cross_domain_secret
+    }
+
+    member_data = {
+        "id": user_id,
+        "email": user_email,
+        "name": user_name or user_email.split("@")[0],
+        "role": role
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0, verify=False, headers=headers) as client:
+            response = await client.post(
+                f"{kanban_api_url}/team/members",
+                json=member_data
+            )
+
+            if response.status_code < 400:
+                logger.info(
+                    f"Added member {user_email} to kanban-team {workspace_slug} "
+                    f"with role {role}"
+                )
+                return True
+            elif response.status_code == 400:
+                # Member might already exist - that's fine
+                logger.info(
+                    f"Member {user_email} may already exist in kanban-team {workspace_slug}: "
+                    f"{response.text}"
+                )
+                return True
+            else:
+                logger.error(
+                    f"Failed to add member to kanban-team {workspace_slug}: "
+                    f"{response.status_code} - {response.text}"
+                )
+                return False
+
+    except Exception as e:
+        logger.error(f"Error adding member to kanban-team {workspace_slug}: {e}")
+        # Don't fail the whole invitation acceptance - portal membership is already set
+        return False
 
 
 # Member request/response models
@@ -180,7 +250,7 @@ def _workspace_to_response(workspace: dict, user_id: str = None) -> WorkspaceRes
         app_template_slug=app_template_slug,
         github_repo_url=workspace.get("github_repo_url"),
         github_repo_name=workspace.get("github_repo_name"),
-        app_subdomain=get_app_subdomain(workspace["slug"]) if workspace.get("app_template_id") else None,
+        app_subdomain=get_app_subdomain(workspace["slug"]) if (workspace.get("app_template_id") or workspace.get("github_repo_url")) else None,
         app_database_name=workspace.get("app_database_name"),
         azure_app_id=workspace.get("azure_app_id"),
         azure_object_id=workspace.get("azure_object_id"),
@@ -411,6 +481,7 @@ async def update_workspace(
 @router.delete("/{slug}")
 async def delete_workspace(
     slug: str,
+    request: DeleteWorkspaceRequest = DeleteWorkspaceRequest(),
     auth: AuthContext = Depends(require_scope("workspaces:write"))
 ):
     """
@@ -420,7 +491,7 @@ async def delete_workspace(
     1. Delete all sandboxes
     2. Delete the app (if present)
     3. Delete the kanban team
-    4. Delete the GitHub repo (optional)
+    4. Delete the GitHub repo (if delete_github_repo=True)
     5. Remove all data
 
     Access: Owner only
@@ -448,12 +519,13 @@ async def delete_workspace(
         sandboxes=sandbox_list,
         github_org=workspace.get("github_org"),
         github_repo_name=workspace.get("github_repo_name"),
+        delete_github_repo=request.delete_github_repo,
     )
 
     # Update status to deleting
     db_service.update_workspace(workspace["id"], {"status": "deleting"})
 
-    logger.info(f"Workspace deletion started: {slug} by {auth.user['id']}")
+    logger.info(f"Workspace deletion started: {slug} by {auth.user['id']} (delete_repo={request.delete_github_repo})")
 
     return {
         "message": "Workspace deletion started",
@@ -611,6 +683,185 @@ async def start_workspace_kanban(
 
     return {
         "message": "Kanban start initiated",
+        "task_id": task_id
+    }
+
+
+# ============================================================================
+# Link/Unlink App Endpoints
+# ============================================================================
+
+
+@router.post("/{slug}/link-app")
+async def link_app_to_workspace(
+    slug: str,
+    request: LinkAppFromTemplateRequest | LinkAppFromRepoRequest,
+    auth: AuthContext = Depends(require_scope("workspaces:write"))
+):
+    """
+    Link an app to an existing kanban-only workspace.
+
+    Two modes:
+    1. From template: Creates a new GitHub repo from the app template
+    2. From existing repo: Uses an existing GitHub repository
+
+    This starts an async provisioning process that will:
+    1. Create or validate GitHub repository
+    2. Create Azure app registration
+    3. Clone repository locally
+    4. Create app database
+    5. Deploy Docker containers
+    6. Create foundation sandbox
+
+    Access: Owner or admin only
+
+    Authentication: JWT or Portal API token
+    Required scope: workspaces:write
+    """
+    import re
+
+    workspace, membership = get_workspace_with_access(
+        slug, auth.user["id"], require_role="admin"
+    )
+
+    # Validate workspace is active
+    if workspace.get("status") != "active":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot link app to workspace with status '{workspace.get('status')}'"
+        )
+
+    # Validate workspace doesn't already have an app
+    if workspace.get("app_template_id"):
+        raise HTTPException(
+            status_code=400,
+            detail="Workspace already has an app linked"
+        )
+
+    # Determine mode and validate
+    app_template = None
+    github_repo_url = None
+    github_repo_name = None
+    github_org = None
+
+    if isinstance(request, LinkAppFromTemplateRequest):
+        # Template mode - validate template exists and is active
+        app_template = db_service.get_app_template_by_slug(request.app_template_slug)
+        if not app_template:
+            raise HTTPException(
+                status_code=400,
+                detail=f"App template '{request.app_template_slug}' not found"
+            )
+        if not app_template.get("active", True):
+            raise HTTPException(
+                status_code=400,
+                detail=f"App template '{request.app_template_slug}' is not active"
+            )
+        github_org = request.github_org
+    else:
+        # Existing repo mode - parse URL
+        github_repo_url = request.github_repo_url
+        match = re.match(r"https://github\.com/([\w-]+)/([\w.-]+)", github_repo_url)
+        if not match:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid GitHub repository URL format"
+            )
+        github_org = match.group(1)
+        github_repo_name = match.group(2)
+
+    # Update workspace status to linking
+    db_service.update_workspace(workspace["id"], {"status": "linking_app"})
+
+    # Create link app task
+    task_id = await task_service.create_workspace_link_app_task(
+        workspace_id=workspace["id"],
+        workspace_slug=workspace["slug"],
+        user_id=auth.user["id"],
+        app_template_id=app_template["id"] if app_template else None,
+        template_owner=app_template.get("github_template_owner") if app_template else None,
+        template_repo=app_template.get("github_template_repo") if app_template else None,
+        github_org=github_org,
+        github_repo_url=github_repo_url,
+        github_repo_name=github_repo_name,
+    )
+
+    logger.info(
+        f"App linking started for workspace {slug} "
+        f"(template: {app_template['slug'] if app_template else 'existing-repo'}) "
+        f"by {auth.user['id']}"
+    )
+
+    # Refresh workspace data
+    workspace = db_service.get_workspace_by_slug(slug)
+
+    return {
+        "message": "App linking started",
+        "workspace": _workspace_to_response(workspace, auth.user["id"]),
+        "task_id": task_id
+    }
+
+
+@router.post("/{slug}/unlink-app")
+async def unlink_app_from_workspace(
+    slug: str,
+    request: UnlinkAppRequest,
+    auth: AuthContext = Depends(require_scope("workspaces:write"))
+):
+    """
+    Unlink app from workspace, keeping kanban team intact.
+
+    This starts an async process that will:
+    1. Delete all sandboxes associated with the app
+    2. Stop and remove app containers
+    3. Delete Azure app registration
+    4. Optionally delete GitHub repository
+    5. Clear app-related fields from workspace
+
+    Access: Owner or admin only
+
+    Authentication: JWT or Portal API token
+    Required scope: workspaces:write
+    """
+    workspace, membership = get_workspace_with_access(
+        slug, auth.user["id"], require_role="admin"
+    )
+
+    # Validate workspace is active
+    if workspace.get("status") != "active":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot unlink app from workspace with status '{workspace.get('status')}'"
+        )
+
+    # Validate workspace has an app
+    if not workspace.get("app_template_id") and not workspace.get("github_repo_url"):
+        raise HTTPException(
+            status_code=400,
+            detail="Workspace does not have an app to unlink"
+        )
+
+    # Update workspace status to unlinking
+    db_service.update_workspace(workspace["id"], {"status": "unlinking_app"})
+
+    # Create unlink app task
+    task_id = await task_service.create_workspace_unlink_app_task(
+        workspace_id=workspace["id"],
+        workspace_slug=workspace["slug"],
+        user_id=auth.user["id"],
+        azure_object_id=workspace.get("azure_object_id"),
+        github_org=workspace.get("github_org"),
+        github_repo_name=workspace.get("github_repo_name"),
+        delete_github_repo=request.delete_github_repo,
+    )
+
+    logger.info(
+        f"App unlinking started for workspace {slug} "
+        f"(delete_repo={request.delete_github_repo}) by {auth.user['id']}"
+    )
+
+    return {
+        "message": "App unlinking started",
         "task_id": task_id
     }
 
@@ -1319,11 +1570,20 @@ async def accept_workspace_invitation(
             "already_member": True
         }
 
-    # Add user to team
+    # Add user to portal's team membership
     db_service.add_team_member(
         workspace["kanban_team_id"],
         auth.user["id"],
         invitation["role"]
+    )
+
+    # Add user to kanban-team's members database
+    await _add_member_to_kanban_team(
+        workspace_slug=workspace["slug"],
+        user_id=auth.user["id"],
+        user_email=auth.user.get("email", ""),
+        user_name=auth.user.get("display_name", ""),
+        role=invitation["role"]
     )
 
     # Mark invitation as accepted

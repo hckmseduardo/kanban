@@ -35,6 +35,35 @@ class WorkspaceUpdateRequest(BaseModel):
     description: Optional[str] = None
 
 
+class LinkAppFromTemplateRequest(BaseModel):
+    """Request model for linking an app from a template"""
+    app_template_slug: str
+    github_org: str = "hckmseduardo"
+
+
+class LinkAppFromRepoRequest(BaseModel):
+    """Request model for linking an existing GitHub repository"""
+    github_repo_url: str  # Full URL: https://github.com/org/repo
+
+    @field_validator("github_repo_url")
+    @classmethod
+    def validate_github_url(cls, v: str) -> str:
+        pattern = r"^https://github\.com/[\w-]+/[\w.-]+/?$"
+        if not re.match(pattern, v):
+            raise ValueError("Invalid GitHub repository URL format")
+        return v.rstrip("/")
+
+
+class UnlinkAppRequest(BaseModel):
+    """Request model for unlinking an app from workspace"""
+    delete_github_repo: bool = False  # If true, also delete the GitHub repo
+
+
+class DeleteWorkspaceRequest(BaseModel):
+    """Request model for deleting a workspace"""
+    delete_github_repo: bool = False  # If true, also delete the GitHub repo
+
+
 class WorkspaceResponse(BaseModel):
     """Response model for workspace"""
     id: str

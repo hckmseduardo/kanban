@@ -28,6 +28,7 @@ class KeyVaultService:
         "cross-domain-secret": "CROSS_DOMAIN_SECRET",
         "test-user-email": "TEST_USER_EMAIL",
         "test-user-password": "TEST_USER_PASSWORD",
+        "github-pat": "GITHUB_TOKEN",
     }
 
     def __init__(self):
@@ -107,6 +108,13 @@ class KeyVaultService:
         if secret:
             return secret
         return CROSS_DOMAIN_SECRET_DEFAULT
+
+    def get_github_token(self) -> Optional[str]:
+        """Get the GitHub Personal Access Token from Key Vault.
+
+        Falls back to GITHUB_TOKEN environment variable if Key Vault is not configured.
+        """
+        return self.get_secret("github-pat")
 
     def clear_cache(self):
         """Clear the secrets cache."""

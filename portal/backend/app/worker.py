@@ -202,48 +202,64 @@ class TaskWorker:
                                     logger.warning(f"Workspace {workspace_slug} not found in database")
                                     continue
 
-                            if workspace_id and status:
-                                logger.info(f"Updating workspace {workspace_slug} status to: {status}")
-                                updates = {"status": status}
-                                if kanban_team_id:
-                                    updates["kanban_team_id"] = kanban_team_id
-                                # Include GitHub info if provided (for app workspaces)
-                                if data.get("github_repo_name"):
-                                    updates["github_repo_name"] = data["github_repo_name"]
-                                if data.get("github_repo_url"):
-                                    updates["github_repo_url"] = data["github_repo_url"]
-                                # Include Azure AD credentials if provided (for app workspaces)
-                                logger.info(f"Workspace status data keys: {list(data.keys())}")
-                                if data.get("azure_app_id"):
-                                    logger.info(f"Including Azure credentials for workspace {workspace_slug}")
-                                    updates["azure_app_id"] = data["azure_app_id"]
-                                    updates["azure_object_id"] = data["azure_object_id"]
-                                    updates["azure_client_secret"] = data["azure_client_secret"]
-                                    updates["azure_tenant_id"] = data["azure_tenant_id"]
-                                if status == "active":
-                                    from datetime import datetime, timezone
-                                    updates["provisioned_at"] = datetime.now(timezone.utc).isoformat()
+                            if not workspace_id:
+                                logger.warning("No workspace_id in update message")
+                                continue
 
-                                    # Add owner as a member when workspace becomes active
-                                    owner_id = data.get("owner_id")
-                                    if owner_id and kanban_team_id:
-                                        # Check if owner is already a member
-                                        existing = db_service.get_membership(kanban_team_id, owner_id)
-                                        if not existing:
-                                            db_service.add_team_member(
-                                                team_id=kanban_team_id,
-                                                user_id=owner_id,
-                                                role="owner",
-                                                invited_by=None
-                                            )
-                                            logger.info(f"Added owner as member for workspace {workspace_slug}")
+                            # Build updates dictionary
+                            updates = {}
+                            if status:
+                                updates["status"] = status
+                            if kanban_team_id:
+                                updates["kanban_team_id"] = kanban_team_id
 
-                                if status == "deleted":
-                                    db_service.delete_workspace(workspace_id)
-                                    logger.info(f"Workspace {workspace_slug} removed from database")
-                                else:
-                                    db_service.update_workspace(workspace_id, updates)
-                                    logger.info(f"Workspace {workspace_slug} status updated to {status}")
+                            # Fields that can be set or cleared (None clears the field)
+                            # Use "key in data" to check for presence, allowing explicit None
+                            clearable_fields = [
+                                "github_repo_name",
+                                "github_repo_url",
+                                "github_org",
+                                "app_template_id",
+                                "app_subdomain",
+                                "app_database_name",
+                                "azure_app_id",
+                                "azure_object_id",
+                                "azure_client_secret",
+                                "azure_tenant_id",
+                            ]
+                            for field in clearable_fields:
+                                if field in data:
+                                    updates[field] = data[field]
+
+                            logger.info(f"Workspace status data keys: {list(data.keys())}")
+                            if status == "active":
+                                from datetime import datetime, timezone
+                                updates["provisioned_at"] = datetime.now(timezone.utc).isoformat()
+
+                                # Add owner as a member when workspace becomes active
+                                owner_id = data.get("owner_id")
+                                if owner_id and kanban_team_id:
+                                    # Check if owner is already a member
+                                    existing = db_service.get_membership(kanban_team_id, owner_id)
+                                    if not existing:
+                                        db_service.add_team_member(
+                                            team_id=kanban_team_id,
+                                            user_id=owner_id,
+                                            role="owner",
+                                            invited_by=None
+                                        )
+                                        logger.info(f"Added owner as member for workspace {workspace_slug}")
+
+                            if not updates:
+                                logger.warning(f"No updates to apply for workspace {workspace_slug}")
+                                continue
+
+                            if status == "deleted":
+                                db_service.delete_workspace(workspace_id)
+                                logger.info(f"Workspace {workspace_slug} removed from database")
+                            else:
+                                db_service.update_workspace(workspace_id, updates)
+                                logger.info(f"Workspace {workspace_slug} updated: {list(updates.keys())}")
 
                         except json.JSONDecodeError as e:
                             logger.error(f"Invalid JSON in workspace:status message: {e}")

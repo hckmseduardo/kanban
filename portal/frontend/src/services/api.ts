@@ -221,6 +221,24 @@ export interface CreateSandboxRequest {
   source_branch?: string
 }
 
+// Link/Unlink App Types
+export interface LinkAppFromTemplateRequest {
+  app_template_slug: string
+  github_org?: string
+}
+
+export interface LinkAppFromRepoRequest {
+  github_repo_url: string
+}
+
+export interface UnlinkAppRequest {
+  delete_github_repo?: boolean
+}
+
+export interface DeleteWorkspaceRequest {
+  delete_github_repo?: boolean
+}
+
 // Workspace Member Types
 export interface WorkspaceMember {
   user_id: string
@@ -294,8 +312,8 @@ export const workspacesApi = {
   get: (slug: string) => api.get<Workspace>(`/workspaces/${slug}`),
   create: (data: CreateWorkspaceRequest) =>
     api.post<{ message: string; workspace: Workspace; task_id: string }>('/workspaces', data),
-  delete: (slug: string) =>
-    api.delete<{ message: string; task_id: string }>(`/workspaces/${slug}`),
+  delete: (slug: string, data?: DeleteWorkspaceRequest) =>
+    api.delete<{ message: string; task_id: string }>(`/workspaces/${slug}`, { data }),
   restart: (slug: string, options?: { rebuild?: boolean; restart_app?: boolean }) =>
     api.post<{ message: string; task_id: string; rebuild: boolean; restart_app: boolean }>(
       `/workspaces/${slug}/restart`,
@@ -308,6 +326,17 @@ export const workspacesApi = {
   getStatus: (slug: string) => api.get(`/workspaces/${slug}/status`),
   getHealth: (slug: string) => api.get<WorkspaceHealth>(`/workspaces/${slug}/health`),
   getHealthBatch: () => api.get<WorkspaceHealthBatch>('/workspaces/health/batch'),
+  // Link/Unlink App
+  linkApp: (slug: string, data: LinkAppFromTemplateRequest | LinkAppFromRepoRequest) =>
+    api.post<{ message: string; workspace: Workspace; task_id: string }>(
+      `/workspaces/${slug}/link-app`,
+      data
+    ),
+  unlinkApp: (slug: string, data: UnlinkAppRequest) =>
+    api.post<{ message: string; task_id: string }>(
+      `/workspaces/${slug}/unlink-app`,
+      data
+    ),
   // Member management
   getMembers: (slug: string) =>
     api.get<{ members: WorkspaceMember[]; total: number }>(`/workspaces/${slug}/members`),

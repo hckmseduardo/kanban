@@ -9,10 +9,11 @@ import os
 from typing import Optional
 import httpx
 
+from .keyvault_service import keyvault_service
+
 logger = logging.getLogger(__name__)
 
 # Configuration
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_DEFAULT_ORG = os.getenv("GITHUB_DEFAULT_ORG", "hckmseduardo")
 
 
@@ -22,27 +23,38 @@ class GitHubService:
     BASE_URL = "https://api.github.com"
 
     def __init__(self, token: str = None):
-        self._token = token or GITHUB_TOKEN
+        self._token = token
+        self._cached_token = None
 
     @property
     def token(self) -> str:
-        """Get GitHub token"""
-        if not self._token:
-            raise ValueError("GitHub token not configured. Set GITHUB_TOKEN environment variable.")
-        return self._token
+        """Get GitHub token from environment or Key Vault."""
+        if self._token:
+            return self._token
+        if self._cached_token:
+            return self._cached_token
+
+        # Prefer environment variable (more easily updated than Key Vault)
+        token = os.getenv("GITHUB_TOKEN")
+        if not token:
+            # Fall back to Key Vault
+            token = keyvault_service.get_github_token()
+        if not token:
+            raise ValueError(
+                "GitHub token not configured. "
+                "Set GITHUB_TOKEN environment variable or 'github-pat' in Azure Key Vault."
+            )
+        self._cached_token = token
+        return token
 
     @property
     def headers(self) -> dict:
-        """Get request headers"""
+        """Get request headers with authorization"""
         return {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
+            "Authorization": f"token {self.token}",
         }
-
-    @property
-    def auth(self) -> tuple:
-        """Get auth tuple for requests (username, token)"""
-        return ("", self.token)
 
     async def create_repo_from_template(
         self,
@@ -87,7 +99,6 @@ class GitHubService:
             response = await client.post(
                 url,
                 headers=self.headers,
-                auth=self.auth,
                 json=payload,
                 timeout=60.0
             )
@@ -114,7 +125,6 @@ class GitHubService:
             response = await client.get(
                 url,
                 headers=self.headers,
-                auth=self.auth,
                 timeout=30.0
             )
 
@@ -134,7 +144,6 @@ class GitHubService:
             response = await client.delete(
                 url,
                 headers=self.headers,
-                auth=self.auth,
                 timeout=30.0
             )
 
@@ -156,7 +165,6 @@ class GitHubService:
             response = await client.get(
                 url,
                 headers=self.headers,
-                auth=self.auth,
                 timeout=30.0
             )
 
@@ -205,7 +213,6 @@ class GitHubService:
             response = await client.post(
                 url,
                 headers=self.headers,
-                auth=self.auth,
                 json=payload,
                 timeout=30.0
             )
@@ -241,7 +248,6 @@ class GitHubService:
             response = await client.delete(
                 url,
                 headers=self.headers,
-                auth=self.auth,
                 timeout=30.0
             )
 
@@ -275,7 +281,6 @@ class GitHubService:
             response = await client.get(
                 url,
                 headers=self.headers,
-                auth=self.auth,
                 params=params,
                 timeout=30.0
             )
@@ -322,7 +327,6 @@ class GitHubService:
             response = await client.post(
                 url,
                 headers=self.headers,
-                auth=self.auth,
                 json=payload,
                 timeout=30.0
             )
@@ -354,7 +358,6 @@ class GitHubService:
             response = await client.post(
                 url,
                 headers=self.headers,
-                auth=self.auth,
                 json=payload,
                 timeout=30.0
             )
@@ -379,7 +382,6 @@ class GitHubService:
             response = await client.put(
                 url,
                 headers=self.headers,
-                auth=self.auth,
                 json=payload,
                 timeout=30.0
             )

@@ -9,8 +9,9 @@ export default function WorkspacesPage() {
   const { user } = useAuthStore()
   const queryClient = useQueryClient()
   const { tasks, getTaskByWorkspaceSlug } = useTaskProgressStore()
-  const [deleteConfirm, setDeleteConfirm] = useState<{ slug: string; name: string } | null>(null)
+  const [deleteConfirm, setDeleteConfirm] = useState<{ slug: string; name: string; github_repo_url?: string | null } | null>(null)
   const [deleteInput, setDeleteInput] = useState('')
+  const [deleteRepoOnDelete, setDeleteRepoOnDelete] = useState(false)
 
   const { data, isLoading } = useQuery({
     queryKey: ['workspaces'],
@@ -37,11 +38,13 @@ export default function WorkspacesPage() {
   }
 
   const deleteMutation = useMutation({
-    mutationFn: (slug: string) => workspacesApi.delete(slug),
+    mutationFn: (params: { slug: string; delete_github_repo?: boolean }) =>
+      workspacesApi.delete(params.slug, { delete_github_repo: params.delete_github_repo }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['workspaces'] })
       setDeleteConfirm(null)
       setDeleteInput('')
+      setDeleteRepoOnDelete(false)
     }
   })
 
@@ -208,7 +211,7 @@ export default function WorkspacesPage() {
                       onClick={(e) => {
                         e.preventDefault()
                         e.stopPropagation()
-                        setDeleteConfirm({ slug: workspace.slug, name: workspace.name })
+                        setDeleteConfirm({ slug: workspace.slug, name: workspace.name, github_repo_url: workspace.github_repo_url })
                       }}
                       className="text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/30 p-1.5 rounded-lg transition-all"
                       title="Delete workspace"
@@ -282,6 +285,26 @@ export default function WorkspacesPage() {
               </ul>
             </div>
 
+            {/* GitHub repo deletion option - only show for workspaces with repos */}
+            {deleteConfirm.github_repo_url && (
+              <div className="mb-4">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={deleteRepoOnDelete}
+                    onChange={(e) => setDeleteRepoOnDelete(e.target.checked)}
+                    className="w-4 h-4 text-red-600 border-gray-300 rounded focus:ring-red-500"
+                  />
+                  <span className="text-sm text-gray-700 dark:text-gray-300">Also delete GitHub repository</span>
+                </label>
+                {deleteRepoOnDelete && (
+                  <p className="mt-1 ml-6 text-xs text-red-600 dark:text-red-400">
+                    Warning: This will permanently delete the repository!
+                  </p>
+                )}
+              </div>
+            )}
+
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                 Type <strong>{deleteConfirm.slug}</strong> to confirm
@@ -302,6 +325,7 @@ export default function WorkspacesPage() {
                 onClick={() => {
                   setDeleteConfirm(null)
                   setDeleteInput('')
+                  setDeleteRepoOnDelete(false)
                 }}
                 className="px-4 py-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-dark-700 rounded-lg"
               >
@@ -309,7 +333,7 @@ export default function WorkspacesPage() {
               </button>
               <button
                 type="button"
-                onClick={() => deleteMutation.mutate(deleteConfirm.slug)}
+                onClick={() => deleteMutation.mutate({ slug: deleteConfirm.slug, delete_github_repo: deleteRepoOnDelete })}
                 disabled={deleteInput !== deleteConfirm.slug || deleteMutation.isPending}
                 className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
