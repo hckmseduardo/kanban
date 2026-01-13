@@ -3832,11 +3832,13 @@ Generate the docker-compose.yml file now."""
         # Ensure directory exists
         os.makedirs(sandbox_host_dir, exist_ok=True)
 
+        use_claude_compose = False
         if claude_compose.exists() and self._current_payload.get("claude_configured"):
-            # Use Claude-generated compose file
+            # Use Claude-generated compose file from repo directory
             logger.info(f"[{full_slug}] Using Claude-generated docker-compose.yml")
-            # Copy to our standard location
-            shutil.copy(str(claude_compose), compose_file_host)
+            # Run compose from repo directory so relative paths work
+            compose_file_host = str(claude_compose)
+            use_claude_compose = True
         else:
             # Use template-based compose
             logger.info(f"[{full_slug}] Using template-based docker-compose")
@@ -3882,9 +3884,11 @@ Generate the docker-compose.yml file now."""
             with open(compose_file_host, "w") as f:
                 f.write(compose_content)
 
-        logger.info(f"[{full_slug}] Saved compose file to {compose_file_host}")
+        logger.info(f"[{full_slug}] Using compose file: {compose_file_host}")
 
         project_name = f"{full_slug}-app"
+        # Working directory for docker compose - use repo dir for Claude compose
+        compose_cwd = repo_path if use_claude_compose else None
 
         try:
             # Stop and remove existing stack if it exists
@@ -3892,7 +3896,8 @@ Generate the docker-compose.yml file now."""
                 ["docker", "compose", "-f", compose_file_host, "-p", project_name, "down", "--remove-orphans"],
                 capture_output=True,
                 text=True,
-                check=False
+                check=False,
+                cwd=compose_cwd
             )
 
             # Create sandbox data directories and clean up postgres data
@@ -3911,10 +3916,11 @@ Generate the docker-compose.yml file now."""
 
             for attempt in range(1, max_retries + 1):
                 result = subprocess.run(
-                    ["docker", "compose", "-f", compose_file_host, "-p", project_name, "up", "-d"],
+                    ["docker", "compose", "-f", compose_file_host, "-p", project_name, "up", "-d", "--build"],
                     capture_output=True,
                     text=True,
-                    check=False
+                    check=False,
+                    cwd=compose_cwd
                 )
 
                 if result.returncode == 0:
