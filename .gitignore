@@ -39,3 +39,6 @@ certs/
 
 # Test results
 tests/results/
+
+e2e-tests/results/
+e2e-tests/qa-results/

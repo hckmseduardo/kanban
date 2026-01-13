@@ -262,6 +262,7 @@ class EnhanceDescriptionRequest(BaseModel):
     options: EnhanceOptions = EnhanceOptions()
     apply_labels: bool = True
     add_checklist: bool = True
+    sandbox_slug: Optional[str] = None  # Sandbox slug for codebase context
 
 
 @router.post("/enhance-description")
@@ -321,6 +322,7 @@ async def enhance_card_description(
             mode=payload.mode,
             apply_labels=payload.apply_labels,
             add_checklist=payload.add_checklist,
+            sandbox_slug=payload.sandbox_slug,
         )
 
         logger.info(

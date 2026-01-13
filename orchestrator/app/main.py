@@ -3549,6 +3549,7 @@ Generate the configuration files now."""
         github_org = self._current_payload.get("github_org", "hckmseduardo")
         github_repo = self._current_payload.get("github_repo_name", f"{workspace_slug}-app")
         source_branch = self._current_payload.get("source_branch", "main")
+        github_pat = self._current_payload.get("github_pat")  # Custom PAT for private repos
         branch_name = f"sandbox/{full_slug}"
 
         logger.info(f"[{full_slug}] Creating branch: {branch_name} from {source_branch}")
@@ -3559,6 +3560,7 @@ Generate the configuration files now."""
                 repo=github_repo,
                 branch_name=branch_name,
                 source_branch=source_branch,
+                token=github_pat,
             )
 
             if result.get("already_exists"):

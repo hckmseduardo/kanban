@@ -186,14 +186,19 @@ class GitHubService:
                 error_detail = response.json().get("message", response.text)
                 raise Exception(f"Failed to delete repository: {error_detail}")
 
-    async def get_branch(self, owner: str, repo: str, branch: str) -> Optional[dict]:
-        """Get branch details. Returns None if not found."""
+    async def get_branch(self, owner: str, repo: str, branch: str, token: str = None) -> Optional[dict]:
+        """Get branch details. Returns None if not found.
+
+        Args:
+            token: Optional custom token. Uses default if not provided.
+        """
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/branches/{branch}"
+        headers = self._get_headers(token)
 
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 url,
-                headers=self.headers,
+                headers=headers,
                 timeout=30.0
             )
 
@@ -211,6 +216,7 @@ class GitHubService:
         repo: str,
         branch_name: str,
         source_branch: str = "main",
+        token: str = None,
     ) -> dict:
         """Create a new branch from an existing branch.
 
@@ -219,12 +225,13 @@ class GitHubService:
             repo: Repository name
             branch_name: Name for the new branch
             source_branch: Branch to create from (default: main)
+            token: Optional custom token. Uses default if not provided.
 
         Returns:
             Reference data from GitHub API
         """
         # First, get the SHA of the source branch
-        source = await self.get_branch(owner, repo, source_branch)
+        source = await self.get_branch(owner, repo, source_branch, token=token)
         if not source:
             raise Exception(f"Source branch '{source_branch}' not found")
 
@@ -232,6 +239,7 @@ class GitHubService:
 
         # Create the new branch reference
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/git/refs"
+        headers = self._get_headers(token)
 
         payload = {
             "ref": f"refs/heads/{branch_name}",
@@ -241,7 +249,7 @@ class GitHubService:
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 url,
-                headers=self.headers,
+                headers=headers,
                 json=payload,
                 timeout=30.0
             )
