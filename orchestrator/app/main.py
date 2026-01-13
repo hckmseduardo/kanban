@@ -3458,6 +3458,7 @@ Generate the configuration files now."""
             ("Issuing SSL certificate", self._sandbox_issue_certificate),
             ("Cloning workspace database", self._sandbox_clone_database),
             ("Creating sandbox directory", self._sandbox_create_directory),
+            ("Configuring sandbox with Claude", self._sandbox_configure_with_claude),
             ("Deploying sandbox containers", self._sandbox_deploy_containers),
             ("Running health check", self._sandbox_health_check),
             ("Finalizing sandbox", self._sandbox_finalize),
@@ -3705,8 +3706,108 @@ Generate the configuration files now."""
 
             logger.info(f"[{full_slug}] Repository cloned successfully to {repo_path}")
 
+    async def _sandbox_configure_with_claude(self, full_slug: str, sandbox_id: str):
+        """Configure sandbox repository using Claude CLI for non-template repos.
+
+        Detects if the repository has the expected structure (backend/Dockerfile
+        and frontend/Dockerfile) and if not, uses Claude CLI to generate
+        appropriate Docker configuration.
+        """
+        sandbox_data_path = f"{HOST_PROJECT_PATH}/data/sandboxes/{full_slug}"
+        repo_path = f"{sandbox_data_path}/repo"
+
+        # Check if repository has expected structure
+        backend_dockerfile = Path(repo_path) / "backend" / "Dockerfile"
+        frontend_dockerfile = Path(repo_path) / "frontend" / "Dockerfile"
+
+        if backend_dockerfile.exists() and frontend_dockerfile.exists():
+            logger.info(f"[{full_slug}] Repository has expected structure, skipping Claude configuration")
+            return
+
+        # Check if there's already a docker-compose.yml in the repo
+        existing_compose = Path(repo_path) / "docker-compose.yml"
+        if existing_compose.exists():
+            logger.info(f"[{full_slug}] Repository has docker-compose.yml, Claude will adapt it")
+
+        # Calculate the domain
+        base_domain = DOMAIN.replace("kanban.", "") if DOMAIN.startswith("kanban.") else DOMAIN
+        sandbox_domain = f"{full_slug}.sandbox.{base_domain}"
+
+        prompt = f"""Analyze this repository and configure it to run as a Docker application for the Kanban sandbox environment.
+
+Requirements:
+1. Create a docker-compose.yml in the root with THESE EXACT configurations:
+   - PostgreSQL service: {full_slug}-postgres (postgres:15-alpine)
+   - App service(s): {full_slug}-api and optionally {full_slug}-web
+   - Redis service: {full_slug}-redis (redis:7-alpine)
+   - All services must use container_name matching the service name
+   - Network: {NETWORK_NAME} (external: true)
+   - restart: unless-stopped on all services
+
+2. The app MUST expose:
+   - Backend API on port 8000 (internal)
+   - Frontend (if exists) on port 5173 (internal)
+
+3. Traefik labels for HTTPS routing:
+   - Domain: {sandbox_domain}
+   - API route: PathPrefix(/api) with strip middleware
+   - Frontend route: Host rule for all other paths
+   - Use certresolver: kanban-letsencrypt
+   - Entrypoints: websecure (HTTPS), web (HTTP redirect)
+
+4. Create/modify Dockerfile(s) as needed:
+   - Multi-stage builds for smaller images
+   - Production-ready configurations
+   - Appropriate CMD/ENTRYPOINT
+
+5. Environment variables the app expects:
+   - DATABASE_URL=postgresql+asyncpg://postgres:${{POSTGRES_PASSWORD}}@{full_slug}-postgres:5432/{full_slug.replace('-', '_')}
+   - SECRET_KEY (will be injected)
+   - REDIS_URL=redis://{full_slug}-redis:6379
+
+6. Volume mounts:
+   - PostgreSQL: /var/lib/postgresql/data
+   - Redis: /data
+   - Uploads: /app/uploads (if applicable)
+
+The sandbox will be accessible at: https://{sandbox_domain}
+
+Important:
+- Analyze the existing codebase structure carefully
+- If a docker-compose.yml exists, adapt it to the sandbox requirements
+- Keep any app-specific services that are needed
+- Use kanban labels for orchestration: kanban.type, kanban.full-slug, etc.
+
+Generate the docker-compose.yml file now."""
+
+        logger.info(f"[{full_slug}] Configuring sandbox with Claude CLI...")
+
+        try:
+            result = await claude_runner.run(
+                prompt=prompt,
+                working_dir=repo_path,
+                tool_profile="developer",
+                timeout=600,  # 10 minutes
+            )
+
+            if not result.success:
+                raise RuntimeError(f"Claude configuration failed: {result.error}")
+
+            # Verify docker-compose.yml was created or modified
+            compose_path = Path(repo_path) / "docker-compose.yml"
+            if not compose_path.exists():
+                logger.warning(f"[{full_slug}] Claude did not generate docker-compose.yml, will use template")
+            else:
+                logger.info(f"[{full_slug}] Sandbox configured successfully by Claude")
+                # Mark that we have a Claude-generated config
+                self._current_payload["claude_configured"] = True
+
+        except Exception as e:
+            logger.warning(f"[{full_slug}] Claude configuration failed, will try template: {e}")
+            # Don't fail - let the template-based deployment try
+
     async def _sandbox_deploy_containers(self, full_slug: str, sandbox_id: str):
-        """Deploy sandbox containers using the sandbox-compose template"""
+        """Deploy sandbox containers using the sandbox-compose template or Claude-generated config"""
         if not self.docker_available:
             raise RuntimeError("Docker CLI not available")
 
@@ -3717,59 +3818,69 @@ Generate the configuration files now."""
 
         logger.info(f"[{full_slug}] Deploying sandbox containers")
 
-        # Generate secrets
-        postgres_password = secrets.token_hex(16)
-        app_secret_key = secrets.token_hex(32)
-
         # Paths
         workspace_data_path = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}"
         sandbox_data_path = f"{HOST_PROJECT_PATH}/data/sandboxes/{full_slug}"
+        repo_path = f"{sandbox_data_path}/repo"
         app_source_path = f"{workspace_data_path}/app"
 
-        # Kanban API URL
-        if PORT == "443":
-            kanban_api_url = f"https://{workspace_slug}.{DOMAIN}/api"
-        else:
-            kanban_api_url = f"https://{workspace_slug}.{DOMAIN}:{PORT}/api"
-
-        # Render sandbox compose template
-        try:
-            template = self.app_factory_jinja.get_template("sandbox-compose.yml.j2")
-            compose_content = template.render(
-                full_slug=full_slug,
-                workspace_slug=workspace_slug,
-                sandbox_slug=sandbox_slug,
-                git_branch=git_branch,
-                database_name=database_name,
-                postgres_password=postgres_password,
-                app_secret_key=app_secret_key,
-                data_path=sandbox_data_path,
-                app_source_path=app_source_path,
-                kanban_api_url=kanban_api_url,
-                domain=DOMAIN,
-                port=PORT,
-                network_name=NETWORK_NAME,
-                # Entra External ID (CIAM) credentials (inherited from workspace)
-                entra_tenant_id=self._current_payload.get("entra_tenant_id", ""),
-                entra_authority=self._current_payload.get("entra_authority", ""),
-                entra_client_id=self._current_payload.get("entra_client_id", ""),
-                entra_client_secret=self._current_payload.get("entra_client_secret", ""),
-            )
-        except Exception as e:
-            logger.error(f"[{full_slug}] Failed to render sandbox template: {e}")
-            raise
-
-        # Write compose file to persistent location in sandbox directory
-        # The sandboxes directory is mounted at HOST_PROJECT_PATH/data/sandboxes in docker-compose.yml
-        compose_file_host = f"{HOST_PROJECT_PATH}/data/sandboxes/{full_slug}/docker-compose.app.yml"
-        sandbox_host_dir = f"{HOST_PROJECT_PATH}/data/sandboxes/{full_slug}"
+        # Check if Claude generated a docker-compose.yml
+        claude_compose = Path(repo_path) / "docker-compose.yml"
+        compose_file_host = f"{sandbox_data_path}/docker-compose.app.yml"
+        sandbox_host_dir = sandbox_data_path
 
         # Ensure directory exists
         os.makedirs(sandbox_host_dir, exist_ok=True)
 
-        # Write compose file
-        with open(compose_file_host, "w") as f:
-            f.write(compose_content)
+        if claude_compose.exists() and self._current_payload.get("claude_configured"):
+            # Use Claude-generated compose file
+            logger.info(f"[{full_slug}] Using Claude-generated docker-compose.yml")
+            # Copy to our standard location
+            shutil.copy(str(claude_compose), compose_file_host)
+        else:
+            # Use template-based compose
+            logger.info(f"[{full_slug}] Using template-based docker-compose")
+
+            # Generate secrets
+            postgres_password = secrets.token_hex(16)
+            app_secret_key = secrets.token_hex(32)
+
+            # Kanban API URL
+            if PORT == "443":
+                kanban_api_url = f"https://{workspace_slug}.{DOMAIN}/api"
+            else:
+                kanban_api_url = f"https://{workspace_slug}.{DOMAIN}:{PORT}/api"
+
+            # Render sandbox compose template
+            try:
+                template = self.app_factory_jinja.get_template("sandbox-compose.yml.j2")
+                compose_content = template.render(
+                    full_slug=full_slug,
+                    workspace_slug=workspace_slug,
+                    sandbox_slug=sandbox_slug,
+                    git_branch=git_branch,
+                    database_name=database_name,
+                    postgres_password=postgres_password,
+                    app_secret_key=app_secret_key,
+                    data_path=sandbox_data_path,
+                    app_source_path=app_source_path,
+                    kanban_api_url=kanban_api_url,
+                    domain=DOMAIN,
+                    port=PORT,
+                    network_name=NETWORK_NAME,
+                    # Entra External ID (CIAM) credentials (inherited from workspace)
+                    entra_tenant_id=self._current_payload.get("entra_tenant_id", ""),
+                    entra_authority=self._current_payload.get("entra_authority", ""),
+                    entra_client_id=self._current_payload.get("entra_client_id", ""),
+                    entra_client_secret=self._current_payload.get("entra_client_secret", ""),
+                )
+            except Exception as e:
+                logger.error(f"[{full_slug}] Failed to render sandbox template: {e}")
+                raise
+
+            # Write compose file
+            with open(compose_file_host, "w") as f:
+                f.write(compose_content)
 
         logger.info(f"[{full_slug}] Saved compose file to {compose_file_host}")
 
