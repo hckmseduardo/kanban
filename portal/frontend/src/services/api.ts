@@ -229,6 +229,7 @@ export interface LinkAppFromTemplateRequest {
 
 export interface LinkAppFromRepoRequest {
   github_repo_url: string
+  github_pat?: string  // Optional PAT for this repository (uses default if not provided)
 }
 
 export interface UnlinkAppRequest {

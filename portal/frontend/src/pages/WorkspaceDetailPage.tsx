@@ -51,6 +51,7 @@ export default function WorkspaceDetailPage() {
   const [linkAppMode, setLinkAppMode] = useState<'template' | 'repo'>('template')
   const [selectedTemplate, setSelectedTemplate] = useState('')
   const [existingRepoUrl, setExistingRepoUrl] = useState('')
+  const [existingRepoPat, setExistingRepoPat] = useState('')
   const [linkAppError, setLinkAppError] = useState('')
 
   // Unlink App state
@@ -304,7 +305,14 @@ export default function WorkspaceDetailPage() {
         setLinkAppError('Please enter a GitHub repository URL')
         return
       }
-      linkAppMutation.mutate({ github_repo_url: existingRepoUrl.trim() })
+      const repoRequest: { github_repo_url: string; github_pat?: string } = {
+        github_repo_url: existingRepoUrl.trim()
+      }
+      // Only include PAT if provided
+      if (existingRepoPat.trim()) {
+        repoRequest.github_pat = existingRepoPat.trim()
+      }
+      linkAppMutation.mutate(repoRequest)
     }
   }
 
@@ -507,9 +515,9 @@ export default function WorkspaceDetailPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-start justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
         <div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <Link to="/workspaces" className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -528,7 +536,7 @@ export default function WorkspaceDetailPage() {
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400 font-mono">{workspace.slug}</p>
         </div>
         {(userRole === 'owner' || userRole === 'admin') && (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             {/* Unlink App button - visible if workspace has an app (from template or linked repo) */}
             {(workspace.app_template_id || workspace.github_repo_url) && (
               <button
@@ -853,7 +861,7 @@ export default function WorkspaceDetailPage() {
       {/* Sandboxes Section (only for app workspaces - from template or linked repo) */}
       {(workspace.app_template_id || workspace.github_repo_url) && (
         <div className="bg-white dark:bg-dark-800 rounded-xl shadow dark:shadow-dark-700/30 overflow-hidden">
-          <div className="p-4 border-b border-gray-200 dark:border-dark-700 flex items-center justify-between">
+          <div className="p-4 border-b border-gray-200 dark:border-dark-700 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div>
               <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Sandboxes</h2>
               <p className="text-sm text-gray-500 dark:text-gray-400">Development environments with database clones</p>
@@ -864,7 +872,7 @@ export default function WorkspaceDetailPage() {
             {canCreateSandbox && (
               <button
                 onClick={() => setShowCreateSandbox(true)}
-                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium flex items-center gap-2"
+                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium flex items-center gap-2 self-start sm:self-auto"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -900,70 +908,140 @@ export default function WorkspaceDetailPage() {
                 const isDeploying = !!sandboxTask
 
                 return (
-                  <div key={sandbox.id} className="p-4 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-dark-700/50">
-                    <div className="flex items-center gap-4">
-                      <div className={`h-10 w-10 rounded-lg flex items-center justify-center ${
-                        sandbox.status === 'active'
-                          ? 'bg-green-100 dark:bg-green-900/30'
-                          : 'bg-yellow-100 dark:bg-yellow-900/30'
-                      }`}>
-                        <svg className={`w-5 h-5 ${
+                  <div key={sandbox.id} className="p-4 hover:bg-gray-50 dark:hover:bg-dark-700/50">
+                    {/* Mobile Layout */}
+                    <div className="sm:hidden space-y-3">
+                      <div className="flex items-start gap-3">
+                        <div className={`h-10 w-10 flex-shrink-0 rounded-lg flex items-center justify-center ${
                           sandbox.status === 'active'
-                            ? 'text-green-600 dark:text-green-400'
-                            : 'text-yellow-600 dark:text-yellow-400'
-                        }`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                        </svg>
-                      </div>
-                      <div>
-                        <h3 className="font-medium text-gray-900 dark:text-gray-100">{sandbox.name}</h3>
-                        <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
-                          <span className="font-mono">{sandbox.full_slug}</span>
-                          <span>·</span>
-                          <span>Branch: {sandbox.git_branch}</span>
+                            ? 'bg-green-100 dark:bg-green-900/30'
+                            : 'bg-yellow-100 dark:bg-yellow-900/30'
+                        }`}>
+                          <svg className={`w-5 h-5 ${
+                            sandbox.status === 'active'
+                              ? 'text-green-600 dark:text-green-400'
+                              : 'text-yellow-600 dark:text-yellow-400'
+                          }`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                          </svg>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <h3 className="font-medium text-gray-900 dark:text-gray-100 truncate">{sandbox.name}</h3>
+                            <span className={`px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0 ${getStatusBadge(sandbox.status)}`}>
+                              {sandbox.status}
+                            </span>
+                          </div>
+                          <p className="text-xs text-gray-500 dark:text-gray-400 font-mono truncate mt-0.5">{sandbox.full_slug}</p>
+                          <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">Branch: {sandbox.git_branch}</p>
                         </div>
                       </div>
-                    </div>
-                    <div className="flex items-center gap-3">
                       {sandboxTask && (
-                        <div className="flex items-center gap-2 text-xs text-blue-600 dark:text-blue-400">
-                          <svg className="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <div className="flex items-center gap-2 text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 px-3 py-2 rounded-lg">
+                          <svg className="w-3 h-3 animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                           </svg>
                           <span>{sandboxTask.stepName}</span>
                         </div>
                       )}
-                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusBadge(sandbox.status)}`}>
-                        {sandbox.status}
-                      </span>
-                      {canDeploySandbox && (
+                      <div className="flex items-center gap-2">
+                        {canDeploySandbox && (
+                          <button
+                            onClick={() => createPullRequestMutation.mutate(sandbox.slug)}
+                            disabled={sandbox.status !== 'active' || isDeploying || createPullRequestMutation.isPending}
+                            className="flex-1 px-3 py-2 rounded-lg text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
+                            title="Create and merge a PR to update main"
+                          >
+                            {isDeploying ? 'Deploying...' : 'Deploy to Main'}
+                          </button>
+                        )}
+                        {sandbox.status === 'active' && (
+                          <a
+                            href={sandbox.subdomain}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex-1 px-3 py-2 rounded-lg text-xs font-medium text-center bg-primary-100 dark:bg-primary-900/30 text-primary-600 dark:text-primary-400 hover:bg-primary-200 dark:hover:bg-primary-900/50"
+                          >
+                            Open App
+                          </a>
+                        )}
                         <button
-                          onClick={() => createPullRequestMutation.mutate(sandbox.slug)}
-                          disabled={sandbox.status !== 'active' || isDeploying || createPullRequestMutation.isPending}
-                          className="px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
-                          title="Create and merge a PR to update main"
+                          onClick={() => setDeleteConfirm({ slug: sandbox.slug, name: sandbox.name, type: 'sandbox' })}
+                          className="p-2 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20"
                         >
-                          {isDeploying ? 'Deploying...' : 'Deploy to Main'}
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
                         </button>
-                      )}
-                      {sandbox.status === 'active' && (
-                        <a
-                          href={sandbox.subdomain}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-primary-600 dark:text-primary-400 hover:text-primary-700 dark:hover:text-primary-300 text-sm font-medium"
+                      </div>
+                    </div>
+
+                    {/* Desktop Layout */}
+                    <div className="hidden sm:flex sm:items-center sm:justify-between gap-3">
+                      <div className="flex items-center gap-4 min-w-0">
+                        <div className={`h-10 w-10 flex-shrink-0 rounded-lg flex items-center justify-center ${
+                          sandbox.status === 'active'
+                            ? 'bg-green-100 dark:bg-green-900/30'
+                            : 'bg-yellow-100 dark:bg-yellow-900/30'
+                        }`}>
+                          <svg className={`w-5 h-5 ${
+                            sandbox.status === 'active'
+                              ? 'text-green-600 dark:text-green-400'
+                              : 'text-yellow-600 dark:text-yellow-400'
+                          }`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                          </svg>
+                        </div>
+                        <div className="min-w-0">
+                          <h3 className="font-medium text-gray-900 dark:text-gray-100">{sandbox.name}</h3>
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-gray-500 dark:text-gray-400">
+                            <span className="font-mono truncate">{sandbox.full_slug}</span>
+                            <span>·</span>
+                            <span>Branch: {sandbox.git_branch}</span>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3 flex-shrink-0">
+                        {sandboxTask && (
+                          <div className="flex items-center gap-2 text-xs text-blue-600 dark:text-blue-400">
+                            <svg className="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                            </svg>
+                            <span>{sandboxTask.stepName}</span>
+                          </div>
+                        )}
+                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusBadge(sandbox.status)}`}>
+                          {sandbox.status}
+                        </span>
+                        {canDeploySandbox && (
+                          <button
+                            onClick={() => createPullRequestMutation.mutate(sandbox.slug)}
+                            disabled={sandbox.status !== 'active' || isDeploying || createPullRequestMutation.isPending}
+                            className="px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
+                            title="Create and merge a PR to update main"
+                          >
+                            {isDeploying ? 'Deploying...' : 'Deploy to Main'}
+                          </button>
+                        )}
+                        {sandbox.status === 'active' && (
+                          <a
+                            href={sandbox.subdomain}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-primary-600 dark:text-primary-400 hover:text-primary-700 dark:hover:text-primary-300 text-sm font-medium"
+                          >
+                            Open
+                          </a>
+                        )}
+                        <button
+                          onClick={() => setDeleteConfirm({ slug: sandbox.slug, name: sandbox.name, type: 'sandbox' })}
+                          className="text-gray-400 hover:text-red-500 p-1"
                         >
-                          Open
-                        </a>
-                      )}
-                      <button
-                        onClick={() => setDeleteConfirm({ slug: sandbox.slug, name: sandbox.name, type: 'sandbox' })}
-                        className="text-gray-400 hover:text-red-500 p-1"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
-                      </button>
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
+                        </button>
+                      </div>
                     </div>
                   </div>
                 )
@@ -989,25 +1067,25 @@ export default function WorkspaceDetailPage() {
             </div>
             <div className="divide-y divide-gray-200 dark:divide-dark-700">
               {pendingInvitations.map((invitation: WorkspaceInvitation) => (
-                <div key={invitation.id} className="p-4 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-dark-700/50">
-                  <div className="flex items-center gap-4">
-                    <div className="h-10 w-10 rounded-full bg-yellow-100 dark:bg-yellow-900/30 flex items-center justify-center text-yellow-600 dark:text-yellow-400 font-medium">
+                <div key={invitation.id} className="p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 hover:bg-gray-50 dark:hover:bg-dark-700/50">
+                  <div className="flex items-center gap-4 min-w-0">
+                    <div className="h-10 w-10 flex-shrink-0 rounded-full bg-yellow-100 dark:bg-yellow-900/30 flex items-center justify-center text-yellow-600 dark:text-yellow-400 font-medium">
                       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                       </svg>
                     </div>
-                    <div>
-                      <h3 className="font-medium text-gray-900 dark:text-gray-100">{invitation.email}</h3>
-                      <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+                    <div className="min-w-0">
+                      <h3 className="font-medium text-gray-900 dark:text-gray-100 truncate">{invitation.email}</h3>
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-gray-500 dark:text-gray-400">
                         <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${getRoleBadge(invitation.role)}`}>
                           {invitation.role}
                         </span>
-                        <span>·</span>
+                        <span className="hidden sm:inline">·</span>
                         <span>Expires {new Date(invitation.expires_at).toLocaleDateString()}</span>
                       </div>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 ml-14 sm:ml-0">
                     <button
                       onClick={() => {
                         navigator.clipboard.writeText(invitation.invite_url)
@@ -1039,7 +1117,7 @@ export default function WorkspaceDetailPage() {
         )}
 
         <div className="bg-white dark:bg-dark-800 rounded-xl shadow dark:shadow-dark-700/30 overflow-hidden">
-          <div className="p-4 border-b border-gray-200 dark:border-dark-700 flex items-center justify-between">
+          <div className="p-4 border-b border-gray-200 dark:border-dark-700 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div>
               <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Members</h2>
               <p className="text-sm text-gray-500 dark:text-gray-400">
@@ -1049,7 +1127,7 @@ export default function WorkspaceDetailPage() {
             {canManageMembers && (
               <button
                 onClick={() => setShowInviteMember(true)}
-                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium flex items-center gap-2"
+                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium flex items-center gap-2 self-start sm:self-auto"
               >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
@@ -1073,22 +1151,22 @@ export default function WorkspaceDetailPage() {
         ) : (
           <div className="divide-y divide-gray-200 dark:divide-dark-700">
             {members.map((member: WorkspaceMember) => (
-              <div key={member.user_id} className="p-4 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-dark-700/50">
-                <div className="flex items-center gap-4">
-                  <div className="h-10 w-10 rounded-full bg-gray-200 dark:bg-gray-700 flex items-center justify-center text-gray-600 dark:text-gray-300 font-medium">
+              <div key={member.user_id} className="p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 hover:bg-gray-50 dark:hover:bg-dark-700/50">
+                <div className="flex items-center gap-4 min-w-0">
+                  <div className="h-10 w-10 flex-shrink-0 rounded-full bg-gray-200 dark:bg-gray-700 flex items-center justify-center text-gray-600 dark:text-gray-300 font-medium">
                     {(member.name || member.email).charAt(0).toUpperCase()}
                   </div>
-                  <div>
-                    <h3 className="font-medium text-gray-900 dark:text-gray-100">
+                  <div className="min-w-0">
+                    <h3 className="font-medium text-gray-900 dark:text-gray-100 truncate">
                       {member.name || member.email}
                       {member.user_id === user?.id && (
                         <span className="ml-2 text-xs text-gray-400">(you)</span>
                       )}
                     </h3>
-                    <p className="text-sm text-gray-500 dark:text-gray-400">{member.email}</p>
+                    <p className="text-sm text-gray-500 dark:text-gray-400 truncate">{member.email}</p>
                   </div>
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 ml-14 sm:ml-0 flex-wrap sm:flex-nowrap">
                   {editingMember === member.user_id ? (
                     <select
                       value={member.role}
@@ -1742,6 +1820,21 @@ export default function WorkspaceDetailPage() {
                     Enter the full URL to an existing GitHub repository
                   </p>
                 </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                    GitHub Personal Access Token (optional)
+                  </label>
+                  <input
+                    type="password"
+                    value={existingRepoPat}
+                    onChange={(e) => setExistingRepoPat(e.target.value)}
+                    placeholder="ghp_xxxxxxxxxxxx"
+                    className="w-full px-3 py-2 border border-gray-300 dark:border-dark-600 bg-white dark:bg-dark-700 text-gray-900 dark:text-gray-100 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                  />
+                  <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    If not provided, the default PAT from the keyvault will be used
+                  </p>
+                </div>
               </div>
             )}
 
@@ -1758,6 +1851,7 @@ export default function WorkspaceDetailPage() {
                   setShowLinkAppModal(false)
                   setSelectedTemplate('')
                   setExistingRepoUrl('')
+                  setExistingRepoPat('')
                   setLinkAppError('')
                   setLinkAppMode('template')
                 }}

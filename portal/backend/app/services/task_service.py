@@ -282,6 +282,7 @@ class TaskService:
         github_org: str = None,
         github_repo_url: str = None,
         github_repo_name: str = None,
+        github_pat: str = None,
     ) -> str:
         """Create task to link an app to an existing workspace.
 
@@ -293,6 +294,10 @@ class TaskService:
         5. Create app database
         6. Deploy Docker containers
         7. Create foundation sandbox
+
+        Args:
+            github_pat: Optional GitHub PAT for this repository.
+                       If not provided, uses default from keyvault.
         """
         return await redis_service.enqueue_task(
             queue_name=self.QUEUE_PROVISIONING,
@@ -307,6 +312,7 @@ class TaskService:
                 "github_org": github_org,
                 "github_repo_url": github_repo_url,
                 "github_repo_name": github_repo_name,
+                "github_pat": github_pat,
             },
             user_id=user_id,
             priority="high"
@@ -362,6 +368,7 @@ class TaskService:
         owner_id: str,
         github_org: str = None,
         github_repo_name: str = None,
+        github_pat: str = None,
         azure_tenant_id: str = None,
         azure_app_id: str = None,
         azure_client_secret: str = None,
@@ -375,6 +382,10 @@ class TaskService:
         3. Deploy sandbox containers
         4. Provision dedicated agent
         5. Add redirect URI to Azure app registration
+
+        Args:
+            github_pat: Optional custom GitHub PAT for this workspace's repository.
+                       If not provided, uses default from keyvault.
         """
         return await redis_service.enqueue_task(
             queue_name=self.QUEUE_PROVISIONING,
@@ -388,6 +399,7 @@ class TaskService:
                 "source_branch": source_branch,
                 "github_org": github_org,
                 "github_repo_name": github_repo_name,
+                "github_pat": github_pat,
                 "azure_tenant_id": azure_tenant_id,
                 "azure_app_id": azure_app_id,
                 "azure_client_secret": azure_client_secret,
@@ -608,6 +620,7 @@ class TaskService:
         apply_labels: bool = True,
         add_checklist: bool = True,
         priority: str = "high",
+        sandbox_slug: str = None,
     ) -> str:
         """Create task for AI to enhance a card's description.
 
@@ -629,6 +642,7 @@ class TaskService:
             apply_labels: Whether to apply suggested labels
             add_checklist: Whether to add criteria to checklist
             priority: Task priority (high/normal)
+            sandbox_slug: Optional sandbox slug for codebase context
         """
         return await redis_service.enqueue_task(
             queue_name=self.QUEUE_AGENTS,
@@ -639,6 +653,7 @@ class TaskService:
                 "card_description": card_description,
                 "workspace_slug": workspace_slug,
                 "kanban_api_url": kanban_api_url,
+                "sandbox_slug": sandbox_slug,
                 "options": options or {
                     "acceptance_criteria": True,
                     "complexity_estimate": True,

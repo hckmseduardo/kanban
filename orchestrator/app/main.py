@@ -2909,6 +2909,8 @@ This board helps you explore and develop ideas from concept to implementation-re
             update_payload["github_repo_url"] = payload["github_repo_url"]
         if payload.get("github_org"):
             update_payload["github_org"] = payload["github_org"]
+        if payload.get("github_pat"):
+            update_payload["github_pat"] = payload["github_pat"]  # Custom PAT for this repo
 
         # Include Azure AD credentials
         if payload.get("azure_app_id"):
@@ -3497,7 +3499,8 @@ This board helps you explore and develop ideas from concept to implementation-re
         git_branch = f"sandbox/{full_slug}"
 
         github_repo_url = f"https://github.com/{github_org}/{github_repo}.git"
-        github_token = os.environ.get("GITHUB_TOKEN")
+        # Use workspace-specific PAT if available, otherwise fall back to default
+        github_token = self._current_payload.get("github_pat") or os.environ.get("GITHUB_TOKEN")
 
         # Build authenticated clone URL
         clone_url = github_repo_url
@@ -4504,7 +4507,8 @@ This board helps you explore and develop ideas from concept to implementation-re
             if not github_repo_url:
                 raise RuntimeError(f"Repository not found and github_repo_url not in payload")
 
-            github_token = os.environ.get("GITHUB_TOKEN")
+            # Use workspace-specific PAT if available, otherwise fall back to default
+            github_token = payload.get("github_pat") or os.environ.get("GITHUB_TOKEN")
             clone_url = github_repo_url
             if github_token and "github.com" in github_repo_url:
                 clone_url = github_repo_url.replace("https://github.com", f"https://{github_token}@github.com")

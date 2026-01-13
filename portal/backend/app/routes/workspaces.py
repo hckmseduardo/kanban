@@ -743,6 +743,7 @@ async def link_app_to_workspace(
     github_repo_url = None
     github_repo_name = None
     github_org = None
+    github_pat = None  # Optional PAT for existing repo
 
     if isinstance(request, LinkAppFromTemplateRequest):
         # Template mode - validate template exists and is active
@@ -761,6 +762,7 @@ async def link_app_to_workspace(
     else:
         # Existing repo mode - parse URL
         github_repo_url = request.github_repo_url
+        github_pat = request.github_pat  # Optional custom PAT
         match = re.match(r"https://github\.com/([\w-]+)/([\w.-]+)", github_repo_url)
         if not match:
             raise HTTPException(
@@ -784,6 +786,7 @@ async def link_app_to_workspace(
         github_org=github_org,
         github_repo_url=github_repo_url,
         github_repo_name=github_repo_name,
+        github_pat=github_pat,  # Custom PAT for this repository (optional)
     )
 
     logger.info(

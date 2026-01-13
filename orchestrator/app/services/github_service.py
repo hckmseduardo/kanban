@@ -49,12 +49,33 @@ class GitHubService:
 
     @property
     def headers(self) -> dict:
-        """Get request headers with authorization"""
+        """Get request headers with authorization (uses default token)"""
+        return self._get_headers()
+
+    def _get_headers(self, token: str = None) -> dict:
+        """Get request headers with authorization.
+
+        Args:
+            token: Optional token to use. If not provided, uses default token.
+        """
+        auth_token = token if token else self.token
         return {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
-            "Authorization": f"token {self.token}",
+            "Authorization": f"token {auth_token}",
         }
+
+    def get_effective_token(self, custom_token: str = None) -> str:
+        """Get the effective token to use.
+
+        Args:
+            custom_token: Optional custom token. If provided, uses this.
+                         Otherwise falls back to default token.
+
+        Returns:
+            The token to use for GitHub API operations.
+        """
+        return custom_token if custom_token else self.token
 
     async def create_repo_from_template(
         self,
@@ -117,14 +138,22 @@ class GitHubService:
                 )
                 raise Exception(f"Failed to create repository: {error_detail}")
 
-    async def get_repository(self, owner: str, repo: str) -> Optional[dict]:
-        """Get repository details. Returns None if not found."""
+    async def get_repository(
+        self, owner: str, repo: str, token: str = None
+    ) -> Optional[dict]:
+        """Get repository details. Returns None if not found.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            token: Optional custom token. If not provided, uses default.
+        """
         url = f"{self.BASE_URL}/repos/{owner}/{repo}"
 
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 url,
-                headers=self.headers,
+                headers=self._get_headers(token),
                 timeout=30.0
             )
 
@@ -396,6 +425,7 @@ class GitHubService:
         owner: str,
         repo: str,
         use_ssh: bool = False,
+        token: str = None,
     ) -> str:
         """Get the clone URL for a repository.
 
@@ -403,11 +433,14 @@ class GitHubService:
             owner: Repository owner
             repo: Repository name
             use_ssh: Use SSH URL instead of HTTPS (default: False)
+            token: Optional custom token for authentication.
+                   If not provided, uses default token.
 
         Returns:
             Clone URL string with token authentication for HTTPS
         """
-        repo_data = await self.get_repository(owner, repo)
+        effective_token = self.get_effective_token(token)
+        repo_data = await self.get_repository(owner, repo, token=token)
         if not repo_data:
             raise Exception(f"Repository not found: {owner}/{repo}")
 
@@ -417,7 +450,7 @@ class GitHubService:
             # For HTTPS with token auth
             return repo_data["clone_url"].replace(
                 "https://",
-                f"https://x-access-token:{self.token}@"
+                f"https://x-access-token:{effective_token}@"
             )
 
 

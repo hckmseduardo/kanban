@@ -44,6 +44,7 @@ class LinkAppFromTemplateRequest(BaseModel):
 class LinkAppFromRepoRequest(BaseModel):
     """Request model for linking an existing GitHub repository"""
     github_repo_url: str  # Full URL: https://github.com/org/repo
+    github_pat: Optional[str] = None  # Optional PAT for this repository (uses default if not provided)
 
     @field_validator("github_repo_url")
     @classmethod

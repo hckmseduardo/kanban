@@ -250,6 +250,7 @@ async def create_sandbox(
         owner_id=auth.user["id"],
         github_org=workspace.get("github_org"),
         github_repo_name=workspace.get("github_repo_name"),
+        github_pat=workspace.get("github_pat"),  # Custom PAT for this workspace
         azure_tenant_id=workspace.get("azure_tenant_id"),
         azure_app_id=workspace.get("azure_app_id"),
         azure_client_secret=workspace.get("azure_client_secret"),
@@ -708,6 +709,7 @@ async def create_sandbox_internal(
         owner_id=x_user_id,
         github_org=workspace.get("github_org"),
         github_repo_name=workspace.get("github_repo_name"),
+        github_pat=workspace.get("github_pat"),  # Custom PAT for this workspace
         azure_tenant_id=workspace.get("azure_tenant_id"),
         azure_app_id=workspace.get("azure_app_id"),
         azure_client_secret=workspace.get("azure_client_secret"),
