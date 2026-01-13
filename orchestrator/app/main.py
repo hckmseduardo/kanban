@@ -1,6 +1,7 @@
 """Orchestrator main entry point - listens for provisioning tasks"""
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -27,6 +28,7 @@ from app.services.azure_service import azure_service
 from app.services.keyvault_service import keyvault_service
 from app.services.claude_code_runner import claude_runner
 from app.services.codex_cli_runner import codex_runner
+from app.services.qa_test_runner import qa_runner, QATestConfig
 
 logging.basicConfig(
     level=logging.INFO,
@@ -84,6 +86,7 @@ DNS_DIR = Path("/app/dns-zones")
 NETWORK_NAME = "kanban-global"
 
 # Auto-scaling configuration
+ENABLE_IDLE_CHECK = os.getenv("ENABLE_IDLE_CHECK", "false").lower() == "true"
 IDLE_CHECK_INTERVAL = int(os.getenv("IDLE_CHECK_INTERVAL", "900"))  # 15 minutes
 IDLE_THRESHOLD = int(os.getenv("IDLE_THRESHOLD", "900"))  # 15 minutes
 
@@ -161,9 +164,12 @@ class Orchestrator:
         # The start_active_workspaces() method is kept for reference but not called.
         # await self.start_active_workspaces()
 
-        # Start idle team checker background task
-        asyncio.create_task(self.check_idle_teams())
-        logger.info(f"Idle team checker started (interval: {IDLE_CHECK_INTERVAL}s, threshold: {IDLE_THRESHOLD}s)")
+        # Start idle team checker background task (if enabled)
+        if ENABLE_IDLE_CHECK:
+            asyncio.create_task(self.check_idle_teams())
+            logger.info(f"Idle team checker started (interval: {IDLE_CHECK_INTERVAL}s, threshold: {IDLE_THRESHOLD}s)")
+        else:
+            logger.info("Idle team checker disabled (ENABLE_IDLE_CHECK=false)")
 
         # Start health check processor background task
         asyncio.create_task(self.process_health_checks())
@@ -2073,6 +2079,7 @@ This board helps you explore and develop ideas from concept to implementation-re
         payload = self._current_payload
         github_org = payload.get("github_org", "hckmseduardo")
         github_repo = payload.get("github_repo_name", f"{workspace_slug}-app")
+        github_pat = payload.get("github_pat")  # Optional custom PAT
 
         # Use workspaces directory for app code
         workspace_dir = WORKSPACES_DIR / workspace_slug / "app"
@@ -2081,11 +2088,12 @@ This board helps you explore and develop ideas from concept to implementation-re
         logger.info(f"[{workspace_slug}] Cloning repository to {workspace_dir}")
 
         try:
-            # Get authenticated clone URL
+            # Get authenticated clone URL (use custom PAT if provided)
             clone_url = await github_service.clone_repository_url(
                 owner=github_org,
                 repo=github_repo,
                 use_ssh=False,  # Use HTTPS with token
+                token=github_pat,
             )
 
             # Clone the repository
@@ -2849,6 +2857,7 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         payload = self._current_payload
         github_repo_url = payload.get("github_repo_url")
+        github_pat = payload.get("github_pat")  # Optional custom PAT
 
         # Parse org and repo from URL
         match = re.match(r"https://github\.com/([\w-]+)/([\w.-]+)", github_repo_url)
@@ -2858,8 +2867,10 @@ This board helps you explore and develop ideas from concept to implementation-re
         github_org = match.group(1)
         github_repo_name = match.group(2)
 
-        # Verify repo exists and is accessible
-        repo_data = await github_service.get_repository(github_org, github_repo_name)
+        # Verify repo exists and is accessible (use custom PAT if provided)
+        repo_data = await github_service.get_repository(
+            github_org, github_repo_name, token=github_pat
+        )
         if not repo_data:
             raise ValueError(f"Repository not found or not accessible: {github_repo_url}")
 
@@ -2867,6 +2878,7 @@ This board helps you explore and develop ideas from concept to implementation-re
         self._current_payload["github_org"] = github_org
         self._current_payload["github_repo_name"] = github_repo_name
         self._current_payload["github_repo_url"] = repo_data.get("html_url")
+        # Keep github_pat in payload for cloning and workspace storage
 
         logger.info(f"[{workspace_slug}] Validated existing repo: {github_repo_url}")
 
@@ -4316,8 +4328,10 @@ This board helps you explore and develop ideas from concept to implementation-re
             ("Checking sandbox health", self._agent_check_sandbox_health),
             ("Resolving agent session", self._agent_resolve_session),
             ("Preparing QA context", self._agent_prepare_qa_context),
+            ("Running QA tests", self._agent_run_qa_tests),
             ("Running AI agent", self._agent_run_claude),
             ("Processing results", self._agent_process_results),
+            ("Processing QA results", self._agent_process_qa_results),
             ("Updating card", self._agent_update_card),
         ]
 
@@ -4793,6 +4807,69 @@ This board helps you explore and develop ideas from concept to implementation-re
         payload["qa_test_email"] = test_user_email
         payload["qa_test_password"] = test_user_password
 
+    async def _agent_run_qa_tests(self, card_id: str, sandbox_id: str, ctx: dict):
+        """Run Playwright E2E tests against the sandbox for QA validation.
+
+        This step:
+        1. Creates a Docker container on the HOST via SSH
+        2. Runs Playwright tests against the sandbox URL
+        3. Collects screenshots and test results
+        4. Stores results in ctx for later processing
+        """
+        payload = ctx["payload"]
+        log_prefix = ctx.get("log_prefix", f"[{card_id[:8]}]")
+        agent_name = payload.get("agent_config", {}).get("agent_name", "")
+
+        # Only run for QA agent
+        if agent_name != "qa":
+            return
+
+        sandbox_url = payload.get("sandbox_url")
+        sandbox_api_url = payload.get("sandbox_api_url")
+        workspace_slug = payload.get("workspace_slug")
+        sandbox_slug = payload.get("sandbox_slug")
+        full_slug = payload.get("full_slug", f"{workspace_slug}-{sandbox_slug}")
+
+        if not sandbox_url:
+            logger.warning(f"{log_prefix} No sandbox URL for QA tests - skipping Playwright")
+            return
+
+        logger.info(f"{log_prefix} Running Playwright QA tests against {sandbox_url}")
+
+        # Prepare test config
+        test_config = QATestConfig(
+            card_id=card_id,
+            sandbox_url=sandbox_url,
+            sandbox_api_url=sandbox_api_url or f"{sandbox_url}/api",
+            test_email=payload.get("qa_test_email", ""),
+            test_password=payload.get("qa_test_password", ""),
+            card_title=payload.get("card_title", "QA Test"),
+            card_description=payload.get("card_description", ""),
+            workspace_slug=workspace_slug,
+            sandbox_slug=sandbox_slug,
+            full_slug=full_slug,
+            domain=DOMAIN,
+            test_timeout=payload.get("agent_config", {}).get("timeout", 300)
+        )
+
+        # Run tests
+        test_result = await qa_runner.run_tests(test_config)
+
+        # Store results in context for later steps
+        ctx["qa_test_result"] = test_result
+
+        logger.info(
+            f"{log_prefix} QA tests completed: "
+            f"{test_result.passed}/{test_result.total_tests} passed, "
+            f"{test_result.failed} failed, "
+            f"{len(test_result.screenshots)} screenshots, "
+            f"{len(test_result.issues)} issues"
+        )
+
+        # If tests failed, we still continue to let the Claude agent analyze
+        if not test_result.success:
+            logger.warning(f"{log_prefix} QA tests had failures - agent will analyze")
+
     async def _agent_run_claude(self, card_id: str, sandbox_id: str, ctx: dict):
         """Run agent CLI subprocess for the agent task."""
         payload = ctx["payload"]
@@ -5027,6 +5104,98 @@ This board helps you explore and develop ideas from concept to implementation-re
                 result.error = f"Push error: {push_error}"
             result.success = False
 
+    async def _agent_process_qa_results(self, card_id: str, sandbox_id: str, ctx: dict):
+        """Process QA test results and upload screenshots as attachments.
+
+        This step:
+        1. Reads QA test results from ctx
+        2. Uploads screenshots as card attachments
+        3. Prepares structured issues for card description update
+        """
+        payload = ctx["payload"]
+        log_prefix = ctx.get("log_prefix", f"[{card_id[:8]}]")
+        agent_name = payload.get("agent_config", {}).get("agent_name", "")
+
+        # Only process for QA agent
+        if agent_name != "qa":
+            return
+
+        qa_result = ctx.get("qa_test_result")
+        if not qa_result:
+            return
+
+        workspace_slug = payload["workspace_slug"]
+        kanban_api_url = f"http://{workspace_slug}-kanban-api-1:8000"
+
+        # Upload screenshots as attachments
+        uploaded_attachments = []
+
+        if qa_result.screenshots:
+            logger.info(f"{log_prefix} Uploading {len(qa_result.screenshots)} QA screenshots")
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                for filename, b64_data in qa_result.screenshots.items():
+                    try:
+                        # Decode base64 to bytes
+                        image_data = base64.b64decode(b64_data)
+
+                        # Upload as multipart form
+                        files = {
+                            "file": (filename, image_data, "image/png")
+                        }
+
+                        response = await client.post(
+                            f"{kanban_api_url}/cards/{card_id}/attachments",
+                            headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")},
+                            files=files
+                        )
+
+                        if response.status_code in [200, 201]:
+                            attachment = response.json()
+                            uploaded_attachments.append(attachment)
+                            logger.debug(f"{log_prefix} Uploaded screenshot: {filename}")
+                        else:
+                            logger.warning(f"{log_prefix} Failed to upload {filename}: {response.status_code}")
+
+                    except Exception as e:
+                        logger.error(f"{log_prefix} Error uploading {filename}: {e}")
+
+        # Store uploaded attachments and issues for card update
+        ctx["qa_attachments"] = uploaded_attachments
+        ctx["qa_issues_formatted"] = qa_result.format_issues_for_developer()
+
+        # Update agent result with QA info
+        result = ctx.get("result")
+        if result:
+            # Build QA summary to append to output
+            qa_summary = f"\n\n## QA Test Results\n\n"
+            qa_summary += f"**Status:** {'PASSED' if qa_result.success else 'FAILED'}\n"
+            qa_summary += f"**Test Date:** {datetime.utcnow().isoformat()}Z\n\n"
+            qa_summary += f"- **Total Tests:** {qa_result.total_tests}\n"
+            qa_summary += f"- **Passed:** {qa_result.passed}\n"
+            qa_summary += f"- **Failed:** {qa_result.failed}\n"
+            qa_summary += f"- **Duration:** {qa_result.duration_seconds:.1f}s\n"
+
+            if qa_result.issues:
+                qa_summary += f"\n{qa_result.format_issues_for_developer()}\n"
+
+            if uploaded_attachments:
+                qa_summary += f"\n### Screenshots Attached\n"
+                for att in uploaded_attachments:
+                    qa_summary += f"- {att.get('original_filename', 'screenshot.png')}\n"
+
+            result.output = (result.output or "") + qa_summary
+
+            # If QA tests failed, mark overall result as failed
+            if not qa_result.success:
+                result.success = False
+                if result.error:
+                    result.error = f"{result.error}\nQA tests failed: {qa_result.failed} test(s)"
+                else:
+                    result.error = f"QA tests failed: {qa_result.failed} test(s)"
+
+        logger.info(f"{log_prefix} QA results processed: {len(uploaded_attachments)} attachments uploaded")
+
     async def _agent_update_card(self, card_id: str, sandbox_id: str, ctx: dict):
         """Update the kanban card with agent results."""
         if not ctx["result"]:
@@ -5125,15 +5294,29 @@ This board helps you explore and develop ideas from concept to implementation-re
                     headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")}
                 )
 
-                if card_response.status_code == 200 and result.success and result.output:
+                # Update card description - for successful agents or QA agent (always update with issues)
+                qa_issues_formatted = ctx.get("qa_issues_formatted", "")
+                should_update_description = (
+                    card_response.status_code == 200 and
+                    (result.success and result.output) or
+                    (agent_name == "qa" and qa_issues_formatted)
+                )
+
+                if should_update_description:
                     card_data = card_response.json()
                     current_description = card_data.get("description", "") or ""
 
                     # Build agent output section
                     agent_section = f"\n\n---\n\n## Agent: {display_name}\n\n"
+
+                    # For QA agent, include structured issues for developer
+                    if agent_name == "qa" and qa_issues_formatted:
+                        agent_section += qa_issues_formatted + "\n\n"
+
                     # Truncate output if too long
-                    output_text = result.output[:2000] if len(result.output) > 2000 else result.output
-                    agent_section += output_text
+                    if result.output:
+                        output_text = result.output[:2000] if len(result.output) > 2000 else result.output
+                        agent_section += output_text
 
                     # Check if this agent's section already exists and remove it
                     section_marker = f"## Agent: {display_name}"
@@ -5144,6 +5327,17 @@ This board helps you explore and develop ideas from concept to implementation-re
                         # The ---\n\n before the section is also part of the section to remove
                         pattern = r'(\n*---\n*)?## Agent: ' + re.escape(display_name) + r'.*?(?=\n---\n\n## Agent:|$)'
                         current_description = re.sub(pattern, '', current_description, flags=re.DOTALL)
+                        current_description = current_description.rstrip()
+
+                    # Also remove any existing QA_ISSUES section to avoid duplication
+                    if "<!-- QA_ISSUES_START -->" in current_description:
+                        import re
+                        current_description = re.sub(
+                            r'<!-- QA_ISSUES_START -->.*?<!-- QA_ISSUES_END -->',
+                            '',
+                            current_description,
+                            flags=re.DOTALL
+                        )
                         current_description = current_description.rstrip()
 
                     new_description = current_description + agent_section
@@ -5456,18 +5650,34 @@ Please complete this task. Update files as needed and explain what you did."""
         payload = self._current_payload
         card_title = payload["card_title"]
         card_description = payload["card_description"]
+        workspace_slug = payload["workspace_slug"]
         options = payload.get("options", {})
+
+        # Determine the working directory for codebase context
+        # Try sandbox path first, fall back to workspace repo
+        sandbox_slug = payload.get("sandbox_slug")
+        if sandbox_slug:
+            working_dir = f"/data/repos/{workspace_slug}/sandboxes/{sandbox_slug}"
+        else:
+            working_dir = f"/data/repos/{workspace_slug}"
+
+        # Verify the path exists, fallback to cwd if not
+        if not Path(working_dir).exists():
+            logger.warning(f"Working dir {working_dir} doesn't exist, using cwd")
+            working_dir = str(Path.cwd())
+
+        logger.info(f"Enhance description using working_dir: {working_dir}")
 
         # Build the enhancement prompt
         prompt = self._build_enhance_prompt(card_title, card_description, options)
 
-        # Run Claude Code CLI with readonly tools (no file modifications needed)
+        # Run Claude Code CLI with readonly tools (can read codebase for context)
         result = await claude_runner.run(
             prompt=prompt,
-            working_dir=str(Path.cwd()),  # Doesn't matter for this task
+            working_dir=working_dir,
             agent_type="product_owner",
             tool_profile="readonly",
-            timeout=120,  # 2 minutes should be enough
+            timeout=180,  # 3 minutes to allow for codebase analysis
         )
 
         if not result.success:
@@ -5546,6 +5756,19 @@ Please complete this task. Update files as needed and explain what you did."""
 
         prompt = f"""Analyze this kanban card and enhance it.
 
+## FIRST STEP - ANALYZE THE CODEBASE (MANDATORY)
+Before enhancing the card, you MUST explore the codebase to understand the project context:
+1. Read the project structure to understand the application architecture
+2. Look for existing features, components, and patterns related to this card
+3. Check for similar implementations that can inform your analysis
+4. Identify the tech stack, conventions, and coding patterns
+
+Use this codebase knowledge to:
+- Write more accurate and specific acceptance criteria that reference actual components/pages
+- Provide realistic complexity estimates based on the actual codebase
+- Suggest labels that match the project's conventions
+- Reference actual file paths or components when relevant
+
 ## Card Title
 {card_title}
 
@@ -5556,16 +5779,16 @@ Please complete this task. Update files as needed and explain what you did."""
 {features_text}
 
 ## Output Format
-Respond with ONLY a JSON object in this exact format (no markdown, no code blocks):
+After analyzing the codebase, respond with ONLY a JSON object in this exact format (no markdown, no code blocks):
 {{
-  "enhanced_description": "The improved description text",
-  "acceptance_criteria": ["Criterion 1", "Criterion 2", "..."],
+  "enhanced_description": "The improved description text (reference actual components/pages from codebase when relevant)",
+  "acceptance_criteria": ["Specific criterion referencing actual codebase elements", "Another testable requirement", "..."],
   "complexity": "low|medium|high",
-  "complexity_reason": "Brief explanation of complexity rating",
+  "complexity_reason": "Brief explanation based on actual codebase analysis",
   "suggested_labels": ["label1", "label2"]
 }}
 
-Be concise but thorough. Focus on actionable improvements."""
+Be concise but thorough. Base your analysis on what you found in the codebase."""
 
         return prompt
 
