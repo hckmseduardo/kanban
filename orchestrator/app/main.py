@@ -28,7 +28,8 @@ from app.services.azure_service import azure_service
 from app.services.keyvault_service import keyvault_service
 from app.services.claude_code_runner import claude_runner
 from app.services.codex_cli_runner import codex_runner
-from app.services.qa_test_runner import qa_runner, QATestConfig
+# QA test runner no longer used - QA agent creates and runs its own tests
+# from app.services.qa_test_runner import qa_runner, QATestConfig
 
 logging.basicConfig(
     level=logging.INFO,
@@ -2143,7 +2144,7 @@ This board helps you explore and develop ideas from concept to implementation-re
         # with POSTGRES_DB environment variable
 
     async def _workspace_deploy_app(self, workspace_slug: str, workspace_id: str):
-        """Deploy app containers using the workspace-app-compose template"""
+        """Deploy app containers using the workspace-app-compose template or Claude-generated config"""
         if not self.docker_available:
             raise RuntimeError("Docker CLI not available")
 
@@ -2152,51 +2153,61 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         logger.info(f"[{workspace_slug}] Deploying app containers")
 
-        # Generate secrets
-        postgres_password = secrets.token_hex(16)
-        app_secret_key = secrets.token_hex(32)
-
-        # Store secrets in payload
-        self._current_payload["postgres_password"] = postgres_password
-        self._current_payload["app_secret_key"] = app_secret_key
-
         # Paths
         workspace_data_path = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}"
         app_source_path = f"{workspace_data_path}/app"
 
-        # Render workspace app compose template
-        try:
-            template = self.app_factory_jinja.get_template("workspace-app-compose.yml.j2")
-            compose_content = template.render(
-                workspace_slug=workspace_slug,
-                app_template_slug=payload.get("app_template_slug", "basic-app"),
-                database_name=database_name,
-                postgres_password=postgres_password,
-                app_secret_key=app_secret_key,
-                data_path=workspace_data_path,
-                app_source_path=app_source_path,
-                domain=DOMAIN,
-                port=PORT,
-                network_name=NETWORK_NAME,
-                # Entra External ID (CIAM) credentials
-                entra_tenant_id=payload.get("entra_tenant_id", ""),
-                entra_authority=payload.get("entra_authority", ""),
-                entra_client_id=payload.get("entra_client_id", ""),
-                entra_client_secret=payload.get("entra_client_secret", ""),
-            )
-        except Exception as e:
-            logger.error(f"[{workspace_slug}] Failed to render workspace app template: {e}")
-            raise
+        # Check if Claude generated a docker-compose.yml (for existing repo mode)
+        claude_compose_path = Path(f"/app/data/workspaces/{workspace_slug}/app/docker-compose.yml")
+        claude_compose_host = f"{app_source_path}/docker-compose.yml"
 
-        # Write compose file to persistent location in workspace directory
-        # Using HOST_PROJECT_PATH for the compose file since docker compose uses host paths
-        compose_file_host = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml"
-        compose_file = Path(f"/app/data/workspaces/{workspace_slug}/docker-compose.app.yml")
+        if payload.get("claude_configured") and claude_compose_path.exists():
+            # Use Claude-generated compose file
+            compose_file_host = claude_compose_host
+            logger.info(f"[{workspace_slug}] Using Claude-generated docker-compose.yml")
+        else:
+            # Use template-based compose (for template mode)
+            # Generate secrets
+            postgres_password = secrets.token_hex(16)
+            app_secret_key = secrets.token_hex(32)
 
-        # Ensure workspace directory exists
-        compose_file.parent.mkdir(parents=True, exist_ok=True)
-        compose_file.write_text(compose_content)
-        logger.info(f"[{workspace_slug}] Saved compose file to {compose_file_host}")
+            # Store secrets in payload
+            self._current_payload["postgres_password"] = postgres_password
+            self._current_payload["app_secret_key"] = app_secret_key
+
+            # Render workspace app compose template
+            try:
+                template = self.app_factory_jinja.get_template("workspace-app-compose.yml.j2")
+                compose_content = template.render(
+                    workspace_slug=workspace_slug,
+                    app_template_slug=payload.get("app_template_slug", "basic-app"),
+                    database_name=database_name,
+                    postgres_password=postgres_password,
+                    app_secret_key=app_secret_key,
+                    data_path=workspace_data_path,
+                    app_source_path=app_source_path,
+                    domain=DOMAIN,
+                    port=PORT,
+                    network_name=NETWORK_NAME,
+                    # Entra External ID (CIAM) credentials
+                    entra_tenant_id=payload.get("entra_tenant_id", ""),
+                    entra_authority=payload.get("entra_authority", ""),
+                    entra_client_id=payload.get("entra_client_id", ""),
+                    entra_client_secret=payload.get("entra_client_secret", ""),
+                )
+            except Exception as e:
+                logger.error(f"[{workspace_slug}] Failed to render workspace app template: {e}")
+                raise
+
+            # Write compose file to persistent location in workspace directory
+            # Using HOST_PROJECT_PATH for the compose file since docker compose uses host paths
+            compose_file_host = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml"
+            compose_file = Path(f"/app/data/workspaces/{workspace_slug}/docker-compose.app.yml")
+
+            # Ensure workspace directory exists
+            compose_file.parent.mkdir(parents=True, exist_ok=True)
+            compose_file.write_text(compose_content)
+            logger.info(f"[{workspace_slug}] Saved compose file to {compose_file_host}")
 
         project_name = f"{workspace_slug}-app"
 
@@ -2380,6 +2391,14 @@ This board helps you explore and develop ideas from concept to implementation-re
                     steps.extend([
                         ("Restarting app containers", self._workspace_restart_app),
                     ])
+
+            # Also rebuild sandboxes if restart_app is enabled
+            sandboxes = self._get_workspace_sandboxes(workspace_slug)
+            if sandboxes:
+                if rebuild:
+                    steps.append(("Rebuilding sandbox containers", self._workspace_start_rebuild_sandboxes))
+                else:
+                    steps.append(("Restarting sandbox containers", self._workspace_restart_sandboxes))
 
         steps.append(("Running health check", self._workspace_health_check))
 
@@ -2786,6 +2805,28 @@ This board helps you explore and develop ideas from concept to implementation-re
         else:
             logger.warning(f"[{workspace_slug}] App restart warning: {result.stderr}")
 
+    async def _workspace_restart_sandboxes(self, workspace_slug: str, workspace_id: str):
+        """Restart all sandbox containers for this workspace (no rebuild)"""
+        if not self.docker_available:
+            return
+
+        sandboxes = self._get_workspace_sandboxes(workspace_slug)
+        for full_slug in sandboxes:
+            compose_file = f"{HOST_PROJECT_PATH}/data/sandboxes/{full_slug}/docker-compose.app.yml"
+            project_name = full_slug
+
+            result = subprocess.run(
+                ["docker", "compose", "-f", compose_file, "-p", project_name, "restart"],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+
+            if result.returncode == 0:
+                logger.info(f"[{full_slug}] Sandbox containers restarted")
+            else:
+                logger.warning(f"[{full_slug}] Sandbox restart warning: {result.stderr}")
+
     # =========================================================================
     # Link/Unlink App Handlers
     # =========================================================================
@@ -2806,18 +2847,29 @@ This board helps you explore and develop ideas from concept to implementation-re
         steps = []
 
         if app_template_id:
-            # From template mode - create new repo
+            # From template mode - create new repo with known structure
             steps.append(("Creating GitHub repository", self._workspace_create_github_repo))
+            steps.extend([
+                ("Creating Azure app registration", self._workspace_create_azure_app),
+                ("Cloning repository", self._workspace_clone_repo),
+                ("Issuing SSL certificate", self._workspace_issue_certificate),
+                ("Creating app database", self._workspace_create_database),
+                ("Deploying app containers", self._workspace_deploy_app),
+            ])
         else:
-            # Existing repo mode - validate and use existing repo
-            steps.append(("Validating GitHub repository", self._link_app_validate_existing_repo))
+            # Existing repo mode - use Claude CLI to configure the app
+            steps.extend([
+                ("Validating GitHub repository", self._link_app_validate_existing_repo),
+                ("Creating Azure app registration", self._workspace_create_azure_app),
+                ("Cloning repository", self._workspace_clone_repo),
+                ("Configuring app with Claude", self._link_app_configure_with_claude),
+                ("Issuing SSL certificate", self._workspace_issue_certificate),
+                # Skip "Creating app database" - Claude handles db in docker-compose if needed
+                ("Deploying app containers", self._workspace_deploy_app),
+            ])
 
+        # Common steps for both modes
         steps.extend([
-            ("Creating Azure app registration", self._workspace_create_azure_app),
-            ("Cloning repository", self._workspace_clone_repo),
-            ("Issuing SSL certificate", self._workspace_issue_certificate),
-            ("Creating app database", self._workspace_create_database),
-            ("Deploying app containers", self._workspace_deploy_app),
             # Update workspace with app fields BEFORE sandbox creation
             # (portal API requires app_template_id to be set for sandbox creation)
             ("Updating workspace", self._link_app_update_workspace),
@@ -2881,6 +2933,85 @@ This board helps you explore and develop ideas from concept to implementation-re
         # Keep github_pat in payload for cloning and workspace storage
 
         logger.info(f"[{workspace_slug}] Validated existing repo: {github_repo_url}")
+
+    async def _link_app_configure_with_claude(self, workspace_slug: str, workspace_id: str):
+        """Configure existing repository using Claude CLI before deployment.
+
+        This step analyzes the repository structure and generates appropriate
+        Docker configuration (Dockerfile, docker-compose.yml) so the app can
+        run on a single port behind the workspace app domain.
+        """
+        payload = self._current_payload
+
+        # Only run for existing repo mode (no template)
+        if payload.get("app_template_id"):
+            logger.info(f"[{workspace_slug}] Skipping Claude config - using template")
+            return
+
+        app_source_path = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/app"
+        base_domain = DOMAIN.replace("kanban.", "")
+        app_domain = f"{workspace_slug}.app.{base_domain}"
+
+        prompt = f"""Analyze this repository and configure it to run as a Docker application.
+
+Requirements:
+1. The app must expose a SINGLE port (8000) for HTTP traffic
+2. Create a docker-compose.yml in the root with:
+   - Service name: {workspace_slug}-app
+   - Container name: {workspace_slug}-app
+   - Build context: . (current directory)
+   - Expose port 8000 internally (do NOT expose to host)
+   - Network: {workspace_slug}-network (external: false) AND {NETWORK_NAME} (external: true)
+   - Traefik labels for HTTPS routing:
+     - traefik.enable=true
+     - traefik.http.routers.{workspace_slug}-app.rule=Host(`{app_domain}`)
+     - traefik.http.routers.{workspace_slug}-app.entrypoints=websecure
+     - traefik.http.routers.{workspace_slug}-app.tls=true
+     - traefik.http.services.{workspace_slug}-app.loadbalancer.server.port=8000
+   - Restart policy: unless-stopped
+3. Create or modify Dockerfile to:
+   - Build the application for production
+   - Expose port 8000
+   - Set appropriate CMD/ENTRYPOINT
+4. If the app needs environment variables, use environment section in docker-compose
+
+The app will be accessible at: https://{app_domain}
+
+Important:
+- Keep it minimal - only add services the app actually needs
+- Analyze the codebase to determine if postgres/redis are needed:
+  - Look for database connection strings, ORM usage, SQL files
+  - If database is needed, add a postgres service on the internal network
+  - If not needed, omit it entirely
+- Use multi-stage builds for smaller images where appropriate
+- The external Traefik network is: {NETWORK_NAME}
+- Make sure the docker-compose.yml networks section includes both:
+  - {workspace_slug}-network (internal, for inter-service communication)
+  - {NETWORK_NAME} (external: true, for Traefik routing)
+
+Generate the configuration files now."""
+
+        logger.info(f"[{workspace_slug}] Configuring app with Claude CLI...")
+
+        result = await claude_runner.run(
+            prompt=prompt,
+            working_dir=app_source_path,
+            tool_profile="developer",
+            timeout=600,  # 10 minutes
+        )
+
+        if not result.success:
+            raise RuntimeError(f"Claude configuration failed: {result.error}")
+
+        # Verify docker-compose.yml was created
+        compose_path = Path(app_source_path) / "docker-compose.yml"
+        if not compose_path.exists():
+            raise RuntimeError("Claude did not generate docker-compose.yml")
+
+        # Mark that we're using Claude-generated config
+        self._current_payload["claude_configured"] = True
+
+        logger.info(f"[{workspace_slug}] App configured successfully by Claude")
 
     async def _link_app_update_workspace(self, workspace_slug: str, workspace_id: str):
         """Update workspace with app fields (before sandbox creation)
@@ -4812,67 +4943,26 @@ This board helps you explore and develop ideas from concept to implementation-re
         payload["qa_test_password"] = test_user_password
 
     async def _agent_run_qa_tests(self, card_id: str, sandbox_id: str, ctx: dict):
-        """Run Playwright E2E tests against the sandbox for QA validation.
+        """Placeholder step for QA tests - the QA agent now creates and runs tests itself.
 
-        This step:
-        1. Creates a Docker container on the HOST via SSH
-        2. Runs Playwright tests against the sandbox URL
-        3. Collects screenshots and test results
-        4. Stores results in ctx for later processing
+        Previously this step ran Playwright tests via Docker before the QA agent.
+        Now the QA agent is responsible for:
+        1. Creating tests scoped to the card's functionality
+        2. Executing tests using Playwright MCP tools or bash scripts
+        3. Reporting results with screenshots and structured bug reports
+
+        This step is kept for backwards compatibility but does nothing.
         """
         payload = ctx["payload"]
         log_prefix = ctx.get("log_prefix", f"[{card_id[:8]}]")
         agent_name = payload.get("agent_config", {}).get("agent_name", "")
 
-        # Only run for QA agent
+        # Only applies to QA agent
         if agent_name != "qa":
             return
 
-        sandbox_url = payload.get("sandbox_url")
-        sandbox_api_url = payload.get("sandbox_api_url")
-        workspace_slug = payload.get("workspace_slug")
-        sandbox_slug = payload.get("sandbox_slug")
-        full_slug = payload.get("full_slug", f"{workspace_slug}-{sandbox_slug}")
-
-        if not sandbox_url:
-            logger.warning(f"{log_prefix} No sandbox URL for QA tests - skipping Playwright")
-            return
-
-        logger.info(f"{log_prefix} Running Playwright QA tests against {sandbox_url}")
-
-        # Prepare test config
-        test_config = QATestConfig(
-            card_id=card_id,
-            sandbox_url=sandbox_url,
-            sandbox_api_url=sandbox_api_url or f"{sandbox_url}/api",
-            test_email=payload.get("qa_test_email", ""),
-            test_password=payload.get("qa_test_password", ""),
-            card_title=payload.get("card_title", "QA Test"),
-            card_description=payload.get("card_description", ""),
-            workspace_slug=workspace_slug,
-            sandbox_slug=sandbox_slug,
-            full_slug=full_slug,
-            domain=DOMAIN,
-            test_timeout=payload.get("agent_config", {}).get("timeout", 300)
-        )
-
-        # Run tests
-        test_result = await qa_runner.run_tests(test_config)
-
-        # Store results in context for later steps
-        ctx["qa_test_result"] = test_result
-
-        logger.info(
-            f"{log_prefix} QA tests completed: "
-            f"{test_result.passed}/{test_result.total_tests} passed, "
-            f"{test_result.failed} failed, "
-            f"{len(test_result.screenshots)} screenshots, "
-            f"{len(test_result.issues)} issues"
-        )
-
-        # If tests failed, we still continue to let the Claude agent analyze
-        if not test_result.success:
-            logger.warning(f"{log_prefix} QA tests had failures - agent will analyze")
+        # QA agent now runs its own tests - no pre-execution needed
+        logger.info(f"{log_prefix} QA agent will create and execute tests itself (no pre-execution)")
 
     async def _agent_run_claude(self, card_id: str, sandbox_id: str, ctx: dict):
         """Run agent CLI subprocess for the agent task."""
@@ -5109,12 +5199,11 @@ This board helps you explore and develop ideas from concept to implementation-re
             result.success = False
 
     async def _agent_process_qa_results(self, card_id: str, sandbox_id: str, ctx: dict):
-        """Process QA test results and upload screenshots as attachments.
+        """Process QA agent results - extract structured issues from output.
 
-        This step:
-        1. Reads QA test results from ctx
-        2. Uploads screenshots as card attachments
-        3. Prepares structured issues for card description update
+        The QA agent now creates and runs tests itself, including its results
+        directly in the output. This step extracts any structured issues
+        (marked with QA_ISSUES_START/END tags) for the card description.
         """
         payload = ctx["payload"]
         log_prefix = ctx.get("log_prefix", f"[{card_id[:8]}]")
@@ -5124,81 +5213,24 @@ This board helps you explore and develop ideas from concept to implementation-re
         if agent_name != "qa":
             return
 
-        qa_result = ctx.get("qa_test_result")
-        if not qa_result:
+        result = ctx.get("result")
+        if not result or not result.output:
             return
 
-        workspace_slug = payload["workspace_slug"]
-        kanban_api_url = f"http://{workspace_slug}-kanban-api-1:8000"
+        # Extract structured issues from QA agent output (if present)
+        import re
+        issues_match = re.search(
+            r'<!-- QA_ISSUES_START -->.*?<!-- QA_ISSUES_END -->',
+            result.output,
+            re.DOTALL
+        )
 
-        # Upload screenshots as attachments
-        uploaded_attachments = []
-
-        if qa_result.screenshots:
-            logger.info(f"{log_prefix} Uploading {len(qa_result.screenshots)} QA screenshots")
-
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                for filename, b64_data in qa_result.screenshots.items():
-                    try:
-                        # Decode base64 to bytes
-                        image_data = base64.b64decode(b64_data)
-
-                        # Upload as multipart form
-                        files = {
-                            "file": (filename, image_data, "image/png")
-                        }
-
-                        response = await client.post(
-                            f"{kanban_api_url}/cards/{card_id}/attachments",
-                            headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")},
-                            files=files
-                        )
-
-                        if response.status_code in [200, 201]:
-                            attachment = response.json()
-                            uploaded_attachments.append(attachment)
-                            logger.debug(f"{log_prefix} Uploaded screenshot: {filename}")
-                        else:
-                            logger.warning(f"{log_prefix} Failed to upload {filename}: {response.status_code}")
-
-                    except Exception as e:
-                        logger.error(f"{log_prefix} Error uploading {filename}: {e}")
-
-        # Store uploaded attachments and issues for card update
-        ctx["qa_attachments"] = uploaded_attachments
-        ctx["qa_issues_formatted"] = qa_result.format_issues_for_developer()
-
-        # Update agent result with QA info
-        result = ctx.get("result")
-        if result:
-            # Build QA summary to append to output
-            qa_summary = f"\n\n## QA Test Results\n\n"
-            qa_summary += f"**Status:** {'PASSED' if qa_result.success else 'FAILED'}\n"
-            qa_summary += f"**Test Date:** {datetime.utcnow().isoformat()}Z\n\n"
-            qa_summary += f"- **Total Tests:** {qa_result.total_tests}\n"
-            qa_summary += f"- **Passed:** {qa_result.passed}\n"
-            qa_summary += f"- **Failed:** {qa_result.failed}\n"
-            qa_summary += f"- **Duration:** {qa_result.duration_seconds:.1f}s\n"
-
-            if qa_result.issues:
-                qa_summary += f"\n{qa_result.format_issues_for_developer()}\n"
-
-            if uploaded_attachments:
-                qa_summary += f"\n### Screenshots Attached\n"
-                for att in uploaded_attachments:
-                    qa_summary += f"- {att.get('original_filename', 'screenshot.png')}\n"
-
-            result.output = (result.output or "") + qa_summary
-
-            # If QA tests failed, mark overall result as failed
-            if not qa_result.success:
-                result.success = False
-                if result.error:
-                    result.error = f"{result.error}\nQA tests failed: {qa_result.failed} test(s)"
-                else:
-                    result.error = f"QA tests failed: {qa_result.failed} test(s)"
-
-        logger.info(f"{log_prefix} QA results processed: {len(uploaded_attachments)} attachments uploaded")
+        if issues_match:
+            ctx["qa_issues_formatted"] = issues_match.group(0)
+            logger.info(f"{log_prefix} Extracted structured QA issues from agent output")
+        else:
+            ctx["qa_issues_formatted"] = ""
+            logger.info(f"{log_prefix} No structured QA issues found in agent output")
 
     async def _agent_update_card(self, card_id: str, sandbox_id: str, ctx: dict):
         """Update the kanban card with agent results."""
