@@ -219,6 +219,7 @@ class TaskWorker:
                                 "github_repo_name",
                                 "github_repo_url",
                                 "github_org",
+                                "github_pat",  # Custom PAT for this workspace's repo
                                 "app_template_id",
                                 "app_subdomain",
                                 "app_database_name",
