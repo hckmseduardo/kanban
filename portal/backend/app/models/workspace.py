@@ -33,6 +33,7 @@ class WorkspaceUpdateRequest(BaseModel):
     """Request model for updating a workspace"""
     name: Optional[str] = None
     description: Optional[str] = None
+    default_llm_provider: Optional[str] = None  # claude-cli, codex-cli, abacus-cli
 
 
 class LinkAppFromTemplateRequest(BaseModel):
@@ -92,6 +93,9 @@ class WorkspaceResponse(BaseModel):
     status: str
     created_at: str
     provisioned_at: Optional[str] = None
+
+    # LLM Provider Configuration
+    default_llm_provider: Optional[str] = None  # claude-cli, codex-cli, abacus-cli
 
 
 class WorkspaceListResponse(BaseModel):

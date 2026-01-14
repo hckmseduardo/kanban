@@ -206,6 +206,8 @@ async def receive_card_event(
             priority="high" if "urgent" in [l.lower() for l in card.get("labels", [])] else "normal",
             github_repo_url=workspace.get("github_repo_url"),
             card_number=card.get("card_number"),
+            checklist=card.get("checklist", []),
+            workspace_default_llm_provider=workspace.get("default_llm_provider"),
         )
 
         card_num = card.get('card_number') or card.get('id', '')[:8]

@@ -172,6 +172,7 @@ class TaskService:
         sandboxes: list = None,
         github_org: str = None,
         github_repo_name: str = None,
+        github_repo_url: str = None,
         delete_github_repo: bool = False,
     ) -> str:
         """Create task to delete a workspace.
@@ -191,6 +192,7 @@ class TaskService:
             "sandboxes": sandboxes or [],
             "github_org": github_org,
             "github_repo_name": github_repo_name,
+            "github_repo_url": github_repo_url,
             "delete_github_repo": delete_github_repo,
         }
         if azure_object_id:
@@ -326,6 +328,7 @@ class TaskService:
         azure_object_id: str = None,
         github_org: str = None,
         github_repo_name: str = None,
+        github_repo_url: str = None,
         delete_github_repo: bool = False,
     ) -> str:
         """Create task to unlink an app from a workspace.
@@ -347,6 +350,7 @@ class TaskService:
                 "azure_object_id": azure_object_id,
                 "github_org": github_org,
                 "github_repo_name": github_repo_name,
+                "github_repo_url": github_repo_url,
                 "delete_github_repo": delete_github_repo,
             },
             user_id=user_id,
@@ -554,6 +558,8 @@ class TaskService:
         priority: str = "normal",
         github_repo_url: str = None,
         card_number: str = None,
+        checklist: list = None,
+        workspace_default_llm_provider: str = None,
     ) -> str:
         """Create task for on-demand AI agent to process a card.
 
@@ -581,6 +587,8 @@ class TaskService:
             board_id: Optional board ID
             labels: Optional card labels
             priority: Task priority (high/normal)
+            checklist: Optional list of checklist items
+            workspace_default_llm_provider: Workspace's default LLM provider (claude-cli, codex-cli, abacus-cli)
         """
         return await redis_service.enqueue_task(
             queue_name=self.QUEUE_AGENTS,
@@ -602,6 +610,8 @@ class TaskService:
                 "board_id": board_id,
                 "labels": labels or [],
                 "github_repo_url": github_repo_url,
+                "checklist": checklist or [],
+                "workspace_default_llm_provider": workspace_default_llm_provider,
             },
             user_id=user_id,
             priority=priority

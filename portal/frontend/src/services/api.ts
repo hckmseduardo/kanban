@@ -181,9 +181,10 @@ export interface Workspace {
   github_repo_name: string | null
   app_subdomain: string | null
   app_database_name: string | null
-  status: 'provisioning' | 'active' | 'suspended' | 'deleted'
+  status: 'provisioning' | 'active' | 'suspended' | 'deleted' | 'linking_app' | 'unlinking_app'
   created_at: string
   provisioned_at: string | null
+  default_llm_provider: string | null
 }
 
 export interface CreateWorkspaceRequest {
@@ -313,6 +314,8 @@ export const workspacesApi = {
   get: (slug: string) => api.get<Workspace>(`/workspaces/${slug}`),
   create: (data: CreateWorkspaceRequest) =>
     api.post<{ message: string; workspace: Workspace; task_id: string }>('/workspaces', data),
+  update: (slug: string, data: { name?: string; description?: string; default_llm_provider?: string }) =>
+    api.put<Workspace>(`/workspaces/${slug}`, data),
   delete: (slug: string, data?: DeleteWorkspaceRequest) =>
     api.delete<{ message: string; task_id: string }>(`/workspaces/${slug}`, { data }),
   restart: (slug: string, options?: { rebuild?: boolean; restart_app?: boolean }) =>

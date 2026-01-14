@@ -12,6 +12,7 @@ import subprocess
 import shlex
 import time
 import uuid
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -28,12 +29,27 @@ from app.services.azure_service import azure_service
 from app.services.keyvault_service import keyvault_service
 from app.services.claude_code_runner import claude_runner
 from app.services.codex_cli_runner import codex_runner
+from app.services.abacus_cli_runner import abacus_runner
 # QA test runner no longer used - QA agent creates and runs its own tests
 # from app.services.qa_test_runner import qa_runner, QATestConfig
 
+CARD_NUMBER_UNKNOWN = "NO-CARD"
+card_number_ctx: ContextVar[str] = ContextVar("card_number", default=CARD_NUMBER_UNKNOWN)
+
+_record_factory = logging.getLogRecordFactory()
+
+
+def _card_number_record_factory(*args, **kwargs):
+    record = _record_factory(*args, **kwargs)
+    record.card_number = card_number_ctx.get()
+    return record
+
+
+logging.setLogRecordFactory(_card_number_record_factory)
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - [%(card_number)s] %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -76,6 +92,16 @@ try:
         logger.info("Loaded OPENAI_API_KEY from Key Vault")
 except Exception as e:
     logger.warning(f"Could not load OPENAI_API_KEY from Key Vault: {e}")
+
+# Try to load ABACUS_API_KEY from Key Vault first, fall back to env var
+ABACUS_API_KEY = os.getenv("ABACUS_API_KEY", "")
+try:
+    _kv_abacus_key = keyvault_service.get_secret("abacus-api-key")
+    if _kv_abacus_key:
+        ABACUS_API_KEY = _kv_abacus_key
+        logger.info("Loaded ABACUS_API_KEY from Key Vault")
+except Exception as e:
+    logger.warning(f"Could not load ABACUS_API_KEY from Key Vault: {e}")
 
 TEAMS_DIR = Path("/app/data/teams")
 # Use HOST_PROJECT_PATH for workspaces so docker compose build contexts resolve correctly
@@ -188,13 +214,13 @@ class Orchestrator:
 
                 if result:
                     queue_name, task_id = result
-                    logger.info(f"Processing task {task_id} from {queue_name}")
 
                     # Check if this is an agent task (should run in parallel)
                     if "agents" in queue_name:
                         # Spawn agent task in background with semaphore limit
-                        asyncio.create_task(self._run_agent_task_with_semaphore(task_id))
+                        asyncio.create_task(self._run_agent_task_with_semaphore(task_id, queue_name))
                     else:
+                        logger.info(f"Processing task {task_id} from {queue_name}")
                         # Provisioning tasks run sequentially (they're quick)
                         await self.process_task(task_id)
 
@@ -217,22 +243,33 @@ class Orchestrator:
         logger.info("Stopping orchestrator...")
         self.running = False
 
-    async def _run_agent_task_with_semaphore(self, task_id: str):
+    async def _run_agent_task_with_semaphore(self, task_id: str, queue_name: str):
         """Run an agent task with semaphore-limited concurrency."""
         async with self.agent_semaphore:
             # Track the task
             current_task = asyncio.current_task()
             self.active_agent_tasks[task_id] = current_task
-            logger.info(f"Starting agent task {task_id} (active: {len(self.active_agent_tasks)}/{self.MAX_AGENT_WORKERS})")
 
+            task = await self._load_task(task_id)
+            card_number = CARD_NUMBER_UNKNOWN
+            if task:
+                card_number = await self._resolve_task_card_number(task_id, task)
+
+            token = card_number_ctx.set(card_number or CARD_NUMBER_UNKNOWN)
             try:
-                await self.process_task(task_id)
+                logger.info(f"Processing task {task_id} from {queue_name}")
+                logger.info(f"Starting agent task {task_id} (active: {len(self.active_agent_tasks)}/{self.MAX_AGENT_WORKERS})")
+                if task:
+                    await self.process_task(task_id, task)
+                else:
+                    logger.error(f"Task {task_id} not found")
             except Exception as e:
                 logger.error(f"Agent task {task_id} failed: {e}")
             finally:
                 # Remove from active tasks
                 self.active_agent_tasks.pop(task_id, None)
                 logger.info(f"Agent task {task_id} finished (active: {len(self.active_agent_tasks)}/{self.MAX_AGENT_WORKERS})")
+                card_number_ctx.reset(token)
 
     def _cleanup_completed_agent_tasks(self):
         """Remove completed tasks from the active tasks dict."""
@@ -242,6 +279,59 @@ class Orchestrator:
         ]
         for task_id in completed:
             self.active_agent_tasks.pop(task_id, None)
+
+    async def _load_task(self, task_id: str) -> Optional[dict]:
+        """Load a task dict from Redis."""
+        task_data = await self.redis.hget(f"task:{task_id}", "data")
+        if not task_data:
+            return None
+        try:
+            return json.loads(task_data)
+        except json.JSONDecodeError:
+            logger.error(f"Task {task_id} payload is not valid JSON")
+            return None
+
+    async def _resolve_task_card_number(self, task_id: str, task: dict) -> str:
+        """Resolve card_number from a task payload, fetching it if missing."""
+        payload = task.get("payload") or {}
+        card_number = payload.get("card_number")
+        if card_number:
+            return str(card_number)
+
+        card_id = payload.get("card_id")
+        workspace_slug = payload.get("workspace_slug")
+        if card_id and workspace_slug:
+            card_number = await self._fetch_card_number(workspace_slug, card_id)
+            if card_number:
+                payload["card_number"] = card_number
+                task["payload"] = payload
+                try:
+                    await self.redis.hset(f"task:{task_id}", mapping={
+                        "data": json.dumps(task)
+                    })
+                except Exception as e:
+                    logger.warning(f"Failed to persist card_number for task {task_id}: {e}")
+                return card_number
+
+        return CARD_NUMBER_UNKNOWN
+
+    async def _fetch_card_number(self, workspace_slug: str, card_id: str) -> Optional[str]:
+        """Fetch card_number from kanban API using the internal network URL."""
+        kanban_api_url = f"http://{workspace_slug}-kanban-api-1:8000"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    f"{kanban_api_url}/cards/{card_id}",
+                    headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")},
+                )
+            if response.status_code == 200:
+                return response.json().get("card_number")
+            logger.warning(
+                f"Failed to fetch card_number for card {card_id}: {response.status_code}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to fetch card_number for card {card_id}: {e}")
+        return None
 
     async def start_active_workspaces(self):
         """Start containers for all active workspaces from database on orchestrator startup"""
@@ -763,6 +853,7 @@ class Orchestrator:
                 "board_id": board_id,
                 "labels": labels,
                 "github_repo_url": workspace.get("github_repo_url"),
+                "workspace_default_llm_provider": workspace.get("default_llm_provider"),
             },
             "user_id": "system",
             "priority": "high",
@@ -793,15 +884,15 @@ class Orchestrator:
         )
         return new_task_id
 
-    async def process_task(self, task_id: str):
+    async def process_task(self, task_id: str, task: Optional[dict] = None):
         """Process a provisioning task"""
         try:
-            task_data = await self.redis.hget(f"task:{task_id}", "data")
-            if not task_data:
-                logger.error(f"Task {task_id} not found")
-                return
+            if task is None:
+                task = await self._load_task(task_id)
+                if not task:
+                    logger.error(f"Task {task_id} not found")
+                    return
 
-            task = json.loads(task_data)
             task_type = task.get("type")
 
             if task_type == "team.provision":
@@ -1982,19 +2073,30 @@ This board helps you explore and develop ideas from concept to implementation-re
         github_org = payload.get("github_org", "hckmseduardo")
         template_owner = payload.get("template_owner", "hckmseduardo")
         template_repo = payload.get("template_repo", "basic-app")
-        new_repo_name = f"{workspace_slug}-app"
+        base_repo_name = f"{workspace_slug}-app"
 
-        logger.info(f"[{workspace_slug}] Creating GitHub repo: {github_org}/{new_repo_name} from {template_owner}/{template_repo}")
+        logger.info(f"[{workspace_slug}] Creating GitHub repo: {github_org}/{base_repo_name} from {template_owner}/{template_repo}")
 
         try:
-            # First check if repo already exists (for retry scenarios)
-            existing_repo = await github_service.get_repository(github_org, new_repo_name)
-            if existing_repo:
-                logger.info(f"[{workspace_slug}] Repository already exists, using existing: {existing_repo.get('html_url')}")
-                self._current_payload["github_repo_url"] = existing_repo.get("html_url")
-                self._current_payload["github_repo_name"] = new_repo_name
-                self._current_payload["github_clone_url"] = existing_repo.get("clone_url")
-                return  # Skip creation, repo already exists
+            # Find an available repository name (append -2, -3, etc. if exists)
+            new_repo_name = base_repo_name
+            suffix = 1
+            max_attempts = 20
+
+            while suffix <= max_attempts:
+                existing_repo = await github_service.get_repository(github_org, new_repo_name)
+                if not existing_repo:
+                    break  # Name is available
+
+                suffix += 1
+                new_repo_name = f"{base_repo_name}-{suffix}"
+                logger.info(f"[{workspace_slug}] Repository name taken, trying: {new_repo_name}")
+
+            if suffix > max_attempts:
+                raise RuntimeError(f"Could not find available repository name after {max_attempts} attempts")
+
+            if new_repo_name != base_repo_name:
+                logger.info(f"[{workspace_slug}] Using available repository name: {new_repo_name}")
 
             repo_data = await github_service.create_repo_from_template(
                 template_owner=template_owner,
@@ -3357,6 +3459,22 @@ Generate the configuration files now."""
         """Delete GitHub repository for the workspace app"""
         github_org = self._current_payload.get("github_org")
         github_repo_name = self._current_payload.get("github_repo_name")
+        github_repo_url = self._current_payload.get("github_repo_url")
+
+        # Try to extract org from repo URL if not provided
+        if not github_org and github_repo_url:
+            import re
+            match = re.match(r"https://github\.com/([\w-]+)/([\w.-]+)", github_repo_url)
+            if match:
+                github_org = match.group(1)
+                if not github_repo_name:
+                    github_repo_name = match.group(2).replace(".git", "")
+                logger.info(f"[{workspace_slug}] Extracted GitHub org from URL: {github_org}")
+
+        # Fall back to default org if we have repo name but no org
+        if not github_org and github_repo_name:
+            github_org = "hckmseduardo"
+            logger.info(f"[{workspace_slug}] Using default GitHub org: {github_org}")
 
         if not github_org or not github_repo_name:
             logger.warning(f"[{workspace_slug}] No GitHub repo info, skipping deletion")
@@ -3633,8 +3751,8 @@ Generate the configuration files now."""
         git_branch = f"sandbox/{full_slug}"
 
         github_repo_url = f"https://github.com/{github_org}/{github_repo}.git"
-        # Use workspace-specific PAT if available, otherwise fall back to default
-        github_token = self._current_payload.get("github_pat") or os.environ.get("GITHUB_TOKEN")
+        # Use workspace-specific PAT if available, otherwise fall back to KeyVault/env
+        github_token = self._current_payload.get("github_pat") or keyvault_service.get_github_token()
 
         # Build authenticated clone URL
         clone_url = github_repo_url
@@ -4545,13 +4663,13 @@ Generate the docker-compose.yml file now."""
         task_id = task["task_id"]
         payload = task["payload"]
         card_id = payload["card_id"]
-        card_number = payload.get("card_number", "")
         card_title = payload["card_title"]
         card_description = payload["card_description"]
         column_name = payload["column_name"]
         agent_config = payload.get("agent_config", {})
         agent_name = agent_config.get("agent_name", "developer")
-        llm_provider = self._resolve_llm_provider(agent_config)
+        workspace_default_llm = payload.get("workspace_default_llm_provider")
+        llm_provider = self._resolve_llm_provider(agent_config, workspace_default_llm)
         payload["llm_provider"] = llm_provider
         sandbox_id = payload["sandbox_id"]
         workspace_slug = payload["workspace_slug"]
@@ -4560,8 +4678,8 @@ Generate the docker-compose.yml file now."""
         kanban_api_url = payload["kanban_api_url"]
         target_project_path = payload["target_project_path"]
 
-        # Build log prefix with card_number for easier debugging
-        log_prefix = f"[{card_number}]" if card_number else f"[{card_id[:8]}]"
+        # Build log prefix with card_id to keep per-task context compact
+        log_prefix = f"[{card_id[:8]}]"
 
         logger.info(
             f"{log_prefix} Processing agent task: agent={agent_name}, "
@@ -4757,8 +4875,8 @@ Generate the docker-compose.yml file now."""
             if not github_repo_url:
                 raise RuntimeError(f"Repository not found and github_repo_url not in payload")
 
-            # Use workspace-specific PAT if available, otherwise fall back to default
-            github_token = payload.get("github_pat") or os.environ.get("GITHUB_TOKEN")
+            # Use workspace-specific PAT if available, otherwise fall back to KeyVault/env
+            github_token = payload.get("github_pat") or keyvault_service.get_github_token()
             clone_url = github_repo_url
             if github_token and "github.com" in github_repo_url:
                 clone_url = github_repo_url.replace("https://github.com", f"https://{github_token}@github.com")
@@ -4965,16 +5083,32 @@ Generate the docker-compose.yml file now."""
 
         logger.info(f"{log_prefix} Sandbox health check passed for {full_slug}")
 
-    def _resolve_llm_provider(self, agent_config: dict) -> str:
-        """Resolve the LLM provider for an agent, defaulting to Claude CLI."""
-        provider = (agent_config or {}).get("llm_provider") or os.getenv("LLM_PROVIDER", "")
-        provider = provider.strip().lower()
+    def _resolve_llm_provider(self, agent_config: dict, workspace_default: str = None) -> str:
+        """Resolve the LLM provider for an agent, defaulting to Claude CLI.
+
+        Resolution order:
+        1. Column-level override (agent_config.llm_provider)
+        2. Workspace default (workspace_default_llm_provider)
+        3. Environment variable (LLM_PROVIDER)
+        4. Default "claude-cli"
+        """
+        # 1. Column-level override takes highest priority
+        provider = (agent_config or {}).get("llm_provider")
+        # 2. Fall back to workspace default
+        if not provider and workspace_default:
+            provider = workspace_default
+        # 3. Fall back to environment variable
+        if not provider:
+            provider = os.getenv("LLM_PROVIDER", "")
+        provider = (provider or "").strip().lower()
         if not provider:
             return "claude-cli"
         if provider in {"claude", "claude-cli", "claude-cli-ssh"}:
             return "claude-cli"
         if provider in {"codex", "codex-cli", "codex-cli-ssh"}:
             return "codex-cli"
+        if provider in {"abacus", "abacus-cli", "abacus-cli-ssh"}:
+            return "abacus-cli"
         logger.warning(f"Unsupported LLM provider '{provider}', falling back to Claude CLI")
         return "claude-cli"
 
@@ -4983,7 +5117,8 @@ Generate the docker-compose.yml file now."""
         payload = ctx["payload"]
         log_prefix = ctx.get("log_prefix", f"[{card_id[:8]}]")
         llm_provider = payload.get("llm_provider") or self._resolve_llm_provider(
-            payload.get("agent_config", {})
+            payload.get("agent_config", {}),
+            payload.get("workspace_default_llm_provider")
         )
         if llm_provider != "claude-cli":
             logger.info(f"{log_prefix} Skipping session resolution for provider {llm_provider}")
@@ -5091,7 +5226,9 @@ Generate the docker-compose.yml file now."""
         column_name = payload["column_name"]
         agent_config = payload.get("agent_config", {})
         agent_name = agent_config.get("agent_name", "developer")
-        llm_provider = payload.get("llm_provider") or self._resolve_llm_provider(agent_config)
+        llm_provider = payload.get("llm_provider") or self._resolve_llm_provider(
+            agent_config, payload.get("workspace_default_llm_provider")
+        )
         llm_model = agent_config.get("llm_model")
         target_project_path = payload["target_project_path"]
         sandbox_slug = payload.get("sandbox_slug", "")
@@ -5120,6 +5257,9 @@ Generate the docker-compose.yml file now."""
                 "password": payload.get("qa_test_password", ""),
             }
 
+        # Get checklist items from payload
+        checklist = payload.get("checklist", [])
+
         prompt = self._build_agent_prompt(
             card_title=card_title,
             card_description=card_description,
@@ -5131,6 +5271,7 @@ Generate the docker-compose.yml file now."""
             sandbox_api_url=sandbox_api_url,
             board_state=board_state,
             qa_credentials=qa_credentials,
+            checklist=checklist,
         )
 
         env = None
@@ -5159,6 +5300,19 @@ Generate the docker-compose.yml file now."""
                 timeout=timeout,
                 model=llm_model,
                 env=codex_env or None,
+            )
+        elif llm_provider == "abacus-cli":
+            abacus_env = dict(env or {})
+            if ABACUS_API_KEY:
+                abacus_env.setdefault("ABACUS_API_KEY", ABACUS_API_KEY)
+            ctx["result"] = await abacus_runner.run(
+                prompt=prompt,
+                working_dir=target_project_path,
+                agent_type=agent_name,
+                tool_profile=tool_profile,
+                timeout=timeout,
+                model=llm_model,
+                env=abacus_env or None,
             )
         else:
             ctx["result"] = await claude_runner.run(
@@ -5318,11 +5472,14 @@ Generate the docker-compose.yml file now."""
             result.success = False
 
     async def _agent_process_qa_results(self, card_id: str, sandbox_id: str, ctx: dict):
-        """Process QA agent results - extract structured issues from output.
+        """Process QA agent results - extract issues and upload screenshots.
 
-        The QA agent now creates and runs tests itself, including its results
-        directly in the output. This step extracts any structured issues
-        (marked with QA_ISSUES_START/END tags) for the card description.
+        The QA agent creates and runs tests itself, saving screenshots to
+        the qa-screenshots/ directory. This step:
+        1. Extracts structured issues (QA_ISSUES_START/END tags) from output
+        2. Collects screenshots from qa-screenshots/ directory
+        3. Uploads screenshots as card attachments
+        4. Cleans up the screenshot directory
         """
         payload = ctx["payload"]
         log_prefix = ctx.get("log_prefix", f"[{card_id[:8]}]")
@@ -5350,6 +5507,69 @@ Generate the docker-compose.yml file now."""
         else:
             ctx["qa_issues_formatted"] = ""
             logger.info(f"{log_prefix} No structured QA issues found in agent output")
+
+        # Collect and upload screenshots from qa-screenshots/ directory
+        target_project_path = payload.get("target_project_path", "")
+        if not target_project_path:
+            logger.warning(f"{log_prefix} No target_project_path, skipping screenshot collection")
+            return
+
+        screenshots_dir = Path(target_project_path) / "qa-screenshots"
+        if not screenshots_dir.exists():
+            logger.info(f"{log_prefix} No qa-screenshots directory found")
+            return
+
+        # Find all PNG/JPEG files
+        screenshot_files = list(screenshots_dir.glob("*.png")) + list(screenshots_dir.glob("*.jpeg")) + list(screenshots_dir.glob("*.jpg"))
+        if not screenshot_files:
+            logger.info(f"{log_prefix} No screenshots found in qa-screenshots/")
+            return
+
+        logger.info(f"{log_prefix} Found {len(screenshot_files)} screenshots to upload")
+
+        workspace_slug = payload["workspace_slug"]
+        kanban_api_url = f"http://{workspace_slug}-kanban-api-1:8000"
+        uploaded_attachments = []
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for screenshot_path in sorted(screenshot_files):
+                try:
+                    # Read the file
+                    with open(screenshot_path, "rb") as f:
+                        image_data = f.read()
+
+                    filename = screenshot_path.name
+
+                    # Upload as multipart form
+                    files = {
+                        "file": (filename, image_data, "image/png")
+                    }
+
+                    response = await client.post(
+                        f"{kanban_api_url}/cards/{card_id}/attachments",
+                        headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")},
+                        files=files
+                    )
+
+                    if response.status_code in [200, 201]:
+                        attachment = response.json()
+                        uploaded_attachments.append(attachment)
+                        logger.debug(f"{log_prefix} Uploaded screenshot: {filename}")
+                    else:
+                        logger.warning(f"{log_prefix} Failed to upload {filename}: {response.status_code}")
+
+                except Exception as e:
+                    logger.error(f"{log_prefix} Error uploading {screenshot_path.name}: {e}")
+
+        # Clean up screenshots directory
+        try:
+            shutil.rmtree(screenshots_dir)
+            logger.debug(f"{log_prefix} Cleaned up qa-screenshots directory")
+        except Exception as e:
+            logger.warning(f"{log_prefix} Failed to clean up qa-screenshots: {e}")
+
+        ctx["qa_attachments"] = uploaded_attachments
+        logger.info(f"{log_prefix} QA results processed: {len(uploaded_attachments)} screenshots uploaded")
 
     async def _agent_update_card(self, card_id: str, sandbox_id: str, ctx: dict):
         """Update the kanban card with agent results."""
@@ -5508,6 +5728,26 @@ Generate the docker-compose.yml file now."""
                     else:
                         logger.warning(f"Failed to update description: {desc_response.status_code}")
 
+                # Parse and update completed checklist items from agent output
+                if result.success and result.output:
+                    completed_ids = self._parse_completed_checklist(result.output)
+                    if completed_ids:
+                        logger.info(f"{log_prefix} Agent completed {len(completed_ids)} checklist items: {completed_ids}")
+                        for item_id in completed_ids:
+                            try:
+                                # Use the toggle endpoint to mark item as completed
+                                toggle_resp = await client.post(
+                                    f"{kanban_api_url}/cards/{card_id}/checklist/{item_id}/toggle",
+                                    headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")},
+                                    json={"completed": True}
+                                )
+                                if toggle_resp.status_code == 200:
+                                    logger.info(f"{log_prefix} Marked checklist item {item_id} as completed")
+                                else:
+                                    logger.warning(f"{log_prefix} Failed to toggle checklist item {item_id}: {toggle_resp.status_code}")
+                            except Exception as e:
+                                logger.warning(f"{log_prefix} Error toggling checklist item {item_id}: {e}")
+
                 # Special handling for project_manager agent: create epics and cards
                 if agent_name == "project_manager" and result.success:
                     await self._handle_project_manager_output(card_id, sandbox_id, ctx)
@@ -5560,6 +5800,18 @@ Generate the docker-compose.yml file now."""
                                     )
                                     if move_resp.status_code == 200:
                                         logger.info(f"Moved card to column: {column_success}")
+
+                                        # Archive the card if moved to Done column
+                                        if column_success.lower() == "done":
+                                            archive_resp = await client.patch(
+                                                f"{kanban_api_url}/cards/{card_id}",
+                                                headers={"X-Service-Secret": os.environ.get("CROSS_DOMAIN_SECRET", "")},
+                                                json={"archived": True}
+                                            )
+                                            if archive_resp.status_code == 200:
+                                                logger.info(f"{log_prefix} Archived card after moving to Done")
+                                            else:
+                                                logger.warning(f"{log_prefix} Failed to archive card: {archive_resp.status_code}")
                                     break
 
                 # If failed and column_failure is set, move the card there
@@ -5664,6 +5916,7 @@ Generate the docker-compose.yml file now."""
         sandbox_api_url: str = "",
         board_state: str = None,
         qa_credentials: dict = None,
+        checklist: list = None,
     ) -> str:
         """Build the prompt for the agent CLI using persona from kanban-team.
 
@@ -5678,6 +5931,7 @@ Generate the docker-compose.yml file now."""
             sandbox_api_url: Public sandbox API base URL
             board_state: Current kanban board state (for scrum_master)
             qa_credentials: Test credentials for QA agent (email, password)
+            checklist: List of checklist items (acceptance criteria)
         """
         # Use persona from config, or a generic fallback
         if not persona:
@@ -5713,13 +5967,27 @@ Use these credentials to test the sandbox application:
 - Password: {qa_credentials.get("password", "")}
 """
 
+        # Add checklist/acceptance criteria section
+        checklist_section = ""
+        if checklist:
+            checklist_items = []
+            for item in checklist:
+                status = "[x]" if item.get("completed") else "[ ]"
+                checklist_items.append(f"  {status} {item.get('text', '')} (id: {item.get('id', '')})")
+            checklist_text = "\n".join(checklist_items)
+            checklist_section = f"""
+## Acceptance Criteria / Checklist:
+The following acceptance criteria must be verified after completing your work:
+{checklist_text}
+"""
+
         prompt = f"""# Task: {card_title}
 
 ## Column: {column_name}
 
 ## Description:
 {card_description}
-{context_section}{board_state_section}{qa_credentials_section}
+{context_section}{board_state_section}{qa_credentials_section}{checklist_section}
 ## Agent Instructions:
 {persona}
 
@@ -5734,6 +6002,15 @@ You MUST track your progress in `docs/Backlog.json`:
 2. Update task status as you progress (todo → in_progress → done)
 3. Add new tasks discovered during work to the backlog
 4. Save changes to `docs/Backlog.json` after completing tasks
+
+## Checklist Verification:
+After completing your work, verify which acceptance criteria are now satisfied.
+Include a section at the end of your response with completed items:
+```
+COMPLETED_CHECKLIST:
+- <item_id_1>
+- <item_id_2>
+```
 
 Please complete this task. Update files as needed and explain what you did."""
 
@@ -6097,32 +6374,74 @@ Be concise but thorough. Base your analysis on what you found in the codebase.""
                     logger.error(f"[{card_id}] No columns in Feature Request board")
                     return
 
-                # 2. Create epics on Ideas Pipeline board (where the idea card is)
-                for epic_data in project_plan["epics"]:
-                    epic_resp = await client.post(
-                        f"{kanban_api_url}/epics",
-                        headers=headers,
-                        json={
-                            "board_id": board_id,
-                            "name": epic_data["name"],
-                            "description": epic_data.get("description", ""),
-                            "color": epic_data.get("color", "#6366f1"),
-                            "status": "open",
-                        }
-                    )
-                    if epic_resp.status_code in [200, 201]:
-                        epic = epic_resp.json()
-                        created_epics[epic_data["name"]] = epic["id"]
-                        logger.info(f"[{card_id}] Created epic: {epic['name']} ({epic['id']})")
-                    else:
-                        logger.warning(f"[{card_id}] Failed to create epic: {epic_resp.status_code}")
+                # 2. Fetch existing epics on Feature Request board to avoid duplicates
+                feature_board_id = feature_board['id']
+                existing_epics = {}  # epic_name (lowercase) -> epic_id
+                epics_resp = await client.get(
+                    f"{kanban_api_url}/epics",
+                    headers=headers,
+                    params={"board_id": feature_board_id}
+                )
+                if epics_resp.status_code == 200:
+                    for epic in epics_resp.json():
+                        existing_epics[epic["name"].lower()] = epic["id"]
+                    logger.info(f"[{card_id}] Found {len(existing_epics)} existing epics on Feature Request board")
 
-                # 3. Create cards on Feature Request board
+                # Create or reuse epics on Feature Request board
+                for epic_data in project_plan["epics"]:
+                    epic_name = epic_data["name"]
+                    epic_name_lower = epic_name.lower()
+
+                    # Check if epic already exists (case-insensitive)
+                    if epic_name_lower in existing_epics:
+                        created_epics[epic_name] = existing_epics[epic_name_lower]
+                        logger.info(f"[{card_id}] Reusing existing epic: {epic_name} ({existing_epics[epic_name_lower]})")
+                    else:
+                        # Create new epic
+                        epic_resp = await client.post(
+                            f"{kanban_api_url}/epics",
+                            headers=headers,
+                            json={
+                                "board_id": feature_board_id,
+                                "name": epic_name,
+                                "description": epic_data.get("description", ""),
+                                "color": epic_data.get("color", "#6366f1"),
+                                "status": "open",
+                            }
+                        )
+                        if epic_resp.status_code in [200, 201]:
+                            epic = epic_resp.json()
+                            created_epics[epic_name] = epic["id"]
+                            logger.info(f"[{card_id}] Created epic: {epic['name']} ({epic['id']}) on Feature Request board")
+                        else:
+                            logger.warning(f"[{card_id}] Failed to create epic: {epic_resp.status_code} - {epic_resp.text}")
+
+                # 3. Fetch existing active (non-archived) cards on Feature Request board to avoid duplicates
+                existing_cards = {}  # card_title (lowercase) -> card_id
+                for col in columns:
+                    for existing_card in col.get("cards", []):
+                        if not existing_card.get("archived", False):
+                            existing_cards[existing_card["title"].lower()] = existing_card["id"]
+                logger.info(f"[{card_id}] Found {len(existing_cards)} existing active cards on Feature Request board")
+
+                # Create cards on Feature Request board (skip existing ones)
                 created_cards = {}  # title -> card_id mapping
+                cards_reused = 0
                 for epic_data in project_plan["epics"]:
                     epic_id = created_epics.get(epic_data["name"])
 
                     for i, card_data in enumerate(epic_data.get("cards", [])):
+                        card_title = card_data["title"]
+                        card_title_lower = card_title.lower()
+
+                        # Check if card with same title already exists (case-insensitive)
+                        if card_title_lower in existing_cards:
+                            existing_card_id = existing_cards[card_title_lower]
+                            created_cards[card_title] = existing_card_id
+                            cards_reused += 1
+                            logger.info(f"[{card_id}] Reusing existing card: {card_title} ({existing_card_id})")
+                            continue
+
                         # Build card description with metadata
                         description = card_data.get("description", "")
                         description += f"\n\n---\n**Priority:** {card_data.get('priority', 'P2')}"
@@ -6136,7 +6455,7 @@ Be concise but thorough. Base your analysis on what you found in the codebase.""
                             headers=headers,
                             json={
                                 "column_id": first_column_id,
-                                "title": card_data["title"],
+                                "title": card_title,
                                 "description": description,
                                 "position": i,
                                 "labels": card_data.get("labels", []),
@@ -6148,8 +6467,8 @@ Be concise but thorough. Base your analysis on what you found in the codebase.""
                         if card_resp.status_code in [200, 201]:
                             total_cards_created += 1
                             created_card = card_resp.json()
-                            created_cards[card_data["title"]] = created_card["id"]
-                            logger.info(f"[{card_id}] Created card: {card_data['title']} ({created_card['id']})")
+                            created_cards[card_title] = created_card["id"]
+                            logger.info(f"[{card_id}] Created card: {card_title} ({created_card['id']})")
                         else:
                             logger.warning(f"[{card_id}] Failed to create card: {card_resp.status_code}")
 
@@ -6169,7 +6488,10 @@ Be concise but thorough. Base your analysis on what you found in the codebase.""
                     for risk in project_plan["risks"]:
                         summary += f"- {risk}\n"
 
-                summary += f"\n**Total Cards Created:** {total_cards_created} on Feature Request board\n"
+                if cards_reused > 0:
+                    summary += f"\n**Cards Created:** {total_cards_created} new, {cards_reused} reused (existing)\n"
+                else:
+                    summary += f"\n**Total Cards Created:** {total_cards_created} on Feature Request board\n"
 
                 card_resp = await client.get(f"{kanban_api_url}/cards/{card_id}", headers=headers)
                 if card_resp.status_code == 200:
@@ -6181,16 +6503,20 @@ Be concise but thorough. Base your analysis on what you found in the codebase.""
                     )
 
                 # 5. Add completion comment
+                if cards_reused > 0:
+                    comment_text = f"Project plan processed: {len(created_epics)} epics, {total_cards_created} new cards created, {cards_reused} existing cards reused."
+                else:
+                    comment_text = f"Project plan created: {len(created_epics)} epics with {total_cards_created} cards on Feature Request board."
                 await client.post(
                     f"{kanban_api_url}/cards/{card_id}/comments",
                     headers=headers,
                     json={
-                        "text": f"Project plan created: {len(created_epics)} epics with {total_cards_created} cards on Feature Request board.",
+                        "text": comment_text,
                         "author_name": "Agent: Project Manager"
                     }
                 )
 
-                logger.info(f"[{card_id}] Project plan processing complete: {len(created_epics)} epics, {total_cards_created} cards")
+                logger.info(f"[{card_id}] Project plan processing complete: {len(created_epics)} epics, {total_cards_created} new cards, {cards_reused} reused")
 
                 # 6. Move first card to UI/UX Design column
                 first_card_title = project_plan.get("first_card")
@@ -6456,6 +6782,48 @@ Be concise but thorough. Base your analysis on what you found in the codebase.""
             pass
 
         return None
+
+    def _parse_completed_checklist(self, output: str) -> list:
+        """Parse the agent output to extract completed checklist item IDs.
+
+        Looks for a COMPLETED_CHECKLIST section in the output with item IDs.
+        Format expected:
+        ```
+        COMPLETED_CHECKLIST:
+        - <item_id_1>
+        - <item_id_2>
+        ```
+
+        Returns:
+            List of completed item IDs
+        """
+        import re
+
+        if not output:
+            return []
+
+        completed_ids = []
+
+        # Look for COMPLETED_CHECKLIST section
+        checklist_match = re.search(
+            r'COMPLETED_CHECKLIST:\s*\n((?:\s*[-*]\s*[^\n]+\n?)+)',
+            output,
+            re.IGNORECASE
+        )
+
+        if checklist_match:
+            checklist_section = checklist_match.group(1)
+            # Extract item IDs from each line
+            for line in checklist_section.strip().split('\n'):
+                line = line.strip()
+                if line.startswith('-') or line.startswith('*'):
+                    item_id = line.lstrip('-*').strip()
+                    # Clean up any markdown or extra characters
+                    item_id = item_id.strip('`').strip()
+                    if item_id:
+                        completed_ids.append(item_id)
+
+        return completed_ids
 
     def _parse_enhance_output(self, output: str) -> dict:
         """Parse the Claude Code output to extract enhancement data."""

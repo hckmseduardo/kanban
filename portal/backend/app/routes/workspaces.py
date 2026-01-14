@@ -257,6 +257,7 @@ def _workspace_to_response(workspace: dict, user_id: str = None) -> WorkspaceRes
         status=workspace["status"],
         created_at=workspace["created_at"],
         provisioned_at=workspace.get("provisioned_at"),
+        default_llm_provider=workspace.get("default_llm_provider"),
     )
 
 
@@ -468,6 +469,15 @@ async def update_workspace(
         updates["name"] = request.name
     if request.description is not None:
         updates["description"] = request.description
+    if request.default_llm_provider is not None:
+        # Validate LLM provider
+        valid_providers = ["claude-cli", "codex-cli", "abacus-cli", ""]
+        if request.default_llm_provider not in valid_providers:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid LLM provider. Must be one of: {', '.join(valid_providers)}"
+            )
+        updates["default_llm_provider"] = request.default_llm_provider or None
 
     if not updates:
         raise HTTPException(status_code=400, detail="No updates provided")
@@ -519,6 +529,7 @@ async def delete_workspace(
         sandboxes=sandbox_list,
         github_org=workspace.get("github_org"),
         github_repo_name=workspace.get("github_repo_name"),
+        github_repo_url=workspace.get("github_repo_url"),
         delete_github_repo=request.delete_github_repo,
     )
 
@@ -855,6 +866,7 @@ async def unlink_app_from_workspace(
         azure_object_id=workspace.get("azure_object_id"),
         github_org=workspace.get("github_org"),
         github_repo_name=workspace.get("github_repo_name"),
+        github_repo_url=workspace.get("github_repo_url"),
         delete_github_repo=request.delete_github_repo,
     )
 
