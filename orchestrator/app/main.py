@@ -5991,14 +5991,6 @@ The following acceptance criteria must be verified after completing your work:
 ## Agent Instructions:
 {persona}
 
-## Project Understanding:
-IMPORTANT: Before starting any work, you MUST read the project's README.md file (if it exists) to understand:
-- Project overview and purpose
-- Architecture and technology stack
-- Setup and configuration requirements
-- Coding conventions and best practices
-- Any specific guidelines for contributors
-
 ## Commit Instructions:
 - Do NOT run git commit/push commands.
 - If you modified files, include a single line at the end of your response:
@@ -6019,6 +6011,15 @@ COMPLETED_CHECKLIST:
 - <item_id_1>
 - <item_id_2>
 ```
+
+## README Review:
+IMPORTANT: After completing your changes, you MUST review the project's README.md file and update it if your changes affect:
+- Installation or setup instructions
+- Configuration options or environment variables
+- API endpoints or usage examples
+- Architecture or component descriptions
+- Dependencies or requirements
+- Any other documented functionality
 
 Please complete this task. Update files as needed and explain what you did."""
 
