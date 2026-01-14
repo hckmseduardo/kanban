@@ -4704,6 +4704,7 @@ Generate the docker-compose.yml file now."""
             ("Processing results", self._agent_process_results),
             ("Processing QA results", self._agent_process_qa_results),
             ("Updating card", self._agent_update_card),
+            ("Handling deployment", self._agent_handle_deployment),
         ]
 
         # Update card's agent_status to "processing"
@@ -5855,6 +5856,71 @@ Generate the docker-compose.yml file now."""
 
         except Exception as e:
             logger.error(f"Error updating card via API: {e}")
+
+    async def _agent_handle_deployment(self, card_id: str, sandbox_id: str, ctx: dict):
+        """Handle deployment-related actions after agent completes.
+
+        For release agents or when REQUEST_RESTART is in output:
+        - Trigger sandbox container restart after successful push
+        """
+        payload = ctx["payload"]
+        result = ctx.get("result")
+        log_prefix = ctx.get("log_prefix", f"[{card_id[:8]}]")
+        agent_name = payload.get("agent_config", {}).get("agent_name", "")
+
+        if not result:
+            return
+
+        # Check if this is a release agent or if REQUEST_RESTART was requested
+        request_restart = False
+        if result.output and "REQUEST_RESTART:" in result.output:
+            import re
+            restart_match = re.search(r'REQUEST_RESTART:\s*(true|yes|1)', result.output, re.IGNORECASE)
+            if restart_match:
+                request_restart = True
+                logger.info(f"{log_prefix} REQUEST_RESTART found in agent output")
+
+        # Auto-restart for release agent after successful push
+        is_release_agent = agent_name == "release"
+        has_push = result.push_success
+
+        should_restart = request_restart or (is_release_agent and has_push)
+
+        if not should_restart:
+            return
+
+        # Get sandbox info
+        sandbox_full_slug = payload.get("sandbox_slug", "")
+        workspace_slug = payload.get("workspace_slug", "")
+
+        if not sandbox_full_slug:
+            logger.warning(f"{log_prefix} No sandbox_slug in payload, skipping restart")
+            return
+
+        logger.info(f"{log_prefix} Triggering sandbox restart for {sandbox_full_slug}")
+
+        try:
+            # Create restart task
+            restart_task_id = f"restart-{sandbox_full_slug}-{int(time.time())}"
+            restart_task = {
+                "task_id": restart_task_id,
+                "type": "sandbox.restart",
+                "payload": {
+                    "sandbox_id": sandbox_id,
+                    "full_slug": sandbox_full_slug,
+                    "workspace_slug": workspace_slug,
+                    "triggered_by": f"agent:{agent_name}",
+                },
+                "user_id": "system",
+                "priority": "high",
+            }
+
+            # Enqueue restart task
+            await self.redis.lpush("tasks:provisioning", json.dumps(restart_task))
+            logger.info(f"{log_prefix} Queued sandbox restart task: {restart_task_id}")
+
+        except Exception as e:
+            logger.error(f"{log_prefix} Failed to queue sandbox restart: {e}")
 
     async def _fetch_board_state_for_agent(self, workspace_slug: str, board_id: str) -> str:
         """Fetch current board state for agents like scrum_master that need to see all cards.
