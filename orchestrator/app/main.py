@@ -5991,6 +5991,14 @@ The following acceptance criteria must be verified after completing your work:
 ## Agent Instructions:
 {persona}
 
+## Project Understanding:
+IMPORTANT: Before starting any work, you MUST read the project's README.md file (if it exists) to understand:
+- Project overview and purpose
+- Architecture and technology stack
+- Setup and configuration requirements
+- Coding conventions and best practices
+- Any specific guidelines for contributors
+
 ## Commit Instructions:
 - Do NOT run git commit/push commands.
 - If you modified files, include a single line at the end of your response:
