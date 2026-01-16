@@ -19,14 +19,15 @@ always use the orchestrator to manipulate kanban-team and the apps
 
 ### Agent CLI SSH Configuration
 
-The orchestrator runs Claude Code (default) or Codex CLI on the host machine via SSH. Required `.env` variables:
+The orchestrator runs Claude Code (default), Codex CLI, or Abacus CLI on the host machine via SSH. Required `.env` variables:
 
 ```bash
 SSH_USER=myusername                           # Required: host machine username
 SSH_HOST=host.docker.internal                 # Docker's way to reach host
 SSH_CLAUDE_PATH=/usr/local/bin/claude-loggedin  # Path to Claude CLI wrapper
 SSH_CODEX_PATH=/Users/hckmseduardo/.nvm/versions/node/v24.2.0/bin/codex   # Path to Codex CLI wrapper (optional)
-LLM_PROVIDER=claude-cli                        # Or codex-cli to default to Codex
+SSH_ABACUS_PATH=/usr/local/bin/abacus-loggedin  # Path to Abacus CLI wrapper (optional)
+LLM_PROVIDER=claude-cli                        # Or codex-cli/abacus-cli to default to Codex/Abacus
 ```
 
 See [orchestrator.md](docs/architecture/orchestrator.md#claude-code-runner-service) for full setup instructions.

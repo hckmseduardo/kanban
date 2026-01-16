@@ -144,7 +144,7 @@ async def route_task(task: dict):
 
 ### Claude Code Runner Service
 
-Executes Claude Code CLI (default) or Codex CLI (optional) on the host machine via SSH
+Executes Claude Code CLI (default), Codex CLI, or Abacus CLI on the host machine via SSH
 for on-demand AI agent tasks. This allows using local CLI authentication instead of API calls.
 
 #### SSH Configuration
@@ -158,6 +158,7 @@ the selected agent CLI. This requires the following environment variables:
 | `SSH_HOST` | Host to SSH into | `host.docker.internal` |
 | `SSH_CLAUDE_PATH` | Path to Claude CLI on host | `~/.local/bin/claude` |
 | `SSH_CODEX_PATH` | Path to Codex CLI on host | `~/.local/bin/codex` |
+| `SSH_ABACUS_PATH` | Path to Abacus CLI on host | `~/.local/bin/abacus` |
 
 **Example `.env` configuration:**
 ```bash
@@ -166,7 +167,8 @@ SSH_USER=myusername
 SSH_HOST=host.docker.internal
 SSH_CLAUDE_PATH=/usr/local/bin/claude-loggedin
 SSH_CODEX_PATH=/usr/local/bin/codex-loggedin
-LLM_PROVIDER=claude-cli  # Or codex-cli to default to Codex
+SSH_ABACUS_PATH=/usr/local/bin/abacus-loggedin
+LLM_PROVIDER=claude-cli  # Or codex-cli/abacus-cli to default to Codex/Abacus
 ```
 
 #### Authentication Wrapper
@@ -189,6 +191,11 @@ Make the wrapper executable and set `SSH_CLAUDE_PATH` to point to it.
 Codex CLI uses ChatGPT login or `OPENAI_API_KEY` on the host. If you need a wrapper
 script, follow the same pattern and set `SSH_CODEX_PATH` to the wrapper path.
 
+Abacus CLI uses `ABACUS_API_KEY` on the host. If you need a wrapper script, follow the
+same pattern and set `SSH_ABACUS_PATH` to the wrapper path.
+The Abacus runner defaults to `abacus exec` and `--model`; override with
+`ABACUS_CLI_ARGS` or `ABACUS_MODEL_FLAG` if your CLI syntax differs.
+
 #### Prerequisites
 
 1. **SSH access from Docker to host**: The orchestrator mounts `~/.ssh:/root/.ssh:ro`
@@ -204,6 +211,10 @@ script, follow the same pattern and set `SSH_CODEX_PATH` to the wrapper path.
 4. **Codex CLI installed on host (optional)**: `npm install -g @openai/codex`
 
 5. **Codex CLI authenticated (optional)**: Sign in via `codex` or set `OPENAI_API_KEY`
+
+6. **Abacus CLI installed on host (optional)**: Install Abacus CLI on the host machine
+
+7. **Abacus CLI authenticated (optional)**: Set `ABACUS_API_KEY` on the host
 
 #### API
 
@@ -593,8 +604,12 @@ SSH_USER=myusername              # Required: username on host machine
 SSH_HOST=host.docker.internal    # Docker's way to reach host
 SSH_CLAUDE_PATH=/usr/local/bin/claude-loggedin  # Path to Claude CLI (or wrapper)
 SSH_CODEX_PATH=/Users/hckmseduardo/.nvm/versions/node/v24.2.0/bin/codex    # Path to Codex CLI (optional)
-LLM_PROVIDER=claude-cli                          # Or codex-cli for default Codex
+SSH_ABACUS_PATH=/usr/local/bin/abacus-loggedin   # Path to Abacus CLI (optional)
+LLM_PROVIDER=claude-cli                          # Or codex-cli/abacus-cli for default Codex/Abacus
 OPENAI_API_KEY=<from-keyvault>                   # Optional for Codex CLI auth
+ABACUS_API_KEY=<from-keyvault>                   # Optional for Abacus CLI auth
+ABACUS_CLI_ARGS=exec                             # Optional: override Abacus CLI subcommand/args
+ABACUS_MODEL_FLAG=--model                        # Optional: override Abacus CLI model flag
 ```
 
 ## Error Handling

@@ -442,13 +442,14 @@ async def create_sandbox_pull_request(
     workspace, membership = get_workspace_with_role(workspace_slug, auth.user["id"])
 
     # Ensure workspace has an app + repo
-    if not workspace.get("app_template_id"):
+    if not workspace.get("app_template_id") and not workspace.get("github_repo_url"):
         raise HTTPException(status_code=400, detail="Workspace does not have an app")
 
     github_org = workspace.get("github_org")
     github_repo_name = workspace.get("github_repo_name")
     if not github_org or not github_repo_name:
         raise HTTPException(status_code=400, detail="Workspace GitHub repository not configured")
+    github_pat = workspace.get("github_pat")
 
     # Get sandbox
     sandbox = db_service.get_sandbox_by_workspace_and_slug(workspace["id"], sandbox_slug)
@@ -481,6 +482,7 @@ async def create_sandbox_pull_request(
         user_id=auth.user["id"],
         github_org=github_org,
         github_repo_name=github_repo_name,
+        github_pat=github_pat,
     )
 
     logger.info(f"Sandbox PR started: {sandbox['full_slug']} by {auth.user['id']}")

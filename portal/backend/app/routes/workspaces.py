@@ -550,6 +550,11 @@ class WorkspaceRestartRequest(BaseModel):
     restart_app: bool = True  # If true, also restart app containers
 
 
+class WorkspaceAppRestartRequest(BaseModel):
+    """Request to restart workspace app containers only"""
+    rebuild: bool = False  # If true, rebuild app images from scratch
+
+
 @router.post("/{slug}/restart")
 async def restart_workspace(
     slug: str,
@@ -601,6 +606,60 @@ async def restart_workspace(
         "task_id": task_id,
         "rebuild": request.rebuild,
         "restart_app": request.restart_app
+    }
+
+
+@router.post("/{slug}/restart-app")
+async def restart_workspace_app(
+    slug: str,
+    request: WorkspaceAppRestartRequest = WorkspaceAppRestartRequest(),
+    auth: AuthContext = Depends(require_scope("workspaces:write"))
+):
+    """
+    Restart/rebuild workspace app containers only.
+
+    This starts an async restart process that will:
+    1. Restart app containers (or rebuild if requested)
+    2. Validate the app domain
+
+    Access: Owner or admin only
+
+    Authentication: JWT or Portal API token
+    Required scope: workspaces:write
+    """
+    workspace, membership = get_workspace_with_access(
+        slug, auth.user["id"], require_role="admin"
+    )
+
+    # Check workspace is active
+    if workspace.get("status") not in ["active", None]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot restart app with workspace status '{workspace.get('status')}'"
+        )
+
+    if not (workspace.get("app_template_id") or workspace.get("github_repo_url")):
+        raise HTTPException(
+            status_code=400,
+            detail="Workspace does not have an app linked"
+        )
+
+    task_id = await task_service.create_workspace_app_restart_task(
+        workspace_id=workspace["id"],
+        workspace_slug=workspace["slug"],
+        user_id=auth.user["id"],
+        rebuild=request.rebuild,
+    )
+
+    logger.info(
+        f"Workspace app restart started: {slug} by {auth.user['id']} "
+        f"(rebuild={request.rebuild})"
+    )
+
+    return {
+        "message": "Workspace app restart started",
+        "task_id": task_id,
+        "rebuild": request.rebuild,
     }
 
 

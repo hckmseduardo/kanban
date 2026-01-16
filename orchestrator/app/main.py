@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -910,6 +911,8 @@ class Orchestrator:
                 await self.delete_workspace(task)
             elif task_type == "workspace.restart":
                 await self.restart_workspace(task)
+            elif task_type == "workspace.restart_app":
+                await self.restart_workspace_app(task)
             elif task_type == "workspace.start":
                 await self.start_workspace(task)
             elif task_type == "workspace.link_app":
@@ -1662,18 +1665,23 @@ class Orchestrator:
         app_running = None
         if has_app:
             # App containers are named {slug}-api, {slug}-web, etc.
-            app_running = self._is_container_running(f"{workspace_slug}-api")
+            # Some apps are frontend-only (only web), so check both api and web
+            api_running = self._is_container_running(f"{workspace_slug}-api")
+            web_running = self._is_container_running(f"{workspace_slug}-web")
+            app_running = api_running or web_running
 
         # Check sandbox containers
         sandboxes = []
         sandbox_slugs = self._get_workspace_sandboxes(workspace_slug)
         for full_slug in sandbox_slugs:
-            # Sandbox containers are named {full_slug}-api, not {full_slug}-app
-            sandbox_running = self._is_container_running(f"{full_slug}-api")
+            # Sandbox containers are named {full_slug}-api or {full_slug}-web
+            # Check both in case sandbox is frontend-only
+            sandbox_api = self._is_container_running(f"{full_slug}-api")
+            sandbox_web = self._is_container_running(f"{full_slug}-web")
             sandboxes.append({
                 "slug": full_slug.replace(f"{workspace_slug}-", ""),
                 "full_slug": full_slug,
-                "running": sandbox_running
+                "running": sandbox_api or sandbox_web
             })
 
         # Determine if all healthy
@@ -2387,26 +2395,44 @@ This board helps you explore and develop ideas from concept to implementation-re
             "source_branch": "main"
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{portal_api_url}/workspaces/{workspace_slug}/sandboxes",
-                    json=sandbox_request,
-                    headers=headers
-                )
-
-                if response.status_code < 400:
-                    sandbox_data = response.json()
-                    logger.info(f"[{workspace_slug}] Created foundation sandbox via portal API: {sandbox_data.get('id')}")
-                else:
-                    logger.warning(
-                        f"[{workspace_slug}] Failed to create foundation sandbox: "
-                        f"{response.status_code} - {response.text}"
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(
+                        f"{portal_api_url}/workspaces/{workspace_slug}/sandboxes",
+                        json=sandbox_request,
+                        headers=headers
                     )
 
-        except Exception as e:
-            logger.warning(f"[{workspace_slug}] Failed to create foundation sandbox (non-fatal): {e}")
-            # Don't fail workspace provisioning if sandbox creation fails
+                    if response.status_code < 400:
+                        sandbox_data = response.json()
+                        logger.info(
+                            f"[{workspace_slug}] Created foundation sandbox via portal API: "
+                            f"{sandbox_data.get('id')}"
+                        )
+                        return
+
+                    response_text = response.text
+                    logger.warning(
+                        f"[{workspace_slug}] Failed to create foundation sandbox: "
+                        f"{response.status_code} - {response_text}"
+                    )
+
+                    if response.status_code == 400 and "linking_app" in response_text and attempt < max_attempts:
+                        wait_seconds = 2 * attempt
+                        logger.info(
+                            f"[{workspace_slug}] Workspace still linking_app; "
+                            f"retrying sandbox creation in {wait_seconds}s..."
+                        )
+                        await asyncio.sleep(wait_seconds)
+                        continue
+
+                    return
+
+            except Exception as e:
+                logger.warning(f"[{workspace_slug}] Failed to create foundation sandbox (non-fatal): {e}")
+                return
 
     async def _workspace_health_check(self, workspace_slug: str, workspace_id: str):
         """Health check for workspace components"""
@@ -2531,6 +2557,52 @@ This board helps you explore and develop ideas from concept to implementation-re
             await self.fail_task(task_id, str(e))
             raise
 
+    async def restart_workspace_app(self, task: dict):
+        """Restart/rebuild workspace app containers only."""
+        task_id = task["task_id"]
+        payload = task["payload"]
+        workspace_id = payload["workspace_id"]
+        workspace_slug = payload["workspace_slug"]
+        rebuild = payload.get("rebuild", False)
+
+        logger.info(f"Restarting app: {workspace_slug} (rebuild={rebuild})")
+
+        # Store payload for step functions
+        self._current_payload = payload
+
+        steps = []
+        if rebuild:
+            steps.extend([
+                ("Stopping app containers", self._workspace_restart_stop_app),
+                ("Rebuilding app containers", self._workspace_restart_rebuild_app_with_llm),
+            ])
+        else:
+            steps.extend([
+                ("Restarting app containers", self._workspace_restart_app),
+            ])
+
+        steps.append(("Validating app domain", self._workspace_validate_app_domain))
+
+        try:
+            for i, (step_name, step_func) in enumerate(steps, 1):
+                await self.update_progress(task_id, i, len(steps), step_name)
+                await step_func(workspace_slug, workspace_id)
+                logger.info(f"[{workspace_slug}] {step_name} - completed")
+
+            await self.complete_task(task_id, {
+                "action": "restart_app",
+                "workspace_slug": workspace_slug,
+                "rebuild": rebuild,
+                "url": f"https://{workspace_slug}.app.{DOMAIN.replace('kanban.', '')}",
+            })
+
+            logger.info(f"App {workspace_slug} restarted successfully")
+
+        except Exception as e:
+            logger.error(f"App restart failed: {e}")
+            await self.fail_task(task_id, str(e))
+            raise
+
     async def start_workspace(self, task: dict):
         """Start/rebuild workspace components (kanban, and optionally app/sandboxes)"""
         task_id = task["task_id"]
@@ -2652,28 +2724,27 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         logger.info(f"[{workspace_slug}] Kanban containers rebuilt and started")
 
-    async def _workspace_start_rebuild_app(self, workspace_slug: str, workspace_id: str):
+    async def _workspace_start_rebuild_app(self, workspace_slug: str, workspace_id: str) -> bool:
         """Rebuild and start app containers (handles both new and legacy template structures)"""
         if not self.docker_available:
             raise RuntimeError("Docker CLI not available")
 
-        # Check for new structure first, then legacy
-        compose_file = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml"
         legacy_compose_file = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/app/docker-compose.yml"
-        is_legacy = False
+        compose_file = self._get_workspace_app_compose_path(workspace_slug)
+        is_legacy = Path(legacy_compose_file).exists()
 
         if not Path(compose_file).exists():
-            if Path(legacy_compose_file).exists():
-                compose_file = legacy_compose_file
-                is_legacy = True
-            else:
-                logger.warning(f"[{workspace_slug}] No app compose file found, skipping")
-                return
+            logger.warning(f"[{workspace_slug}] No app compose file found, skipping")
+            return False
 
         project_name = f"{workspace_slug}-app"
+        env_file = self._get_workspace_app_env_path(workspace_slug)
+        compose_cmd = ["docker", "compose"]
+        if env_file:
+            compose_cmd.extend(["--env-file", env_file])
 
         result = subprocess.run(
-            ["docker", "compose", "-f", compose_file, "-p", project_name, "up", "-d", "--build"],
+            compose_cmd + ["-f", compose_file, "-p", project_name, "up", "-d", "--build"],
             capture_output=True,
             text=True,
             check=False
@@ -2681,13 +2752,14 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         if result.returncode != 0:
             logger.warning(f"[{workspace_slug}] App containers failed to start: {result.stderr}")
-            return
+            return False
 
         logger.info(f"[{workspace_slug}] App containers rebuilt and started")
 
         # For legacy apps, connect key containers to kanban-global network for Traefik routing
         if is_legacy:
             await self._connect_legacy_app_to_network(workspace_slug)
+        return True
 
     async def _connect_legacy_app_to_network(self, workspace_slug: str):
         """Connect legacy app containers to kanban-global network for Traefik routing"""
@@ -2844,11 +2916,15 @@ This board helps you explore and develop ideas from concept to implementation-re
         if not self.docker_available:
             return
 
-        compose_file = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml"
+        compose_file = self._get_workspace_app_compose_path(workspace_slug)
         project_name = f"{workspace_slug}-app"
+        env_file = self._get_workspace_app_env_path(workspace_slug)
+        compose_cmd = ["docker", "compose"]
+        if env_file:
+            compose_cmd.extend(["--env-file", env_file])
 
         result = subprocess.run(
-            ["docker", "compose", "-f", compose_file, "-p", project_name, "stop"],
+            compose_cmd + ["-f", compose_file, "-p", project_name, "stop"],
             capture_output=True,
             text=True,
             check=False
@@ -2859,24 +2935,28 @@ This board helps you explore and develop ideas from concept to implementation-re
         else:
             logger.warning(f"[{workspace_slug}] App stop warning: {result.stderr}")
 
-    async def _workspace_restart_rebuild_app(self, workspace_slug: str, workspace_id: str):
+    async def _workspace_restart_rebuild_app(self, workspace_slug: str, workspace_id: str) -> bool:
         """Rebuild and start workspace app containers"""
         if not self.docker_available:
             raise RuntimeError("Docker CLI not available")
 
-        compose_file = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml"
+        compose_file = self._get_workspace_app_compose_path(workspace_slug)
         project_name = f"{workspace_slug}-app"
+        env_file = self._get_workspace_app_env_path(workspace_slug)
+        compose_cmd = ["docker", "compose"]
+        if env_file:
+            compose_cmd.extend(["--env-file", env_file])
 
         # Down with image removal, then rebuild
         subprocess.run(
-            ["docker", "compose", "-f", compose_file, "-p", project_name, "down", "--rmi", "local"],
+            compose_cmd + ["-f", compose_file, "-p", project_name, "down", "--rmi", "local"],
             capture_output=True,
             text=True,
             check=False
         )
 
         result = subprocess.run(
-            ["docker", "compose", "-f", compose_file, "-p", project_name, "up", "-d", "--build"],
+            compose_cmd + ["-f", compose_file, "-p", project_name, "up", "-d", "--build"],
             capture_output=True,
             text=True,
             check=False
@@ -2884,19 +2964,45 @@ This board helps you explore and develop ideas from concept to implementation-re
 
         if result.returncode != 0:
             logger.warning(f"[{workspace_slug}] App rebuild warning: {result.stderr}")
+            return False
 
         logger.info(f"[{workspace_slug}] App containers rebuilt and started")
+        return True
+
+    async def _workspace_restart_rebuild_app_with_llm(self, workspace_slug: str, workspace_id: str):
+        """Rebuild app containers with LLM fallback on failure."""
+        success = await self._workspace_restart_rebuild_app(workspace_slug, workspace_id)
+        if success:
+            return
+
+        logger.warning(f"[{workspace_slug}] App rebuild failed; attempting LLM repair")
+        await self._workspace_configure_app_with_llm(
+            workspace_slug,
+            issue="App rebuild failed during restart. Fix the config so it runs on the app domain.",
+        )
+
+        regenerated = self._prepare_workspace_app_compose_from_repo(workspace_slug)
+        if regenerated:
+            logger.info(f"[{workspace_slug}] Regenerated app compose after LLM repair")
+
+        retry_success = await self._workspace_restart_rebuild_app(workspace_slug, workspace_id)
+        if not retry_success:
+            raise RuntimeError(f"App rebuild failed after LLM repair for {workspace_slug}")
 
     async def _workspace_restart_app(self, workspace_slug: str, workspace_id: str):
         """Restart workspace app containers (no rebuild)"""
         if not self.docker_available:
             return
 
-        compose_file = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml"
+        compose_file = self._get_workspace_app_compose_path(workspace_slug)
         project_name = f"{workspace_slug}-app"
+        env_file = self._get_workspace_app_env_path(workspace_slug)
+        compose_cmd = ["docker", "compose"]
+        if env_file:
+            compose_cmd.extend(["--env-file", env_file])
 
         result = subprocess.run(
-            ["docker", "compose", "-f", compose_file, "-p", project_name, "restart"],
+            compose_cmd + ["-f", compose_file, "-p", project_name, "restart"],
             capture_output=True,
             text=True,
             check=False
@@ -2929,6 +3035,130 @@ This board helps you explore and develop ideas from concept to implementation-re
             else:
                 logger.warning(f"[{full_slug}] Sandbox restart warning: {result.stderr}")
 
+    def _get_workspace_app_compose_path(self, workspace_slug: str) -> str:
+        """Resolve compose file path for workspace app restarts."""
+        compose_app = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml"
+        compose_repo = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/app/docker-compose.yml"
+
+        if Path(compose_app).exists():
+            try:
+                compose_text = Path(compose_app).read_text()
+                if Path(compose_repo).exists():
+                    repo_text = Path(compose_repo).read_text()
+                    base_domain = DOMAIN.replace("kanban.", "")
+                    if f".sandbox.{base_domain}" in compose_text:
+                        generated = self._prepare_workspace_app_compose_from_repo(workspace_slug)
+                        return generated if generated else compose_app
+                    sandbox_match = re.search(
+                        rf"([a-z0-9-]+){re.escape(f'.sandbox.{base_domain}')}",
+                        repo_text,
+                    )
+                    sandbox_slug = sandbox_match.group(1) if sandbox_match else None
+                    if sandbox_slug and sandbox_slug != workspace_slug and sandbox_slug in compose_text:
+                        generated = self._prepare_workspace_app_compose_from_repo(workspace_slug)
+                        return generated if generated else compose_app
+            except Exception as e:
+                logger.warning(f"[{workspace_slug}] Failed to inspect app compose: {e}")
+            return compose_app
+        if Path(compose_repo).exists():
+            generated = self._prepare_workspace_app_compose_from_repo(workspace_slug)
+            return generated if generated else compose_repo
+
+        # Default to the canonical app compose path if nothing exists yet.
+        return compose_app
+
+    def _get_workspace_app_env_path(self, workspace_slug: str) -> Optional[str]:
+        """Return workspace app .env path if present."""
+        env_path = Path(f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/.env")
+        if env_path.exists():
+            return str(env_path)
+        return None
+
+    def _ensure_app_env(
+        self,
+        env_path: Path,
+        app_slug: str,
+        app_domain: str,
+        app_db_name: str,
+    ) -> None:
+        """Create or update an app .env with required variables."""
+        existing = {}
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                if not line or line.strip().startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                existing[key.strip()] = value.strip()
+
+        postgres_password = existing.get("POSTGRES_PASSWORD") or secrets.token_hex(16)
+        secret_key = existing.get("SECRET_KEY") or secrets.token_hex(32)
+        openrouter_key = existing.get("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY", "")
+
+        env_lines = [
+            f"APP_SLUG={app_slug}",
+            f"APP_DOMAIN={app_domain}",
+            f"APP_DB_NAME={app_db_name}",
+            f"POSTGRES_PASSWORD={postgres_password}",
+            f"SECRET_KEY={secret_key}",
+        ]
+        if openrouter_key:
+            env_lines.append(f"OPENROUTER_API_KEY={openrouter_key}")
+
+        env_path.write_text("\n".join(env_lines) + "\n")
+        logger.info(f"[{app_slug}] Wrote app .env at {env_path}")
+
+    def _prepare_workspace_app_compose_from_repo(self, workspace_slug: str) -> Optional[str]:
+        """Generate workspace app compose from repo compose with app domain and paths."""
+        repo_compose = Path(f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/app/docker-compose.yml")
+        if not repo_compose.exists():
+            return None
+
+        target_compose = Path(f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml")
+        content = repo_compose.read_text()
+
+        base_domain = DOMAIN.replace("kanban.", "")
+        sandbox_suffix = f".sandbox.{base_domain}"
+        app_suffix = f".app.{base_domain}"
+        app_domain = f"{workspace_slug}.app.{base_domain}"
+        app_db_name = workspace_slug.replace("-", "_")
+
+        sandbox_slug_match = re.search(
+            rf"([a-z0-9-]+){re.escape(sandbox_suffix)}",
+            content,
+        )
+        sandbox_slug = sandbox_slug_match.group(1) if sandbox_slug_match else None
+
+        if sandbox_slug and sandbox_slug != workspace_slug:
+            content = content.replace(sandbox_slug, workspace_slug)
+
+        content = content.replace(sandbox_suffix, app_suffix)
+
+        updated_lines = []
+        for line in content.splitlines():
+            stripped = line.lstrip()
+            indent = line[:len(line) - len(stripped)]
+
+            if stripped.startswith("context:"):
+                value = stripped.split("context:", 1)[1].strip()
+                if value == ".":
+                    value = "./app"
+                elif value.startswith("./") and not value.startswith("./app/"):
+                    value = "./app/" + value[2:]
+                line = f"{indent}context: {value}"
+
+            if stripped.startswith("- ./") and not stripped.startswith("- ./app/"):
+                line = f"{indent}- ./app/{stripped[4:]}"
+
+            updated_lines.append(line)
+
+        target_compose.write_text("\n".join(updated_lines) + "\n")
+        logger.info(f"[{workspace_slug}] Generated workspace app compose at {target_compose}")
+
+        env_path = Path(f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/.env")
+        self._ensure_app_env(env_path, workspace_slug, app_domain, app_db_name)
+
+        return str(target_compose)
+
     # =========================================================================
     # Link/Unlink App Handlers
     # =========================================================================
@@ -2954,20 +3184,15 @@ This board helps you explore and develop ideas from concept to implementation-re
             steps.extend([
                 ("Creating Azure app registration", self._workspace_create_azure_app),
                 ("Cloning repository", self._workspace_clone_repo),
-                ("Issuing SSL certificate", self._workspace_issue_certificate),
                 ("Creating app database", self._workspace_create_database),
                 ("Deploying app containers", self._workspace_deploy_app),
             ])
         else:
-            # Existing repo mode - use Claude CLI to configure the app
+            # Existing repo mode - configure via sandbox LLM on branch
             steps.extend([
                 ("Validating GitHub repository", self._link_app_validate_existing_repo),
                 ("Creating Azure app registration", self._workspace_create_azure_app),
                 ("Cloning repository", self._workspace_clone_repo),
-                ("Configuring app with Claude", self._link_app_configure_with_claude),
-                ("Issuing SSL certificate", self._workspace_issue_certificate),
-                # Skip "Creating app database" - Claude handles db in docker-compose if needed
-                ("Deploying app containers", self._workspace_deploy_app),
             ])
 
         # Common steps for both modes
@@ -2975,9 +3200,10 @@ This board helps you explore and develop ideas from concept to implementation-re
             # Update workspace with app fields BEFORE sandbox creation
             # (portal API requires app_template_id to be set for sandbox creation)
             ("Updating workspace", self._link_app_update_workspace),
-            ("Creating foundation sandbox", self._workspace_create_foundation_sandbox),
-            ("Running health check", self._workspace_health_check),
             ("Finalizing", self._link_app_finalize),
+            ("Creating foundation sandbox", self._workspace_create_foundation_sandbox),
+            ("Issuing SSL certificate", self._workspace_issue_certificate),
+            ("Running health check", self._workspace_health_check),
         ])
 
         try:
@@ -3037,7 +3263,7 @@ This board helps you explore and develop ideas from concept to implementation-re
         logger.info(f"[{workspace_slug}] Validated existing repo: {github_repo_url}")
 
     async def _link_app_configure_with_claude(self, workspace_slug: str, workspace_id: str):
-        """Configure existing repository using Claude CLI before deployment.
+        """Configure existing repository using the workspace LLM before deployment.
 
         This step analyzes the repository structure and generates appropriate
         Docker configuration (Dockerfile, docker-compose.yml) so the app can
@@ -3054,11 +3280,12 @@ This board helps you explore and develop ideas from concept to implementation-re
         base_domain = DOMAIN.replace("kanban.", "")
         app_domain = f"{workspace_slug}.app.{base_domain}"
 
-        prompt = f"""Analyze this repository and configure it to run as a Docker application.
+        prompt = f"""Analyze this repository and configure it to run as a Docker application behind the Kanban proxy.
 
 Requirements:
-1. The app must expose a SINGLE port (8000) for HTTP traffic
-2. Create a docker-compose.yml in the root with:
+1. The app must run behind the proxy under the workspace app domain
+2. The app must expose a SINGLE port (8000) for HTTP traffic
+3. Create a docker-compose.yml in the root with:
    - Service name: {workspace_slug}-app
    - Container name: {workspace_slug}-app
    - Build context: . (current directory)
@@ -3066,16 +3293,19 @@ Requirements:
    - Network: {workspace_slug}-network (external: false) AND {NETWORK_NAME} (external: true)
    - Traefik labels for HTTPS routing:
      - traefik.enable=true
+     - traefik.project=kanban
      - traefik.http.routers.{workspace_slug}-app.rule=Host(`{app_domain}`)
      - traefik.http.routers.{workspace_slug}-app.entrypoints=websecure
      - traefik.http.routers.{workspace_slug}-app.tls=true
+     - traefik.http.routers.{workspace_slug}-app.tls.certresolver=kanban-letsencrypt
      - traefik.http.services.{workspace_slug}-app.loadbalancer.server.port=8000
    - Restart policy: unless-stopped
-3. Create or modify Dockerfile to:
+4. Create or modify Dockerfile to:
    - Build the application for production
    - Expose port 8000
    - Set appropriate CMD/ENTRYPOINT
-4. If the app needs environment variables, use environment section in docker-compose
+5. If the app needs environment variables, use environment section in docker-compose
+6. Do not manage certificates or expose host ports; Kanban certbot manages TLS and Traefik handles routing
 
 The app will be accessible at: https://{app_domain}
 
@@ -3093,17 +3323,57 @@ Important:
 
 Generate the configuration files now."""
 
-        logger.info(f"[{workspace_slug}] Configuring app with Claude CLI...")
-
-        result = await claude_runner.run(
-            prompt=prompt,
-            working_dir=app_source_path,
-            tool_profile="developer",
-            timeout=600,  # 10 minutes
+        workspace_default_llm = payload.get("workspace_default_llm_provider")
+        workspace_default_found, workspace_default_latest = self._get_workspace_default_llm_provider(
+            workspace_slug
         )
+        if workspace_default_found:
+            workspace_default_llm = workspace_default_latest
+            payload["workspace_default_llm_provider"] = workspace_default_latest
+
+        llm_provider = self._resolve_llm_provider({}, workspace_default_llm)
+        provider_label = {
+            "claude-cli": "Claude CLI",
+            "codex-cli": "Codex CLI",
+            "abacus-cli": "Abacus CLI",
+        }.get(llm_provider, llm_provider)
+
+        logger.info(f"[{workspace_slug}] Configuring app with {provider_label}...")
+
+        if llm_provider == "codex-cli":
+            codex_env = {}
+            if OPENAI_API_KEY:
+                codex_env.setdefault("OPENAI_API_KEY", OPENAI_API_KEY)
+            result = await codex_runner.run(
+                prompt=prompt,
+                working_dir=app_source_path,
+                agent_type="developer",
+                tool_profile="developer",
+                timeout=600,  # 10 minutes
+                env=codex_env or None,
+            )
+        elif llm_provider == "abacus-cli":
+            abacus_env = {}
+            if ABACUS_API_KEY:
+                abacus_env.setdefault("ABACUS_API_KEY", ABACUS_API_KEY)
+            result = await abacus_runner.run(
+                prompt=prompt,
+                working_dir=app_source_path,
+                agent_type="developer",
+                tool_profile="developer",
+                timeout=600,  # 10 minutes
+                env=abacus_env or None,
+            )
+        else:
+            result = await claude_runner.run(
+                prompt=prompt,
+                working_dir=app_source_path,
+                tool_profile="developer",
+                timeout=600,  # 10 minutes
+            )
 
         if not result.success:
-            raise RuntimeError(f"Claude configuration failed: {result.error}")
+            raise RuntimeError(f"App configuration failed using {provider_label}: {result.error}")
 
         # Verify docker-compose.yml was created
         compose_path = Path(app_source_path) / "docker-compose.yml"
@@ -3113,7 +3383,7 @@ Generate the configuration files now."""
         # Mark that we're using Claude-generated config
         self._current_payload["claude_configured"] = True
 
-        logger.info(f"[{workspace_slug}] App configured successfully by Claude")
+        logger.info(f"[{workspace_slug}] App configured successfully by {provider_label}")
 
     async def _link_app_update_workspace(self, workspace_slug: str, workspace_id: str):
         """Update workspace with app fields (before sandbox creation)
@@ -3569,6 +3839,21 @@ Generate the configuration files now."""
 
         logger.info(f"Provisioning sandbox: {full_slug} (from branch: {source_branch})")
 
+        workspace_default_llm = self._current_payload.get("workspace_default_llm_provider")
+        workspace_default_found, workspace_default_latest = self._get_workspace_default_llm_provider(
+            workspace_slug
+        )
+        if workspace_default_found:
+            workspace_default_llm = workspace_default_latest
+            self._current_payload["workspace_default_llm_provider"] = workspace_default_latest
+
+        llm_provider = self._resolve_llm_provider({}, workspace_default_llm)
+        provider_label = {
+            "claude-cli": "Claude CLI",
+            "codex-cli": "Codex CLI",
+            "abacus-cli": "Abacus CLI",
+        }.get(llm_provider, llm_provider)
+
         steps = [
             ("Validating sandbox configuration", self._sandbox_validate),
             ("Updating Azure redirect URIs", self._sandbox_update_azure_redirect_uris),
@@ -3576,7 +3861,8 @@ Generate the configuration files now."""
             ("Issuing SSL certificate", self._sandbox_issue_certificate),
             ("Cloning workspace database", self._sandbox_clone_database),
             ("Creating sandbox directory", self._sandbox_create_directory),
-            ("Configuring sandbox with Claude", self._sandbox_configure_with_claude),
+            (f"Configuring sandbox with {provider_label}", self._sandbox_configure_with_claude),
+            ("Committing sandbox changes", self._sandbox_commit_and_push_changes),
             ("Deploying sandbox containers", self._sandbox_deploy_containers),
             ("Running health check", self._sandbox_health_check),
             ("Finalizing sandbox", self._sandbox_finalize),
@@ -3833,6 +4119,7 @@ Generate the configuration files now."""
         """
         sandbox_data_path = f"{HOST_PROJECT_PATH}/data/sandboxes/{full_slug}"
         repo_path = f"{sandbox_data_path}/repo"
+        workspace_slug = self._current_payload.get("workspace_slug", "")
 
         # Check if repository has expected structure
         backend_dockerfile = Path(repo_path) / "backend" / "Dockerfile"
@@ -3855,10 +4142,10 @@ Generate the configuration files now."""
 
 Requirements:
 1. Create a docker-compose.yml in the root with THESE EXACT configurations:
-   - PostgreSQL service: {full_slug}-postgres (postgres:15-alpine)
-   - App service(s): {full_slug}-api and optionally {full_slug}-web
-   - Redis service: {full_slug}-redis (redis:7-alpine)
-   - All services must use container_name matching the service name
+   - PostgreSQL service: postgres (postgres:15-alpine) with container_name=${{APP_SLUG}}-postgres
+   - App service(s): api and optionally web with container_name=${{APP_SLUG}}-api / ${{APP_SLUG}}-web
+   - Redis service: redis (redis:7-alpine) with container_name=${{APP_SLUG}}-redis
+   - Container names must be derived from APP_SLUG as shown above
    - Network: {NETWORK_NAME} (external: true)
    - restart: unless-stopped on all services
 
@@ -3866,63 +4153,293 @@ Requirements:
    - Backend API on port 8000 (internal)
    - Frontend (if exists) on port 5173 (internal)
 
-3. Traefik labels for HTTPS routing:
-   - Domain: {sandbox_domain}
+3. Traefik labels for HTTPS routing (use APP_DOMAIN env var, no hardcoded hostnames):
+   - Domain: ${{APP_DOMAIN}}
    - API route: PathPrefix(/api) with strip middleware
    - Frontend route: Host rule for all other paths
    - Use certresolver: kanban-letsencrypt
    - Entrypoints: websecure (HTTPS), web (HTTP redirect)
+   - Include label: traefik.project=kanban
 
 4. Create/modify Dockerfile(s) as needed:
    - Multi-stage builds for smaller images
    - Production-ready configurations
    - Appropriate CMD/ENTRYPOINT
+   - If using npm ci, ensure a package-lock.json exists; otherwise use npm install
+   - If using nginx for frontend, copy build output into /usr/share/nginx/html and serve from there (no /dist in root path)
 
-5. Environment variables the app expects:
-   - DATABASE_URL=postgresql+asyncpg://postgres:${{POSTGRES_PASSWORD}}@{full_slug}-postgres:5432/{full_slug.replace('-', '_')}
-   - SECRET_KEY (will be injected)
-   - REDIS_URL=redis://{full_slug}-redis:6379
+5. Environment variables the app expects (use .env variables, no sandbox-only literals):
+   - APP_SLUG, APP_DOMAIN, APP_DB_NAME
+   - POSTGRES_PASSWORD, SECRET_KEY
+   - DATABASE_URL=postgresql+asyncpg://postgres:${{POSTGRES_PASSWORD}}@${{APP_SLUG}}-postgres:5432/${{APP_DB_NAME}}
+   - REDIS_URL=redis://${{APP_SLUG}}-redis:6379
 
 6. Volume mounts:
    - PostgreSQL: /var/lib/postgresql/data
    - Redis: /data
    - Uploads: /app/uploads (if applicable)
 
-The sandbox will be accessible at: https://{sandbox_domain}
+7. Provide a .env.example with:
+   - APP_SLUG, APP_DOMAIN, APP_DB_NAME
+   - POSTGRES_PASSWORD, SECRET_KEY
+
+The sandbox will be accessible at: https://{sandbox_domain} (set APP_DOMAIN accordingly)
 
 Important:
 - Analyze the existing codebase structure carefully
 - If a docker-compose.yml exists, adapt it to the sandbox requirements
 - Keep any app-specific services that are needed
+- Ensure the configuration is deployable to the real app domain by using APP_DOMAIN (no sandbox-only hostnames)
 - Use kanban labels for orchestration: kanban.type, kanban.full-slug, etc.
+- Do not expose host ports; use expose only and let Traefik route traffic
 
 Generate the docker-compose.yml file now."""
 
-        logger.info(f"[{full_slug}] Configuring sandbox with Claude CLI...")
+        workspace_default_llm = self._current_payload.get("workspace_default_llm_provider")
+        workspace_default_found, workspace_default_latest = self._get_workspace_default_llm_provider(
+            workspace_slug
+        )
+        if workspace_default_found:
+            workspace_default_llm = workspace_default_latest
+            self._current_payload["workspace_default_llm_provider"] = workspace_default_latest
+
+        llm_provider = self._resolve_llm_provider({}, workspace_default_llm)
+        provider_label = {
+            "claude-cli": "Claude CLI",
+            "codex-cli": "Codex CLI",
+            "abacus-cli": "Abacus CLI",
+        }.get(llm_provider, llm_provider)
+
+        logger.info(f"[{full_slug}] Configuring sandbox with {provider_label}...")
 
         try:
-            result = await claude_runner.run(
-                prompt=prompt,
-                working_dir=repo_path,
-                tool_profile="developer",
-                timeout=600,  # 10 minutes
-            )
+            if llm_provider == "codex-cli":
+                codex_env = {}
+                if OPENAI_API_KEY:
+                    codex_env.setdefault("OPENAI_API_KEY", OPENAI_API_KEY)
+                result = await codex_runner.run(
+                    prompt=prompt,
+                    working_dir=repo_path,
+                    agent_type="developer",
+                    tool_profile="developer",
+                    timeout=600,  # 10 minutes
+                    env=codex_env or None,
+                )
+            elif llm_provider == "abacus-cli":
+                abacus_env = {}
+                if ABACUS_API_KEY:
+                    abacus_env.setdefault("ABACUS_API_KEY", ABACUS_API_KEY)
+                result = await abacus_runner.run(
+                    prompt=prompt,
+                    working_dir=repo_path,
+                    agent_type="developer",
+                    tool_profile="developer",
+                    timeout=600,  # 10 minutes
+                    env=abacus_env or None,
+                )
+            else:
+                result = await claude_runner.run(
+                    prompt=prompt,
+                    working_dir=repo_path,
+                    tool_profile="developer",
+                    timeout=600,  # 10 minutes
+                )
 
             if not result.success:
-                raise RuntimeError(f"Claude configuration failed: {result.error}")
+                raise RuntimeError(f"{provider_label} configuration failed: {result.error}")
 
             # Verify docker-compose.yml was created or modified
             compose_path = Path(repo_path) / "docker-compose.yml"
             if not compose_path.exists():
                 logger.warning(f"[{full_slug}] Claude did not generate docker-compose.yml, will use template")
             else:
-                logger.info(f"[{full_slug}] Sandbox configured successfully by Claude")
+                logger.info(f"[{full_slug}] Sandbox configured successfully by {provider_label}")
                 # Mark that we have a Claude-generated config
                 self._current_payload["claude_configured"] = True
 
         except Exception as e:
-            logger.warning(f"[{full_slug}] Claude configuration failed, will try template: {e}")
+            logger.warning(f"[{full_slug}] LLM configuration failed, will try template: {e}")
             # Don't fail - let the template-based deployment try
+
+    async def _workspace_configure_app_with_llm(self, workspace_slug: str, issue: str = None):
+        """Run LLM in workspace app repo to ensure config supports app domain with variables."""
+        repo_path = f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/app"
+
+        if not Path(repo_path).exists():
+            raise RuntimeError(f"Workspace repo not found at {repo_path}")
+
+        base_domain = DOMAIN.replace("kanban.", "") if DOMAIN.startswith("kanban.") else DOMAIN
+        app_domain = f"{workspace_slug}.app.{base_domain}"
+        app_db_name = workspace_slug.replace("-", "_")
+
+        issue_block = f"\nIssue:\n{issue}\n" if issue else ""
+
+        prompt = f"""Analyze this repository and ensure it can run as a Docker application for both
+sandbox and app domains using environment variables (no hardcoded hostnames).
+{issue_block}
+
+Requirements:
+1. Create or update docker-compose.yml in the repo root:
+   - Use environment variables APP_SLUG, APP_DOMAIN, APP_DB_NAME, POSTGRES_PASSWORD, SECRET_KEY.
+   - Container names must be derived from APP_SLUG (e.g., ${{APP_SLUG}}-api).
+   - Traefik host rules must use APP_DOMAIN (no sandbox-only domains).
+   - Expose API on 8000 and web on 5173 (internal).
+   - Use the {NETWORK_NAME} external network and traefik.project=kanban.
+
+2. If nginx is used for frontend, copy build output into /usr/share/nginx/html and serve from there (no /dist in root path).
+
+3. Provide or update .env.example with:
+   APP_SLUG, APP_DOMAIN, APP_DB_NAME, POSTGRES_PASSWORD, SECRET_KEY.
+
+Target app domain (for APP_DOMAIN): {app_domain}
+Target database name (for APP_DB_NAME): {app_db_name}
+
+Do not expose host ports; use expose only and let Traefik route traffic."""
+
+        workspace_default_llm = self._current_payload.get("workspace_default_llm_provider")
+        workspace_default_found, workspace_default_latest = self._get_workspace_default_llm_provider(
+            workspace_slug
+        )
+        if workspace_default_found:
+            workspace_default_llm = workspace_default_latest
+            self._current_payload["workspace_default_llm_provider"] = workspace_default_latest
+
+        llm_provider = self._resolve_llm_provider({}, workspace_default_llm)
+        provider_label = {
+            "claude-cli": "Claude CLI",
+            "codex-cli": "Codex CLI",
+            "abacus-cli": "Abacus CLI",
+        }.get(llm_provider, llm_provider)
+
+        logger.info(f"[{workspace_slug}] Configuring app repo with {provider_label}...")
+
+        if llm_provider == "codex-cli":
+            codex_env = {}
+            if OPENAI_API_KEY:
+                codex_env.setdefault("OPENAI_API_KEY", OPENAI_API_KEY)
+            result = await codex_runner.run(
+                prompt=prompt,
+                working_dir=repo_path,
+                agent_type="developer",
+                tool_profile="developer",
+                timeout=600,
+                env=codex_env or None,
+            )
+        elif llm_provider == "abacus-cli":
+            abacus_env = {}
+            if ABACUS_API_KEY:
+                abacus_env.setdefault("ABACUS_API_KEY", ABACUS_API_KEY)
+            result = await abacus_runner.run(
+                prompt=prompt,
+                working_dir=repo_path,
+                agent_type="developer",
+                tool_profile="developer",
+                timeout=600,
+                env=abacus_env or None,
+            )
+        else:
+            result = await claude_runner.run(
+                prompt=prompt,
+                working_dir=repo_path,
+                tool_profile="developer",
+                timeout=600,
+            )
+
+        if not result.success:
+            raise RuntimeError(f"{provider_label} app configuration failed: {result.error}")
+
+        self._ensure_app_env(
+            Path(f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/.env"),
+            workspace_slug,
+            app_domain,
+            app_db_name,
+        )
+
+        logger.info(f"[{workspace_slug}] App repo configured successfully by {provider_label}")
+
+    async def _sandbox_commit_and_push_changes(self, full_slug: str, sandbox_id: str):
+        """Commit and push LLM-generated sandbox changes."""
+        if not self._current_payload.get("claude_configured"):
+            logger.info(f"[{full_slug}] No LLM changes detected, skipping commit")
+            return
+
+        sandbox_data_path = f"{HOST_PROJECT_PATH}/data/sandboxes/{full_slug}"
+        repo_path = f"{sandbox_data_path}/repo"
+        git_branch = f"sandbox/{full_slug}"
+
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if status_result.returncode != 0:
+            raise RuntimeError(f"git status failed: {status_result.stderr.strip()}")
+
+        if not status_result.stdout.strip():
+            logger.info(f"[{full_slug}] No changes to commit")
+            return
+
+        add_result = subprocess.run(
+            ["git", "add", "-A"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if add_result.returncode != 0:
+            raise RuntimeError(f"git add failed: {add_result.stderr.strip()}")
+
+        email_result = subprocess.run(
+            ["git", "config", "user.email", "orchestrator@kanban.local"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        name_result = subprocess.run(
+            ["git", "config", "user.name", "Kanban Orchestrator"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if email_result.returncode != 0:
+            logger.warning(f"[{full_slug}] git config user.email failed: {email_result.stderr.strip()}")
+        if name_result.returncode != 0:
+            logger.warning(f"[{full_slug}] git config user.name failed: {name_result.stderr.strip()}")
+
+        git_env = os.environ.copy()
+        git_env.update({
+            "GIT_AUTHOR_NAME": "Kanban Orchestrator",
+            "GIT_AUTHOR_EMAIL": "orchestrator@kanban.local",
+            "GIT_COMMITTER_NAME": "Kanban Orchestrator",
+            "GIT_COMMITTER_EMAIL": "orchestrator@kanban.local",
+        })
+
+        commit_result = subprocess.run(
+            ["git", "commit", "-m", "chore: configure sandbox via LLM"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            env=git_env,
+            check=False,
+        )
+        if commit_result.returncode != 0:
+            raise RuntimeError(f"git commit failed: {commit_result.stderr.strip()}")
+
+        push_result = subprocess.run(
+            ["git", "push", "origin", git_branch],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if push_result.returncode != 0:
+            raise RuntimeError(f"git push failed: {push_result.stderr.strip()}")
+
+        logger.info(f"[{full_slug}] Committed and pushed LLM changes to {git_branch}")
 
     async def _sandbox_deploy_containers(self, full_slug: str, sandbox_id: str):
         """Deploy sandbox containers using the sandbox-compose template or Claude-generated config"""
@@ -3957,6 +4474,10 @@ Generate the docker-compose.yml file now."""
             # Run compose from repo directory so relative paths work
             compose_file_host = str(claude_compose)
             use_claude_compose = True
+            base_domain = DOMAIN.replace("kanban.", "") if DOMAIN.startswith("kanban.") else DOMAIN
+            sandbox_domain = f"{full_slug}.sandbox.{base_domain}"
+            env_path = Path(repo_path) / ".env"
+            self._ensure_app_env(env_path, full_slug, sandbox_domain, database_name)
         else:
             # Use template-based compose
             logger.info(f"[{full_slug}] Using template-based docker-compose")
@@ -4225,6 +4746,7 @@ Generate the docker-compose.yml file now."""
             ("Merging pull request", self._sandbox_pr_merge),
             ("Updating workspace code", self._workspace_update_repo_main),
             ("Rebuilding app containers", self._workspace_rebuild_app_after_merge),
+            ("Validating app domain", self._workspace_validate_app_domain),
         ]
 
         try:
@@ -4236,6 +4758,7 @@ Generate the docker-compose.yml file now."""
             pr_url = self._current_payload.get("pull_request_url")
             pr_number = self._current_payload.get("pull_request_number")
             merge_sha = self._current_payload.get("merge_sha")
+            already_merged = self._current_payload.get("already_merged", False)
 
             await self.complete_task(task_id, {
                 "action": "sandbox.pull_request",
@@ -4245,9 +4768,13 @@ Generate the docker-compose.yml file now."""
                 "pull_request_url": pr_url,
                 "pull_request_number": pr_number,
                 "merge_sha": merge_sha,
+                "already_merged": already_merged,
             })
 
-            logger.info(f"[{full_slug}] Sandbox pull request flow completed")
+            if already_merged:
+                logger.info(f"[{full_slug}] Sandbox already merged to main, rebuilt app containers")
+            else:
+                logger.info(f"[{full_slug}] Sandbox pull request flow completed")
 
         except Exception as e:
             logger.error(f"[{full_slug}] Sandbox pull request failed: {e}")
@@ -4263,21 +4790,23 @@ Generate the docker-compose.yml file now."""
         if not github_org or not github_repo:
             raise RuntimeError("GitHub repository info not configured for this workspace")
 
+        github_pat = payload.get("github_pat")
         # Ensure token is configured early
-        _ = github_service.token
+        _ = github_service.get_effective_token(github_pat)
 
         # Confirm repository exists
-        repo = await github_service.get_repository(github_org, github_repo)
+        repo = await github_service.get_repository(github_org, github_repo, token=github_pat)
         if not repo:
             raise RuntimeError(f"GitHub repository not found: {github_org}/{github_repo}")
 
-        branch = await github_service.get_branch(github_org, github_repo, git_branch)
+        branch = await github_service.get_branch(github_org, github_repo, git_branch, token=github_pat)
         if not branch:
             raise RuntimeError(f"Sandbox branch not found: {github_org}/{github_repo}:{git_branch}")
 
         payload["github_org"] = github_org
         payload["github_repo_name"] = github_repo
         payload["git_branch"] = git_branch
+        payload["github_pat"] = github_pat
 
     async def _sandbox_pr_create(self, full_slug: str, sandbox_id: str):
         """Create (or find) a PR from sandbox branch to main."""
@@ -4285,6 +4814,26 @@ Generate the docker-compose.yml file now."""
         github_org = payload["github_org"]
         github_repo = payload["github_repo_name"]
         git_branch = payload["git_branch"]
+        github_pat = payload.get("github_pat")
+
+        # Check if the branch has any commits ahead of main
+        comparison = await github_service.compare_branches(
+            owner=github_org,
+            repo=github_repo,
+            base="main",
+            head=git_branch,
+            token=github_pat,
+        )
+
+        # If identical or behind, the branch is already merged (no new changes)
+        if comparison["status"] in ["identical", "behind"]:
+            logger.info(f"[{full_slug}] Branch {git_branch} is already merged to main (status: {comparison['status']})")
+            payload["pull_request_number"] = None
+            payload["pull_request_url"] = None
+            payload["pull_request_state"] = "merged"
+            payload["pull_request_merged"] = True
+            payload["already_merged"] = True
+            return
 
         title = f"Deploy sandbox {full_slug}"
         body = f"Automated PR to merge `{git_branch}` into `main`."
@@ -4296,6 +4845,7 @@ Generate the docker-compose.yml file now."""
             base="main",
             title=title,
             body=body,
+            token=github_pat,
         )
 
         payload["pull_request_number"] = pr.get("number")
@@ -4318,6 +4868,7 @@ Generate the docker-compose.yml file now."""
                 repo=payload["github_repo_name"],
                 pull_number=payload["pull_request_number"],
                 body="Auto-approve sandbox deploy",
+                token=payload.get("github_pat"),
             )
         except Exception as e:
             # GitHub doesn't allow approving your own PR - skip and proceed to merge
@@ -4337,6 +4888,7 @@ Generate the docker-compose.yml file now."""
             repo=payload["github_repo_name"],
             pull_number=payload["pull_request_number"],
             merge_method="merge",
+            token=payload.get("github_pat"),
         )
 
         payload["merge_sha"] = merge_result.get("sha")
@@ -4369,22 +4921,101 @@ Generate the docker-compose.yml file now."""
 
         logger.info(f"[{workspace_slug}] Workspace repo updated to latest main")
 
+        try:
+            self._ensure_app_env(
+                Path(f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/.env"),
+                workspace_slug,
+                f"{workspace_slug}.app.{DOMAIN.replace('kanban.', '')}",
+                workspace_slug.replace("-", "_"),
+            )
+        except Exception as e:
+            logger.warning(f"[{workspace_slug}] Failed to ensure app env: {e}")
+
     async def _workspace_rebuild_app_after_merge(self, full_slug: str, sandbox_id: str):
         """Rebuild app containers after updating main."""
         payload = self._current_payload
         workspace_slug = payload["workspace_slug"]
         workspace_id = payload["workspace_id"]
-        compose_file = Path(f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/docker-compose.app.yml")
-        legacy_compose = Path(f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/app/docker-compose.yml")
+        repo_compose = Path(f"{HOST_PROJECT_PATH}/data/workspaces/{workspace_slug}/app/docker-compose.yml")
+        if repo_compose.exists():
+            generated = self._prepare_workspace_app_compose_from_repo(workspace_slug)
+            compose_file = Path(generated) if generated else Path(self._get_workspace_app_compose_path(workspace_slug))
+        else:
+            compose_file = Path(self._get_workspace_app_compose_path(workspace_slug))
 
-        if compose_file.exists():
-            await self._workspace_restart_rebuild_app(workspace_slug, workspace_id)
-            return
-        if legacy_compose.exists():
-            await self._workspace_start_rebuild_app(workspace_slug, workspace_id)
+        if not compose_file.exists():
+            raise RuntimeError(f"No app compose file found for workspace {workspace_slug}")
+
+        success = await self._workspace_restart_rebuild_app(workspace_slug, workspace_id)
+        if success:
             return
 
-        raise RuntimeError(f"No app compose file found for workspace {workspace_slug}")
+        logger.warning(f"[{workspace_slug}] App rebuild failed; attempting LLM repair")
+        await self._workspace_configure_app_with_llm(workspace_slug)
+
+        regenerated = self._prepare_workspace_app_compose_from_repo(workspace_slug)
+        if regenerated:
+            logger.info(f"[{workspace_slug}] Regenerated app compose after LLM repair")
+
+        retry_success = await self._workspace_restart_rebuild_app(workspace_slug, workspace_id)
+        if not retry_success:
+            raise RuntimeError(f"App rebuild failed after LLM repair for {workspace_slug}")
+
+    async def _workspace_wait_for_app_domain(self, workspace_slug: str, max_attempts: int = 10):
+        """Wait for the app domain to respond with a non-5xx status."""
+        import httpx
+
+        base_domain = DOMAIN.replace("kanban.", "") if DOMAIN.startswith("kanban.") else DOMAIN
+        app_domain = f"{workspace_slug}.app.{base_domain}"
+        app_url = f"https://{app_domain}"
+
+        last_error = "no response"
+        async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    response = await client.get(app_url, follow_redirects=True)
+                    if response.status_code < 500:
+                        logger.info(f"[{workspace_slug}] App domain responded with {response.status_code}")
+                        return True, ""
+                    last_error = f"status {response.status_code}"
+                except httpx.HTTPError as e:
+                    last_error = str(e)
+
+                logger.info(f"[{workspace_slug}] App domain not ready (attempt {attempt}/{max_attempts})")
+                await asyncio.sleep(3)
+
+        return False, last_error
+
+    async def _workspace_validate_app_domain(self, full_slug: str, sandbox_id: str):
+        """Validate the workspace app is reachable on the real app domain."""
+        payload = self._current_payload
+        workspace_slug = payload["workspace_slug"]
+        workspace_id = payload["workspace_id"]
+
+        ok, error = await self._workspace_wait_for_app_domain(workspace_slug)
+        if ok:
+            return
+
+        base_domain = DOMAIN.replace("kanban.", "") if DOMAIN.startswith("kanban.") else DOMAIN
+        app_domain = f"{workspace_slug}.app.{base_domain}"
+        logger.warning(f"[{workspace_slug}] App domain check failed: {error}")
+
+        await self._workspace_configure_app_with_llm(
+            workspace_slug,
+            issue=f"App did not respond at https://{app_domain} ({error}). Fix the config so it runs in the app domain.",
+        )
+
+        regenerated = self._prepare_workspace_app_compose_from_repo(workspace_slug)
+        if regenerated:
+            logger.info(f"[{workspace_slug}] Regenerated app compose after LLM repair")
+
+        retry_success = await self._workspace_restart_rebuild_app(workspace_slug, workspace_id)
+        if not retry_success:
+            raise RuntimeError(f"App rebuild failed after LLM domain repair for {workspace_slug}")
+
+        ok, error = await self._workspace_wait_for_app_domain(workspace_slug)
+        if not ok:
+            raise RuntimeError(f"App domain still not responding after LLM repair: {error}")
 
     async def _sandbox_restart_pull_code(self, full_slug: str, sandbox_id: str):
         """Pull latest code from the sandbox branch"""
@@ -4668,11 +5299,17 @@ Generate the docker-compose.yml file now."""
         column_name = payload["column_name"]
         agent_config = payload.get("agent_config", {})
         agent_name = agent_config.get("agent_name", "developer")
+        workspace_slug = payload["workspace_slug"]
         workspace_default_llm = payload.get("workspace_default_llm_provider")
+        workspace_default_found, workspace_default_latest = self._get_workspace_default_llm_provider(
+            workspace_slug
+        )
+        if workspace_default_found:
+            workspace_default_llm = workspace_default_latest
+            payload["workspace_default_llm_provider"] = workspace_default_latest
         llm_provider = self._resolve_llm_provider(agent_config, workspace_default_llm)
         payload["llm_provider"] = llm_provider
         sandbox_id = payload["sandbox_id"]
-        workspace_slug = payload["workspace_slug"]
         git_branch = payload["git_branch"]
         session_id = payload.get("claude_session_id")
         kanban_api_url = payload["kanban_api_url"]
@@ -5084,6 +5721,36 @@ Generate the docker-compose.yml file now."""
 
         logger.info(f"{log_prefix} Sandbox health check passed for {full_slug}")
 
+    def _get_workspace_default_llm_provider(self, workspace_slug: str) -> tuple[bool, Optional[str]]:
+        """Fetch the latest workspace default LLM provider from portal storage."""
+        if not workspace_slug:
+            return False, None
+
+        portal_db_paths = [
+            Path("/app/data/portal/portal.json"),
+            Path(f"{HOST_PROJECT_PATH}/data/portal/portal.json"),
+        ]
+        portal_db_path = next((path for path in portal_db_paths if path.exists()), None)
+        if not portal_db_path:
+            logger.debug("Portal database not found; using payload defaults.")
+            return False, None
+
+        try:
+            with portal_db_path.open("r") as handle:
+                portal_data = json.load(handle)
+        except Exception as exc:
+            logger.warning(f"Failed to read portal database at {portal_db_path}: {exc}")
+            return False, None
+
+        workspaces = portal_data.get("workspaces", {})
+        workspace_slug = workspace_slug.lower()
+        for ws in workspaces.values():
+            if ws.get("slug", "").lower() == workspace_slug:
+                return True, ws.get("default_llm_provider")
+
+        logger.debug(f"Workspace '{workspace_slug}' not found in portal database.")
+        return False, None
+
     def _resolve_llm_provider(self, agent_config: dict, workspace_default: str = None) -> str:
         """Resolve the LLM provider for an agent, defaulting to Claude CLI.
 
@@ -5316,6 +5983,11 @@ Generate the docker-compose.yml file now."""
                 env=abacus_env or None,
             )
         else:
+            # QA agent needs Playwright MCP for E2E testing
+            mcp_config_path = None
+            if agent_name == "qa":
+                mcp_config_path = f"{HOST_PROJECT_PATH}/orchestrator/app/config/mcp-playwright.json"
+
             ctx["result"] = await claude_runner.run(
                 prompt=prompt,
                 working_dir=target_project_path,
@@ -5324,6 +5996,7 @@ Generate the docker-compose.yml file now."""
                 timeout=timeout,
                 session_id=payload.get("claude_session_id"),
                 env=env,
+                mcp_config_path=mcp_config_path,
             )
 
         if not ctx["result"].success:

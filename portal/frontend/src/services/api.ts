@@ -323,6 +323,11 @@ export const workspacesApi = {
       `/workspaces/${slug}/restart`,
       options || {}
     ),
+  restartApp: (slug: string, options?: { rebuild?: boolean }) =>
+    api.post<{ message: string; task_id: string; rebuild: boolean }>(
+      `/workspaces/${slug}/restart-app`,
+      options || {}
+    ),
   start: (slug: string) =>
     api.post<{ message: string; task_id: string }>(`/workspaces/${slug}/start`),
   startKanban: (slug: string) =>

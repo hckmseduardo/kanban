@@ -239,6 +239,27 @@ class TaskService:
             priority="high"
         )
 
+    async def create_workspace_app_restart_task(
+        self,
+        workspace_id: str,
+        workspace_slug: str,
+        user_id: str,
+        rebuild: bool = False,
+    ) -> str:
+        """Create task to restart/rebuild workspace app containers only."""
+        return await redis_service.enqueue_task(
+            queue_name=self.QUEUE_PROVISIONING,
+            task_type="workspace.restart_app",
+            payload={
+                "action": "restart_app",
+                "workspace_id": workspace_id,
+                "workspace_slug": workspace_slug,
+                "rebuild": rebuild,
+            },
+            user_id=user_id,
+            priority="high"
+        )
+
     async def create_workspace_start_task(
         self,
         workspace_id: str,
@@ -487,6 +508,7 @@ class TaskService:
         user_id: str,
         github_org: str,
         github_repo_name: str,
+        github_pat: str = None,
     ) -> str:
         """Create task to open and merge a sandbox pull request.
 
@@ -509,6 +531,7 @@ class TaskService:
                 "git_branch": git_branch,
                 "github_org": github_org,
                 "github_repo_name": github_repo_name,
+                "github_pat": github_pat,
             },
             user_id=user_id,
             priority="high"

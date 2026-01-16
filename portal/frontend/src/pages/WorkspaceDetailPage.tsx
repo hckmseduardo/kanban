@@ -208,6 +208,20 @@ export default function WorkspaceDetailPage() {
     }
   })
 
+  const restartAppMutation = useMutation({
+    mutationFn: (options?: { rebuild?: boolean }) =>
+      workspacesApi.restartApp(slug!, options),
+    onSuccess: (response) => {
+      const taskId = response.data.task_id
+      if (taskId && workspace?.id && workspace?.slug) {
+        startTask(taskId, workspace.id, workspace.slug, 'restart_app')
+      }
+      queryClient.invalidateQueries({ queryKey: ['workspace', slug] })
+      setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ['workspace-health', slug] })
+      }, 5000)
+    }
+  })
   // Member management mutations
   const inviteMemberMutation = useMutation({
     mutationFn: (data: { email: string; role: 'owner' | 'admin' | 'member' | 'viewer' }) =>
@@ -482,7 +496,13 @@ export default function WorkspaceDetailPage() {
       task.action === 'restart_workspace' &&
       (task.status === 'pending' || task.status === 'in_progress')
   )
-  const workspaceActionTask = workspaceStartTask || workspaceRestartTask
+  const appRestartTask = Object.values(tasks).find(
+    (task) =>
+      task.workspaceSlug === slug &&
+      task.action === 'restart_app' &&
+      (task.status === 'pending' || task.status === 'in_progress')
+  )
+  const workspaceActionTask = workspaceStartTask || workspaceRestartTask || appRestartTask
   const isWorkspaceStarting = startWorkspaceMutation.isPending || !!workspaceActionTask
 
   // Track link/unlink app tasks
@@ -569,6 +589,19 @@ export default function WorkspaceDetailPage() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
                 </svg>
                 Unlink App
+              </button>
+            )}
+            {(workspace.app_template_id || workspace.github_repo_url) && (
+              <button
+                onClick={() => restartAppMutation.mutate({ rebuild: false })}
+                disabled={restartAppMutation.isPending || !!appRestartTask}
+                title="Restart App"
+                className="p-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-dark-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <span className="sr-only">Restart App</span>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
               </button>
             )}
             <button
@@ -712,7 +745,11 @@ export default function WorkspaceDetailPage() {
                               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                             </svg>
-                            {workspaceActionTask?.action === 'restart_workspace' ? 'Restarting...' : 'Starting...'}
+                            {workspaceActionTask?.action === 'restart_workspace'
+                              ? 'Restarting...'
+                              : workspaceActionTask?.action === 'restart_app'
+                                ? 'Restarting app...'
+                                : 'Starting...'}
                           </>
                         ) : (
                           <>
@@ -734,7 +771,11 @@ export default function WorkspaceDetailPage() {
                   </div>
                   {workspaceActionTask && (
                     <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
-                      {workspaceActionTask.action === 'restart_workspace' ? 'Restarting workspace:' : 'Starting workspace:'} {workspaceActionTask.stepName}
+                      {workspaceActionTask.action === 'restart_workspace'
+                        ? 'Restarting workspace:'
+                        : workspaceActionTask.action === 'restart_app'
+                          ? 'Restarting app:'
+                          : 'Starting workspace:'} {workspaceActionTask.stepName}
                     </p>
                   )}
                   {startWorkspaceError && (
@@ -903,9 +944,6 @@ export default function WorkspaceDetailPage() {
             <div>
               <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Sandboxes</h2>
               <p className="text-sm text-gray-500 dark:text-gray-400">Development environments with database clones</p>
-              <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
-                Deploying a sandbox rebuilds the live app and may cause brief downtime.
-              </p>
             </div>
             {canCreateSandbox && (
               <button
@@ -988,9 +1026,9 @@ export default function WorkspaceDetailPage() {
                             onClick={() => createPullRequestMutation.mutate(sandbox.slug)}
                             disabled={sandbox.status !== 'active' || isDeploying || createPullRequestMutation.isPending}
                             className="flex-1 px-3 py-2 rounded-lg text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
-                            title="Create and merge a PR to update main"
+                            title="⚠️ Rebuilds the live app and may cause brief downtime"
                           >
-                            {isDeploying ? 'Deploying...' : 'Deploy to Main'}
+                            {isDeploying ? 'Deploying...' : '⚠️ Deploy to Main'}
                           </button>
                         )}
                         {sandbox.status === 'active' && (
@@ -1056,9 +1094,9 @@ export default function WorkspaceDetailPage() {
                             onClick={() => createPullRequestMutation.mutate(sandbox.slug)}
                             disabled={sandbox.status !== 'active' || isDeploying || createPullRequestMutation.isPending}
                             className="px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
-                            title="Create and merge a PR to update main"
+                            title="⚠️ Rebuilds the live app and may cause brief downtime"
                           >
-                            {isDeploying ? 'Deploying...' : 'Deploy to Main'}
+                            {isDeploying ? 'Deploying...' : '⚠️ Deploy to Main'}
                           </button>
                         )}
                         {sandbox.status === 'active' && (

@@ -298,6 +298,48 @@ class GitHubService:
                 error_detail = response.json().get("message", response.text)
                 raise Exception(f"Failed to delete branch: {error_detail}")
 
+    async def compare_branches(
+        self,
+        owner: str,
+        repo: str,
+        base: str,
+        head: str,
+        token: str = None,
+    ) -> dict:
+        """Compare two branches to check if head has commits ahead of base.
+
+        Returns:
+            dict with keys:
+                - status: 'ahead', 'behind', 'identical', or 'diverged'
+                - ahead_by: number of commits head is ahead
+                - behind_by: number of commits head is behind
+                - total_commits: total commits in comparison
+        """
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}/compare/{base}...{head}"
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                url,
+                headers=self._get_headers(token),
+                timeout=30.0
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    "status": data.get("status", "unknown"),
+                    "ahead_by": data.get("ahead_by", 0),
+                    "behind_by": data.get("behind_by", 0),
+                    "total_commits": data.get("total_commits", 0),
+                }
+            elif response.status_code == 404:
+                # Branch not found
+                return {"status": "not_found", "ahead_by": 0, "behind_by": 0, "total_commits": 0}
+            else:
+                error_detail = response.json().get("message", response.text)
+                logger.warning(f"Failed to compare branches: {error_detail}")
+                return {"status": "error", "ahead_by": 0, "behind_by": 0, "total_commits": 0}
+
     async def list_pull_requests(
         self,
         owner: str,
@@ -305,6 +347,7 @@ class GitHubService:
         state: str = "open",
         head: Optional[str] = None,
         base: Optional[str] = None,
+        token: str = None,
     ) -> list:
         """List pull requests with optional filters."""
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls"
@@ -317,7 +360,7 @@ class GitHubService:
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 url,
-                headers=self.headers,
+                headers=self._get_headers(token),
                 params=params,
                 timeout=30.0
             )
@@ -333,9 +376,17 @@ class GitHubService:
         repo: str,
         head: str,
         base: str = "main",
+        token: str = None,
     ) -> Optional[dict]:
         """Get an open PR for the head/base pair if it exists."""
-        prs = await self.list_pull_requests(owner=owner, repo=repo, state="open", head=head, base=base)
+        prs = await self.list_pull_requests(
+            owner=owner,
+            repo=repo,
+            state="open",
+            head=head,
+            base=base,
+            token=token,
+        )
         return prs[0] if prs else None
 
     async def create_pull_request(
@@ -346,9 +397,10 @@ class GitHubService:
         base: str = "main",
         title: str = None,
         body: str = None,
+        token: str = None,
     ) -> dict:
         """Create a pull request (or return existing open PR)."""
-        existing = await self.get_open_pull_request(owner, repo, head, base)
+        existing = await self.get_open_pull_request(owner, repo, head, base, token=token)
         if existing:
             return existing
 
@@ -363,7 +415,7 @@ class GitHubService:
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 url,
-                headers=self.headers,
+                headers=self._get_headers(token),
                 json=payload,
                 timeout=30.0
             )
@@ -372,7 +424,7 @@ class GitHubService:
                 return response.json()
             if response.status_code == 422:
                 # PR may already exist, re-check open PRs
-                existing = await self.get_open_pull_request(owner, repo, head, base)
+                existing = await self.get_open_pull_request(owner, repo, head, base, token=token)
                 if existing:
                     return existing
             error_detail = response.json().get("message", response.text)
@@ -384,6 +436,7 @@ class GitHubService:
         repo: str,
         pull_number: int,
         body: str = None,
+        token: str = None,
     ) -> dict:
         """Approve a pull request via review."""
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls/{pull_number}/reviews"
@@ -394,7 +447,7 @@ class GitHubService:
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 url,
-                headers=self.headers,
+                headers=self._get_headers(token),
                 json=payload,
                 timeout=30.0
             )
@@ -410,6 +463,7 @@ class GitHubService:
         repo: str,
         pull_number: int,
         merge_method: str = "merge",
+        token: str = None,
     ) -> dict:
         """Merge a pull request."""
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls/{pull_number}/merge"
@@ -418,7 +472,7 @@ class GitHubService:
         async with httpx.AsyncClient() as client:
             response = await client.put(
                 url,
-                headers=self.headers,
+                headers=self._get_headers(token),
                 json=payload,
                 timeout=30.0
             )

@@ -210,11 +210,16 @@ services:
       - ENTRA_CIAM_AUTHORITY=${ENTRA_CIAM_AUTHORITY:-}
       # Anthropic API key for AI tasks
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Abacus API key for Abacus CLI
+      - ABACUS_API_KEY=${ABACUS_API_KEY:-}
+      - ABACUS_CLI_ARGS=${ABACUS_CLI_ARGS:-exec}
+      - ABACUS_MODEL_FLAG=${ABACUS_MODEL_FLAG:---model}
       # SSH config for running Claude CLI on host (uses Pro subscription)
       - SSH_HOST=${SSH_HOST:-host.docker.internal}
       - SSH_USER=${SSH_USER:-}
       - SSH_CLAUDE_PATH=${SSH_CLAUDE_PATH:-~/.local/bin/claude}
       - SSH_CODEX_PATH=${SSH_CODEX_PATH:-~/.local/bin/codex}
+      - SSH_ABACUS_PATH=${SSH_ABACUS_PATH:-~/.local/bin/abacus}
       - LLM_PROVIDER=${LLM_PROVIDER:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       # Auto-scaling configuration

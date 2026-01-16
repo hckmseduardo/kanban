@@ -2,7 +2,7 @@
 
 ## Overview
 
-AI agents in the Kanban system are spawned on-demand when cards are moved between columns. Instead of running persistent agent containers, the orchestrator spawns Claude Code CLI (default) or Codex CLI (optional) subprocesses for each task, providing:
+AI agents in the Kanban system are spawned on-demand when cards are moved between columns. Instead of running persistent agent containers, the orchestrator spawns Claude Code CLI (default), Codex CLI, or Abacus CLI subprocesses for each task, providing:
 
 - **Cost efficiency**: No idle containers
 - **Full agentic capabilities**: Claude Code CLI or Codex CLI with tools
@@ -100,8 +100,9 @@ async def create_agent_task(
 
 ### Agent CLI Runners
 
-Located in `orchestrator/app/services/claude_code_runner.py` (Claude CLI) and
-`orchestrator/app/services/codex_cli_runner.py` (Codex CLI):
+Located in `orchestrator/app/services/claude_code_runner.py` (Claude CLI),
+`orchestrator/app/services/codex_cli_runner.py` (Codex CLI), and
+`orchestrator/app/services/abacus_cli_runner.py` (Abacus CLI):
 
 ```python
 class ClaudeCodeRunner:
@@ -189,13 +190,14 @@ Workspace: my-project
 ```bash
 # Claude Code CLI must be installed (default)
 # Codex CLI is optional when using llm_provider=codex-cli
+# Abacus CLI is optional when using llm_provider=abacus-cli
 
 # Project paths
 HOST_PROJECT_PATH=/path/to/kanban
 ```
 
-Per-column agent overrides can set `llm_provider` to `codex-cli` to switch the
-agent CLI for that column (defaults to `claude-cli`).
+Per-column agent overrides can set `llm_provider` to `codex-cli` or `abacus-cli`
+to switch the agent CLI for that column (defaults to `claude-cli`).
 
 ### Agent Timeouts
 

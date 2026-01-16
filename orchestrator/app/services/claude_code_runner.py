@@ -166,6 +166,7 @@ class ClaudeCodeRunner:
         timeout: int = None,
         system_prompt: str = None,
         session_id: str = None,
+        mcp_config_path: str = None,
     ) -> AgentResult:
         """
         Execute Claude Code CLI on host via SSH.
@@ -181,6 +182,7 @@ class ClaudeCodeRunner:
             timeout: Override timeout in seconds
             system_prompt: Optional system prompt override
             session_id: Optional Claude session ID to reuse across runs
+            mcp_config_path: Path to MCP config JSON file (for QA agent with Playwright)
 
         Returns:
             AgentResult with success status and output
@@ -221,6 +223,9 @@ class ClaudeCodeRunner:
 
         if session_id:
             remote_cmd_parts.extend(["--session-id", session_id])
+
+        if mcp_config_path:
+            remote_cmd_parts.extend(["--mcp-config", mcp_config_path])
 
         remote_cmd_parts.append("--dangerously-skip-permissions")
 
